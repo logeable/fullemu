@@ -5,7 +5,7 @@
 
 mod arch;
 
-use fullemu::boot::fdt::{FdtHeader, FdtStructureEvent, FdtStructureWalker};
+use fullemu::boot::fdt::{FdtBlob, FdtHeader, FdtStructureEvent};
 
 /// RISC-V 汇编入口完成栈和 `.bss` 初始化后调用此 Rust 入口。
 /// OpenSBI 通过 `a0` 传入 hart ID，通过 `a1` 传入 DTB 地址；
@@ -48,12 +48,13 @@ pub extern "C" fn kernel_main(hart_id: usize, device_tree: usize) -> ! {
     let fdt_blob = unsafe {
         core::slice::from_raw_parts(device_tree as *const u8, fdt_header.total_size as usize)
     };
-    let mut structure = match FdtStructureWalker::new(fdt_blob, &fdt_header) {
-        Ok(structure) => structure,
-        Err(error) => report_fdt_structure_error(error),
+    let fdt = match FdtBlob::parse(fdt_blob) {
+        Ok(fdt) => fdt,
+        Err(error) => report_fdt_blob_error(error),
     };
+    let mut structure = fdt.structure();
 
-    arch::riscv64::console::write_str("FDT 顶层节点：\n");
+    arch::riscv64::console::write_str("FDT 结构摘要：\n");
     loop {
         match structure.next_event() {
             Ok(Some(FdtStructureEvent::BeginNode { name, depth })) => {
@@ -64,14 +65,14 @@ pub extern "C" fn kernel_main(hart_id: usize, device_tree: usize) -> ! {
                 arch::riscv64::console::write_str(name);
                 arch::riscv64::console::write_str("\n");
             }
-            Ok(Some(FdtStructureEvent::Property { name, value_size, depth })) => {
+            Ok(Some(FdtStructureEvent::Property { name, value, depth })) => {
                 for _ in 0..depth {
                     arch::riscv64::console::write_str("  ");
                 }
                 arch::riscv64::console::write_str("  ");
                 arch::riscv64::console::write_str(name);
                 arch::riscv64::console::write_str(": ");
-                arch::riscv64::console::write_hex(value_size);
+                arch::riscv64::console::write_hex(value.len());
                 arch::riscv64::console::write_str("\n");
             }
             Ok(Some(FdtStructureEvent::End)) => break,
@@ -104,6 +105,13 @@ fn report_fdt_structure_error(error: fullemu::boot::fdt::FdtStructureError) -> !
     arch::riscv64::console::write_str(error.description());
     arch::riscv64::console::write_str("\n");
     panic!("FDT 结构块无效");
+}
+
+fn report_fdt_blob_error(error: fullemu::boot::fdt::FdtBlobError) -> ! {
+    arch::riscv64::console::write_str("fullemu: FDT 文件无效：");
+    arch::riscv64::console::write_str(error.description());
+    arch::riscv64::console::write_str("\n");
+    panic!("FDT 文件无效");
 }
 
 /// 报告 S-mode 陷入时保存的 CSR，并停机，不尝试恢复被打断的执行流。
