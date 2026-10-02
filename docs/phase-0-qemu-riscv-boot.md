@@ -87,11 +87,11 @@ make run QEMU=/path/to/qemu-system-riscv64
 4. 汇编入口保留 `a0`/`a1`，尾调用 `kernel_main(hart_id, device_tree)`。
 5. Rust 代码向 UART 输出状态，然后通过 `wfi` 保持内核运行。没有启用中断、调度器或关机服务。
 
-## 当前不支持
+## 第 0 阶段未覆盖的功能
 
 - 多 hart 初始化、同步和调度。
 - FDT 解析及设备自动发现；UART 地址只对当前 `virt` 平台成立。
-- 异常/中断处理、内存管理、堆分配、任务、系统调用、文件系统和 shell。
+- 一般异常恢复、异常返回、中断处理、内存管理、堆分配、任务、系统调用、文件系统和 shell。致命异常报告见[第 1 阶段](phase-1-fatal-traps.md)。
 - 从真实开发板启动，或任何 Linux ABI 行为。
 - 基于 UART 接收输入；当前只有输出路径。
 

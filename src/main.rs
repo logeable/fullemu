@@ -17,11 +17,43 @@ pub extern "C" fn kernel_main(hart_id: usize, device_tree: usize) -> ! {
     arch::riscv64::console::write_hex(device_tree);
     arch::riscv64::console::write_str("\n");
 
-    // 当前尚无调度器或关机服务。让启动 hart 保持运行，避免反复轮询设备
+    #[cfg(feature = "trap-demo")]
+    {
+        arch::riscv64::console::write_str("trap-demo: 即将执行 ebreak\n");
+        // 安全性：此功能有意触发断点异常；已安装的致命异常入口会报告状态并停机，
+        // 不会尝试从异常指令返回。
+        unsafe { core::arch::asm!("ebreak", options(noreturn)) };
+    }
+
+    // 当前尚无调度器或关机服务。正常启动时让 hart 保持运行，避免反复轮询设备
     // 或持续占用整个 CPU 核心。
+    #[cfg(not(feature = "trap-demo"))]
     loop {
         // 安全性：WFI 只让当前 hart 等待中断，不访问内存，也不改变特权级。
         // 本阶段没有启用中断，因此可由宿主机直接停止 QEMU。
+        unsafe { core::arch::asm!("wfi", options(nomem, nostack)) };
+    }
+}
+
+/// 报告 S-mode 陷入时保存的 CSR，并停机，不尝试恢复被打断的执行流。
+/// 汇编入口必须在有效的内核栈和已初始化 `gp` 上调用此函数；它不会返回。
+#[no_mangle]
+pub extern "C" fn supervisor_trap_handler(
+    cause: usize,
+    exception_pc: usize,
+    trap_value: usize,
+) -> ! {
+    arch::riscv64::console::write_str("\nfullemu: fatal S-mode trap\n");
+    arch::riscv64::console::write_str("scause: ");
+    arch::riscv64::console::write_hex(cause);
+    arch::riscv64::console::write_str("\nsepc:   ");
+    arch::riscv64::console::write_hex(exception_pc);
+    arch::riscv64::console::write_str("\nstval:  ");
+    arch::riscv64::console::write_hex(trap_value);
+    arch::riscv64::console::write_str("\n");
+
+    loop {
+        // 安全性：陷入被视为致命错误；WFI 让 hart 停机等待，不访问内存或改变特权级。
         unsafe { core::arch::asm!("wfi", options(nomem, nostack)) };
     }
 }

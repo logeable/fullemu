@@ -1,6 +1,6 @@
 # fullemu
 
-fullemu 是一个以可读性和教学为优先的 Rust 操作系统项目。当前仓库实现第一个可运行里程碑：从 QEMU RISC-V `virt` 平台的 OpenSBI 固件进入内核，并通过串口打印启动信息。
+fullemu 是一个以可读性和教学为优先的 Rust 操作系统项目。当前实现从 QEMU RISC-V `virt` 平台启动、通过串口输出诊断信息，并捕获致命的 S-mode 陷入。
 
 ## 快速开始
 
@@ -19,4 +19,5 @@ make run
 ## 代码与阶段说明
 
 - [第 0 阶段：QEMU RISC-V 启动与串口](docs/phase-0-qemu-riscv-boot.md) 记录启动契约、内存布局、运行命令、验证方式和当前限制。
+- [第 1 阶段：致命异常报告](docs/phase-1-fatal-traps.md) 说明 S-mode 异常入口和 `make trap-demo` 验证方式。
 - [项目原则与代码规范](docs/development-principles.md) 是设计和协作规范。

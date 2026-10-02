@@ -6,6 +6,10 @@ publish = false
 
 [dependencies]
 
+[features]
+# 触发一次断点异常，用于验证内核异常报告路径。
+trap-demo = []
+
 [profile.dev]
 panic = "abort"
 

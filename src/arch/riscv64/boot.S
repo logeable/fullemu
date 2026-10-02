@@ -20,6 +20,10 @@ _start:
     la      gp, __global_pointer$
     .option pop
 
+    /* 在进入 Rust 前安装 S-mode 陷入入口。 */
+    la      t0, supervisor_trap_entry
+    csrw    stvec, t0
+
     /* 显式清零 .bss，确保 Rust 入口不依赖加载器对未初始化区域的处理方式。 */
     la      t0, __bss_start
     la      t1, __bss_end
