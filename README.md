@@ -20,4 +20,5 @@ make run
 
 - [第 0 阶段：QEMU RISC-V 启动与串口](docs/phase-0-qemu-riscv-boot.md) 记录启动契约、内存布局、运行命令、验证方式和当前限制。
 - [第 1 阶段：致命异常报告](docs/phase-1-fatal-traps.md) 说明 S-mode 异常入口和 `make trap-demo` 验证方式。
+- [第 2 阶段：FDT 头部校验](docs/phase-2-fdt-header.md) 说明如何验证固件传入的设备树头部，`make test-fdt` 可运行解析器测试。
 - [项目原则与代码规范](docs/development-principles.md) 是设计和协作规范。

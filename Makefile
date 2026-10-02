@@ -1,9 +1,10 @@
 CARGO ?= cargo
 QEMU ?= qemu-system-riscv64
 TARGET := riscv64gc-unknown-none-elf
+HOST_TARGET := $(shell rustc -vV | sed -n 's/^host: //p')
 KERNEL := target/$(TARGET)/release/fullemu
 
-.PHONY: all build run trap-demo clean fmt fmt-check
+.PHONY: all build run trap-demo test-fdt clean fmt fmt-check
 
 all: build
 
@@ -15,6 +16,9 @@ run: build
 
 trap-demo:
 	QEMU="$(QEMU)" $(CARGO) run --release --target $(TARGET) --features trap-demo
+
+test-fdt:
+	$(CARGO) test --lib --target $(HOST_TARGET)
 
 clean:
 	$(CARGO) clean

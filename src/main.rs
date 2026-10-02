@@ -5,6 +5,8 @@
 
 mod arch;
 
+use fullemu::boot::fdt::FdtHeader;
+
 /// RISC-V 汇编入口完成栈和 `.bss` 初始化后调用此 Rust 入口。
 /// OpenSBI 通过 `a0` 传入 hart ID，通过 `a1` 传入 DTB 地址；
 /// 本阶段只运行一个 hart，并打印固件交接信息。
@@ -15,6 +17,31 @@ pub extern "C" fn kernel_main(hart_id: usize, device_tree: usize) -> ! {
     arch::riscv64::console::write_hex(hart_id);
     arch::riscv64::console::write_str("\nDTB:  ");
     arch::riscv64::console::write_hex(device_tree);
+    arch::riscv64::console::write_str("\n");
+
+    // 安全性：OpenSBI 启动约定保证 a1 指向可读的 FDT；解析器只读取固定的 40 字节头部。
+    let fdt_header = match unsafe { FdtHeader::read_from_ptr(device_tree as *const u8) } {
+        Ok(header) => header,
+        Err(error) => {
+            arch::riscv64::console::write_str("fullemu: FDT 头部无效：");
+            arch::riscv64::console::write_str(error.description());
+            arch::riscv64::console::write_str("\n");
+            panic!("FDT 头部无效");
+        }
+    };
+
+    arch::riscv64::console::write_str("FDT version: ");
+    arch::riscv64::console::write_hex(fdt_header.version as usize);
+    arch::riscv64::console::write_str("\nFDT total size: ");
+    arch::riscv64::console::write_hex(fdt_header.total_size as usize);
+    arch::riscv64::console::write_str("\nFDT structure: offset ");
+    arch::riscv64::console::write_hex(fdt_header.structure_offset as usize);
+    arch::riscv64::console::write_str(", size ");
+    arch::riscv64::console::write_hex(fdt_header.structure_size as usize);
+    arch::riscv64::console::write_str("\nFDT strings: offset ");
+    arch::riscv64::console::write_hex(fdt_header.strings_offset as usize);
+    arch::riscv64::console::write_str(", size ");
+    arch::riscv64::console::write_hex(fdt_header.strings_size as usize);
     arch::riscv64::console::write_str("\n");
 
     #[cfg(feature = "trap-demo")]
