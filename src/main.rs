@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 
-//! 第一个启动阶段：从 OpenSBI 进入 Rust，并通过 QEMU 串口报告启动信息。
+//! 从 OpenSBI 进入 Rust，通过 QEMU 串口报告启动信息并回显输入字节。
 
 mod arch;
 
@@ -108,21 +108,11 @@ pub extern "C" fn kernel_main(hart_id: usize, device_tree: usize) -> ! {
         }
     }
 
-    #[cfg(feature = "trap-demo")]
-    {
-        println!("trap-demo: 即将执行 ebreak");
-        // 安全性：此功能有意触发断点异常；已安装的致命异常入口会报告状态并停机，
-        // 不会尝试从异常指令返回。
-        unsafe { core::arch::asm!("ebreak", options(noreturn)) };
-    }
-
-    // 当前尚无调度器或关机服务。正常启动时让 hart 保持运行，避免反复轮询设备
-    // 或持续占用整个 CPU 核心。
-    #[cfg(not(feature = "trap-demo"))]
+    // 当前尚无调度器或 UART 中断。正常启动时由当前 hart 轮询 UART，等待用户输入。
+    println!("串口字节回显已就绪，请输入字符：");
     loop {
-        // 安全性：WFI 只让当前 hart 等待中断，不访问内存，也不改变特权级。
-        // 本阶段没有启用中断，因此可由宿主机直接停止 QEMU。
-        unsafe { core::arch::asm!("wfi", options(nomem, nostack)) };
+        let byte = arch::riscv64::console::read_byte();
+        arch::riscv64::console::write_byte(byte);
     }
 }
 

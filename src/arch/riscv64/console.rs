@@ -1,12 +1,13 @@
-//! 通过轮询方式向 QEMU virt 的第一个 NS16550 兼容 UART 输出内容。
+//! 通过轮询方式访问 QEMU virt 的第一个 NS16550 兼容 UART。
 //!
-//! 本阶段暂时固定 UART 地址。实现设备树解析后，必须从 OpenSBI 传入的 FDT
-//! 中发现平台设备，不能继续依赖此常量。
+//! 当前只适配 QEMU `virt`，因此暂时固定 UART 地址。支持其他平台前，必须从
+//! OpenSBI 传入的 FDT 中发现控制台设备，不能继续依赖此常量。
 
 use core::fmt;
 
 const UART_BASE: usize = 0x1000_0000;
 const UART_LINE_STATUS: usize = UART_BASE + 5;
+const RECEIVER_DATA_READY: u8 = 1 << 0;
 const TRANSMITTER_EMPTY: u8 = 1 << 5;
 
 /// 可供 `core::fmt` 使用的串口写入器。
@@ -28,10 +29,30 @@ pub fn write_fmt(arguments: fmt::Arguments<'_>) {
     let _ = fmt::Write::write_fmt(&mut UartWriter, arguments);
 }
 
-fn write_byte(byte: u8) {
+/// 阻塞等待并读取一个串口输入字节。
+///
+/// 当前通过轮询接收状态寄存器等待数据，不依赖中断或调度器。
+pub fn read_byte() -> u8 {
+    loop {
+        // 安全性：UART 状态寄存器和接收数据寄存器位于 QEMU `virt` 约定的 MMIO 地址；
+        // 只有状态寄存器报告接收数据就绪后，才读取接收数据寄存器。
+        unsafe {
+            if core::ptr::read_volatile(UART_LINE_STATUS as *const u8) & RECEIVER_DATA_READY != 0 {
+                return core::ptr::read_volatile(UART_BASE as *const u8);
+            }
+        }
+        core::hint::spin_loop();
+    }
+}
+
+/// 通过轮询方式输出一个字节；换行字节会转换为终端常用的 CRLF。
+pub fn write_byte(byte: u8) {
     // 串口终端使用 CRLF 作为换行符。
     if byte == b'\n' {
         write_raw_byte(b'\r');
+    }
+    if byte == b'\r' {
+        write_byte(b'\n');
     }
     write_raw_byte(byte);
 }
