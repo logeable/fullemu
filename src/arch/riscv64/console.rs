@@ -3,28 +3,29 @@
 //! 本阶段暂时固定 UART 地址。实现设备树解析后，必须从 OpenSBI 传入的 FDT
 //! 中发现平台设备，不能继续依赖此常量。
 
+use core::fmt;
+
 const UART_BASE: usize = 0x1000_0000;
 const UART_LINE_STATUS: usize = UART_BASE + 5;
 const TRANSMITTER_EMPTY: u8 = 1 << 5;
 
-/// 通过轮询方式向 QEMU 串口输出 UTF-8 字符串。
-pub fn write_str(message: &str) {
-    for byte in message.bytes() {
-        write_byte(byte);
+/// 可供 `core::fmt` 使用的串口写入器。
+struct UartWriter;
+
+impl fmt::Write for UartWriter {
+    /// 通过轮询方式向 QEMU 串口输出 UTF-8 字符串。
+    fn write_str(&mut self, message: &str) -> fmt::Result {
+        for byte in message.bytes() {
+            write_byte(byte);
+        }
+        Ok(())
     }
 }
 
-/// 将机器字长的数值输出为十六进制，不依赖堆分配或用户态格式化运行时。
-pub fn write_hex(value: usize) {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    write_str("0x");
-
-    let mut shift = usize::BITS as usize;
-    while shift != 0 {
-        shift -= 4;
-        let digit = ((value >> shift) & 0xf) as usize;
-        write_byte(DIGITS[digit]);
-    }
+/// 使用 Rust 核心库的格式化能力输出内容，不申请堆内存。
+pub fn write_fmt(arguments: fmt::Arguments<'_>) {
+    // 安全性：格式化写入器只通过现有 UART MMIO 输出字节，不解引用调用方数据指针。
+    let _ = fmt::Write::write_fmt(&mut UartWriter, arguments);
 }
 
 fn write_byte(byte: u8) {
