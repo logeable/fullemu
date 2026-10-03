@@ -6,6 +6,7 @@
 mod arch;
 
 use fullemu::boot::fdt::{FdtBlob, FdtHeader, FdtStructureEvent};
+use fullemu::boot::info::BootInfo;
 
 /// RISC-V 汇编入口完成栈和 `.bss` 初始化后调用此 Rust 入口。
 /// OpenSBI 通过 `a0` 传入 hart ID，通过 `a1` 传入 DTB 地址；
@@ -52,6 +53,29 @@ pub extern "C" fn kernel_main(hart_id: usize, device_tree: usize) -> ! {
         Ok(fdt) => fdt,
         Err(error) => report_fdt_blob_error(error),
     };
+    let boot_info = match BootInfo::parse(&fdt) {
+        Ok(boot_info) => boot_info,
+        Err(error) => report_boot_info_error(error),
+    };
+
+    arch::riscv64::console::write_str("物理内存范围：\n");
+    for region in boot_info.memory_regions() {
+        arch::riscv64::console::write_str("  起始地址：");
+        arch::riscv64::console::write_hex(region.start as usize);
+        arch::riscv64::console::write_str("，长度：");
+        arch::riscv64::console::write_hex(region.size as usize);
+        arch::riscv64::console::write_str("\n");
+    }
+
+    arch::riscv64::console::write_str("固件保留范围：\n");
+    for region in boot_info.reservations() {
+        arch::riscv64::console::write_str("  起始地址：");
+        arch::riscv64::console::write_hex(region.address as usize);
+        arch::riscv64::console::write_str("，长度：");
+        arch::riscv64::console::write_hex(region.size as usize);
+        arch::riscv64::console::write_str("\n");
+    }
+
     let mut structure = fdt.structure();
 
     arch::riscv64::console::write_str("FDT 结构摘要：\n");
@@ -112,6 +136,13 @@ fn report_fdt_blob_error(error: fullemu::boot::fdt::FdtBlobError) -> ! {
     arch::riscv64::console::write_str(error.description());
     arch::riscv64::console::write_str("\n");
     panic!("FDT 文件无效");
+}
+
+fn report_boot_info_error(error: fullemu::boot::info::BootInfoError) -> ! {
+    arch::riscv64::console::write_str("fullemu: 启动信息无效：");
+    arch::riscv64::console::write_str(error.description());
+    arch::riscv64::console::write_str("\n");
+    panic!("启动信息无效");
 }
 
 /// 报告 S-mode 陷入时保存的 CSR，并停机，不尝试恢复被打断的执行流。

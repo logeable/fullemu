@@ -317,6 +317,7 @@ impl<'a> FdtBlob<'a> {
 }
 
 /// 已通过 DTB 校验的内存保留范围迭代器。
+#[derive(Clone)]
 pub struct FdtMemoryReservations<'a> {
     bytes: &'a [u8],
     cursor: usize,
