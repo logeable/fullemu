@@ -8,7 +8,7 @@ mod arch;
 /// 使用当前平台的串口输出 Rust 格式化内容。
 macro_rules! print {
     ($($argument:tt)*) => {{
-        arch::riscv64::console::write_fmt(core::format_args!($($argument)*));
+        $crate::arch::riscv64::console::write_fmt(core::format_args!($($argument)*));
     }};
 }
 
@@ -22,6 +22,8 @@ macro_rules! println {
         print!("\n");
     }};
 }
+
+mod experiment;
 
 use fullemu::boot::fdt::{FdtBlob, FdtHeader, FdtStructureEvent};
 use fullemu::boot::info::BootInfo;
@@ -108,12 +110,8 @@ pub extern "C" fn kernel_main(hart_id: usize, device_tree: usize) -> ! {
         }
     }
 
-    // 当前尚无调度器或 UART 中断。正常启动时由当前 hart 轮询 UART，等待用户输入。
-    println!("串口字节回显已就绪，请输入字符：");
-    loop {
-        let byte = arch::riscv64::console::read_byte();
-        arch::riscv64::console::write_byte(byte);
-    }
+    // 当前尚无调度器；对照实验会让任务 A 独占当前 hart，任务 B 因而无法启动。
+    experiment::cpu_virtualization::run_without_scheduling();
 }
 
 fn report_fdt_structure_error(error: fullemu::boot::fdt::FdtStructureError) -> ! {

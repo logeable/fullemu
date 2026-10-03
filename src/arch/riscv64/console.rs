@@ -7,6 +7,8 @@ use core::fmt;
 
 const UART_BASE: usize = 0x1000_0000;
 const UART_LINE_STATUS: usize = UART_BASE + 5;
+// 当前 CPU 饥饿基线不读取串口；该状态位供后续交互实验复用。
+#[allow(dead_code)]
 const RECEIVER_DATA_READY: u8 = 1 << 0;
 const TRANSMITTER_EMPTY: u8 = 1 << 5;
 
@@ -32,6 +34,8 @@ pub fn write_fmt(arguments: fmt::Arguments<'_>) {
 /// 阻塞等待并读取一个串口输入字节。
 ///
 /// 当前通过轮询接收状态寄存器等待数据，不依赖中断或调度器。
+// 当前 CPU 饥饿基线不处理输入，保留此接口供后续交互实验使用。
+#[allow(dead_code)]
 pub fn read_byte() -> u8 {
     loop {
         // 安全性：UART 状态寄存器和接收数据寄存器位于 QEMU `virt` 约定的 MMIO 地址；
