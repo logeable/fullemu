@@ -13,6 +13,9 @@ _start:
     /* 后续实现 SMP 时会替换当前的单 hart 临时策略。 */
     bnez    a0, .Lpark
 
+    /* 当前实验使用显式让出；关闭 S-mode 中断，避免调度状态被异步打断。 */
+    csrci   sstatus, 2
+
     /* 栈和小数据区基址有效后，才能运行 Rust 代码。 */
     la      sp, boot_stack_top
     .option push

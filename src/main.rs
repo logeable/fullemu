@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 
-//! 从 OpenSBI 进入 Rust，通过 QEMU 串口报告启动信息并回显输入字节。
+//! 从 OpenSBI 进入 Rust，通过 QEMU 串口报告启动信息并运行协作式切换实验。
 
 mod arch;
 
@@ -110,8 +110,7 @@ pub extern "C" fn kernel_main(hart_id: usize, device_tree: usize) -> ! {
         }
     }
 
-    // 当前尚无调度器；对照实验会让任务 A 独占当前 hart，任务 B 因而无法启动。
-    experiment::cpu_virtualization::run_without_scheduling();
+    experiment::cpu_virtualization::run_cooperatively();
 }
 
 fn report_fdt_structure_error(error: fullemu::boot::fdt::FdtStructureError) -> ! {
