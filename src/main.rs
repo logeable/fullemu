@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 
-//! 从 OpenSBI 进入 Rust，通过 QEMU 串口报告启动信息并运行协作式切换实验。
+//! 从 OpenSBI 进入 Rust，通过 QEMU 串口报告启动信息并运行定时器抢占实验。
 
 mod arch;
 
@@ -110,7 +110,7 @@ pub extern "C" fn kernel_main(hart_id: usize, device_tree: usize) -> ! {
         }
     }
 
-    experiment::cpu_virtualization::run_cooperatively();
+    experiment::cpu_virtualization::run_preemptively();
 }
 
 fn report_fdt_structure_error(error: fullemu::boot::fdt::FdtStructureError) -> ! {
@@ -126,25 +126,6 @@ fn report_fdt_blob_error(error: fullemu::boot::fdt::FdtBlobError) -> ! {
 fn report_boot_info_error(error: fullemu::boot::info::BootInfoError) -> ! {
     println!("fullemu: 启动信息无效：{}", error.description());
     panic!("启动信息无效");
-}
-
-/// 报告 S-mode 陷入时保存的 CSR，并停机，不尝试恢复被打断的执行流。
-/// 汇编入口必须在有效的内核栈和已初始化 `gp` 上调用此函数；它不会返回。
-#[no_mangle]
-pub extern "C" fn supervisor_trap_handler(
-    cause: usize,
-    exception_pc: usize,
-    trap_value: usize,
-) -> ! {
-    println!("\nfullemu: fatal S-mode trap");
-    println!("scause: {cause:#018x}");
-    println!("sepc:   {exception_pc:#018x}");
-    println!("stval:  {trap_value:#018x}");
-
-    loop {
-        // 安全性：陷入被视为致命错误；WFI 让 hart 停机等待，不访问内存或改变特权级。
-        unsafe { core::arch::asm!("wfi", options(nomem, nostack)) };
-    }
 }
 
 #[panic_handler]

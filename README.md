@@ -1,6 +1,6 @@
 # fullemu
 
-fullemu 是一个以可读性和教学为优先的 Rust 操作系统项目。当前实现从 QEMU RISC-V `virt` 平台启动并运行协作式 CPU 调度实验，观察两个主动让出的内核任务如何共享单个 hart。
+fullemu 是一个以可读性和教学为优先的 Rust 操作系统项目。当前实现从 QEMU RISC-V `virt` 平台启动并运行定时器抢占实验：任务 A 不主动让出 CPU，S-mode 定时器仍会让任务 B 获得运行机会。
 
 ## 快速开始
 
@@ -12,7 +12,7 @@ make build
 make run
 ```
 
-启动后串口应显示 `fullemu: booted on QEMU virt (RISC-V)`、hart ID 和 DTB 地址，随后交替显示任务 A、任务 B 的运行计数。按 `Ctrl-C` 结束 QEMU。
+启动后串口应显示 `fullemu: booted on QEMU virt (RISC-V)`、hart ID 和 DTB 地址，随后显示定时器 tick 和 A、B 的进度。按 `Ctrl-C` 结束 QEMU。
 
 也可以直接运行 `cargo run --release`；Cargo 会调用 `.cargo/config.toml` 配置的 QEMU runner。若 QEMU 可执行文件不在 PATH，可运行 `make run QEMU=/path/to/qemu-system-riscv64`。
 
@@ -27,4 +27,5 @@ make run
 - [第 6 阶段：UART 单字节输入与回显](docs/phase-6-uart-echo.md) 记录轮询接收、回显行为和验证方法。
 - [第 7 阶段：CPU 虚拟化的饥饿对照](docs/phase-7-cpu-starvation-baseline.md) 记录没有调度器时的单 hart 对照实验。
 - [第 8 阶段：协作式上下文切换](docs/phase-8-cooperative-context-switch.md) 记录静态任务栈、RISC-V 上下文保存和显式让出。
+- [第 9 阶段：定时器抢占](docs/phase-9-timer-preemption.md) 记录完整陷入帧、SBI 定时器和不主动让出的任务如何被轮转。
 - [项目原则与代码规范](docs/development-principles.md) 是设计和协作规范。
