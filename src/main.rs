@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 
-//! 从 OpenSBI 进入 Rust，通过 QEMU 串口报告启动信息并运行内核调度状态破坏实验。
+//! 从 OpenSBI 进入 Rust，通过 QEMU 串口报告启动信息并运行 U-mode 特权边界演示。
 
 mod arch;
 
@@ -23,7 +23,7 @@ macro_rules! println {
     }};
 }
 
-mod experiment;
+mod kernel;
 
 use fullemu::boot::fdt::{FdtBlob, FdtHeader, FdtStructureEvent};
 use fullemu::boot::info::BootInfo;
@@ -110,7 +110,7 @@ pub extern "C" fn kernel_main(hart_id: usize, device_tree: usize) -> ! {
         }
     }
 
-    experiment::cpu_virtualization::run_scheduler_corruption_experiment();
+    kernel::user_mode::run_privilege_boundary_demonstration();
 }
 
 fn report_fdt_structure_error(error: fullemu::boot::fdt::FdtStructureError) -> ! {

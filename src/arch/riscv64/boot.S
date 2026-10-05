@@ -18,6 +18,8 @@ _start:
 
     /* 栈和小数据区基址有效后，才能运行 Rust 代码。 */
     la      sp, boot_stack_top
+    /* S-mode 运行期间 sscratch 为零，陷入入口据此识别来自 S-mode 的陷入。 */
+    csrw    sscratch, zero
     .option push
     .option norelax
     la      gp, __global_pointer$
