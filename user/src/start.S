@@ -1,4 +1,4 @@
-/* 独立用户程序入口；a0 指向三个 RV64 字长字段组成的内核内存探针。 */
+/* 独立用户程序入口。 */
     .section .text.entry
     .align 2
     .globl _start
@@ -10,15 +10,10 @@ _start:
     la      gp, __global_pointer$
     .option pop
 
-    /* a0 是当前实验传入的探针地址；用户主体完成探针访问和 write 系统调用。 */
+    /* 用户主体通过系统调用输出文本并结束当前任务，不应返回到此处。 */
     call    user_main
 
-    /* 用寄存器标记确认系统调用返回后仍在用户程序中继续执行。 */
-    li      a1, 0x55534552
-
-    /* 故意访问 S-mode CSR；预期产生非法指令陷入。 */
-    csrr    zero, sstatus
-
+    /* 若用户入口意外返回，则停留在用户态，避免执行未定义的后续逻辑。 */
 .Lstop:
     j       .Lstop
 

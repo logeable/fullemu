@@ -3,31 +3,14 @@
 use crate::arch::riscv64::trap::{ExceptionCause, TrapCause, TrapFrame};
 
 const STACK_SIZE: usize = 16 * 1024;
-const INITIAL_KERNEL_VALUE: usize = 0x4B45_524E;
-const USER_PROGRAM_MARKER: usize = 0x5553_4552;
 
 #[repr(align(16))]
 struct TaskStack([u8; STACK_SIZE]);
 
-#[repr(C)]
-/// 与用户程序入口约定的探针布局：三个 RV64 字长字段依次位于偏移 0、8、16。
-struct KernelMemoryProbe {
-    private_value: usize,
-    user_read_value: usize,
-    user_written_value: usize,
-    write_result: isize,
-}
-
-static mut KERNEL_MEMORY_PROBE: KernelMemoryProbe = KernelMemoryProbe {
-    private_value: INITIAL_KERNEL_VALUE,
-    user_read_value: 0,
-    user_written_value: 0,
-    write_result: 0,
-};
 static mut USER_STACK: TaskStack = TaskStack([0; STACK_SIZE]);
 static mut KERNEL_TRAP_STACK: TaskStack = TaskStack([0; STACK_SIZE]);
 
-/// 加载独立用户程序，进入 U-mode 并观察它访问内核内存的结果。
+/// 加载独立用户程序，进入 U-mode 并观察系统调用与特权陷入。
 pub fn run_privilege_boundary_demonstration() -> ! {
     println!("\nU-mode 实验：独立用户程序加载与特权边界");
     println!("当前 satp 使用 BARE；加载的程序仍未与内核内存隔离");
@@ -61,8 +44,7 @@ pub fn run_privilege_boundary_demonstration() -> ! {
 
     let user_stack_top = stack_top(core::ptr::addr_of_mut!(USER_STACK));
     let kernel_stack_top = stack_top(core::ptr::addr_of_mut!(KERNEL_TRAP_STACK));
-    let kernel_probe = core::ptr::addr_of_mut!(KERNEL_MEMORY_PROBE) as usize;
-    let initial_frame = TrapFrame::for_user_entry(program.entry, user_stack_top, kernel_probe);
+    let initial_frame = TrapFrame::for_user_entry(program.entry, user_stack_top);
 
     // 安全性：内核陷入栈是静态分配且按 16 字节对齐；U-mode 陷入入口会切换到该栈保存现场。
     unsafe { crate::arch::riscv64::trap::set_user_kernel_stack(kernel_stack_top) };
@@ -96,27 +78,26 @@ pub extern "C" fn supervisor_trap_handler(frame: *mut TrapFrame) -> *mut TrapFra
             frame.registers[11],
             frame.registers[12],
         ];
-        frame.registers[10] = super::syscall::dispatch(syscall_number, arguments) as usize;
-        // RISC-V 的 ecall 固定为 32 位指令；返回时从其后一条用户指令继续执行。
-        frame.exception_pc += 4;
+        match super::syscall::dispatch(syscall_number, arguments) {
+            super::syscall::SyscallOutcome::Return(result) => {
+                frame.registers[10] = result as usize;
+                // RISC-V 的 ecall 固定为 32 位指令；返回时从其后一条用户指令继续执行。
+                frame.exception_pc += 4;
 
-        // 安全性：U-mode 陷入帧位于专用内核栈顶下方；sscratch 必须指回该栈顶才能安全处理下一次陷入。
-        let kernel_stack_top = frame as *mut TrapFrame as usize + core::mem::size_of::<TrapFrame>();
-        unsafe { crate::arch::riscv64::trap::set_user_kernel_stack(kernel_stack_top) };
+                // 安全性：U-mode 陷入帧位于专用内核栈顶下方；sscratch 必须指回该栈顶才能安全处理下一次陷入。
+                let kernel_stack_top =
+                    frame as *mut TrapFrame as usize + core::mem::size_of::<TrapFrame>();
+                unsafe { crate::arch::riscv64::trap::set_user_kernel_stack(kernel_stack_top) };
 
-        return frame as *mut TrapFrame;
+                return frame as *mut TrapFrame;
+            }
+            super::syscall::SyscallOutcome::Exit(status) => {
+                println!("用户任务调用 Linux RISC-V exit 结束，状态码：{status}");
+                println!("当前尚无其他可调度任务；内核停止该任务并进入等待状态");
+                stop_forever();
+            }
+        }
     }
-
-    // 安全性：陷入期间 SIE 已关闭，U-mode 程序暂停；探针是内核静态数据且不会被其他任务并发修改。
-    let probe = core::ptr::addr_of!(KERNEL_MEMORY_PROBE);
-    let (kernel_value, user_read_value, user_written_value, write_result) = unsafe {
-        (
-            core::ptr::read_volatile(core::ptr::addr_of!((*probe).private_value)),
-            core::ptr::read_volatile(core::ptr::addr_of!((*probe).user_read_value)),
-            core::ptr::read_volatile(core::ptr::addr_of!((*probe).user_written_value)),
-            core::ptr::read_volatile(core::ptr::addr_of!((*probe).write_result)),
-        )
-    };
 
     println!(
         "U-mode 陷入来源：{}",
@@ -126,30 +107,16 @@ pub extern "C" fn supervisor_trap_handler(frame: *mut TrapFrame) -> *mut TrapFra
             "S-mode"
         }
     );
-    println!("独立用户程序寄存器标记：{:#018x}", frame.registers[11]);
-    println!("U-mode 读到的内核数据：{user_read_value:#018x}");
-    println!("U-mode 写入后的内核数据：{user_written_value:#018x}");
-    println!("write 系统调用返回值：{write_result}");
     println!("陷入原因：{cause:?}");
     println!("原始 scause: {:#018x}", frame.cause);
     println!("sepc:   {:#018x}", frame.exception_pc);
     println!("stval:  {:#018x}", frame.trap_value);
 
     match cause {
-        TrapCause::Exception(ExceptionCause::IllegalInstruction)
-            if frame.registers[11] == USER_PROGRAM_MARKER
-                && kernel_value == USER_PROGRAM_MARKER
-                && user_read_value == INITIAL_KERNEL_VALUE
-                && user_written_value == USER_PROGRAM_MARKER
-                && write_result > 0 =>
-        {
-            println!(
-                "结论：独立用户程序通过 Linux RISC-V write syscall 输出；satp=BARE 尚未隔离内核内存"
-            );
+        TrapCause::Exception(ExceptionCause::IllegalInstruction) => {
+            println!("U-mode 程序执行了非法指令，内核停止该任务");
         }
-        other => {
-            println!("实验结果不符合预期：陷入原因 {other:?}，内核值 {kernel_value:#018x}");
-        }
+        other => println!("实验结束：收到非预期陷入原因 {other:?}"),
     }
 
     stop_forever()
@@ -157,7 +124,7 @@ pub extern "C" fn supervisor_trap_handler(frame: *mut TrapFrame) -> *mut TrapFra
 
 fn stop_forever() -> ! {
     loop {
-        // 安全性：实验陷入后不尝试恢复用户程序；WFI 让 hart 等待，不访问其他内存。
+        // 安全性：当前没有可调度任务，也不恢复已终止或异常的用户程序；WFI 让 hart 等待。
         unsafe { core::arch::asm!("wfi", options(nomem, nostack)) };
     }
 }

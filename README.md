@@ -32,4 +32,5 @@ make run
 - [第 11 阶段：U-mode 的限制与内存访问边界](docs/phase-11-user-mode-limits.md) 对照 U-mode 的特权限制与 `satp=BARE` 下尚未建立的内存保护。
 - [第 12 阶段：独立用户程序与最小加载器](docs/phase-12-user-program-loader.md) 记录独立构建的用户程序、原始镜像加载和当前固定地址限制。
 - [第 13 阶段：Linux RISC-V `write` 系统调用](docs/phase-13-user-write-syscall.md) 记录 `ecall` 陷入、Linux syscall 寄存器约定，以及用户程序向串口输出的最小实现。
+- [第 14 阶段：Linux RISC-V `exit` 系统调用](docs/phase-14-user-exit-syscall.md) 记录用户任务如何通过系统调用结束，以及单任务阶段的终止行为。
 - [项目原则与代码规范](docs/development-principles.md) 是设计和协作规范。

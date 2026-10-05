@@ -3,6 +3,7 @@
 use crate::arch::riscv64::console;
 
 const LINUX_WRITE_SYSCALL: usize = 64;
+const LINUX_EXIT_SYSCALL: usize = 93;
 const STDOUT_FILE_DESCRIPTOR: usize = 1;
 const STDERR_FILE_DESCRIPTOR: usize = 2;
 
@@ -20,11 +21,22 @@ impl LinuxErrno {
     }
 }
 
-/// 按 Linux RISC-V syscall ABI 分发调用，并返回寄存器 `a0` 中的结果。
-pub fn dispatch(number: usize, arguments: [usize; 3]) -> isize {
+/// 表示系统调用返回用户态，或结束当前用户任务。
+pub enum SyscallOutcome {
+    /// 将结果写入 `a0` 后恢复用户上下文。
+    Return(isize),
+    /// 当前任务调用 `exit`；Linux 对外可观察的正常退出码只有低 8 位。
+    Exit(u8),
+}
+
+/// 按 Linux RISC-V syscall ABI 分发调用，并描述返回或任务退出结果。
+pub fn dispatch(number: usize, arguments: [usize; 3]) -> SyscallOutcome {
     match number {
-        LINUX_WRITE_SYSCALL => write(arguments[0], arguments[1], arguments[2]),
-        _ => LinuxErrno::NoSystemCall.return_value(),
+        LINUX_WRITE_SYSCALL => {
+            SyscallOutcome::Return(write(arguments[0], arguments[1], arguments[2]))
+        }
+        LINUX_EXIT_SYSCALL => SyscallOutcome::Exit(arguments[0] as i32 as u8),
+        _ => SyscallOutcome::Return(LinuxErrno::NoSystemCall.return_value()),
     }
 }
 
