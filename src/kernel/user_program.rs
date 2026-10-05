@@ -62,3 +62,20 @@ pub fn load() -> Result<LoadedUserProgram, UserProgramLoadError> {
         image_size: USER_PROGRAM_IMAGE.len(),
     })
 }
+
+/// 判断缓冲区是否完全落在当前固定加载的用户程序镜像中。
+pub fn contains_buffer_range(address: usize, length: usize) -> bool {
+    if length == 0 {
+        return true;
+    }
+
+    let image_start = core::ptr::addr_of!(__user_program_load_start) as usize;
+    let Some(image_end) = image_start.checked_add(USER_PROGRAM_IMAGE.len()) else {
+        return false;
+    };
+    let Some(buffer_end) = address.checked_add(length) else {
+        return false;
+    };
+
+    address >= image_start && buffer_end <= image_end
+}

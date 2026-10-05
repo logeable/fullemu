@@ -1,6 +1,6 @@
 # fullemu
 
-fullemu 是一个以可读性和教学为优先的 Rust 操作系统项目。当前实现从 QEMU RISC-V `virt` 平台启动，单独构建一个 no_std 用户程序，将其作为原始镜像加载后进入 U-mode。程序会展示特权指令限制，以及 `satp=BARE` 时 U-mode 仍能读写内核数据的事实。源码按内核职责和稳定概念组织，阶段编号只用于文档中的教学脉络。
+fullemu 是一个以可读性和教学为优先的 Rust 操作系统项目。当前实现从 QEMU RISC-V `virt` 平台启动，单独构建一个 no_std 用户程序，将其作为原始镜像加载后进入 U-mode。用户程序通过 Linux RISC-V syscall ABI 调用 `write` 向串口输出；实验也展示特权指令限制，以及 `satp=BARE` 时 U-mode 仍能读写内核数据的事实。源码按内核职责和稳定概念组织，阶段编号只用于文档中的教学脉络。
 
 ## 快速开始
 
@@ -12,7 +12,7 @@ make build
 make run
 ```
 
-`make build` 会先构建独立的 `user/` 程序，将 ELF 转换为原始二进制，再把二进制镜像作为数据嵌入内核。启动后串口会显示加载地址和长度、用户程序寄存器标记、内核数据读写结果，以及读取 `sstatus` 时发生的非法指令陷入。按 `Ctrl-C` 结束 QEMU。
+`make build` 会先构建独立的 `user/` 程序，将 ELF 转换为原始二进制，再把二进制镜像作为数据嵌入内核。启动后串口会显示用户程序输出、`write` 返回值、内核数据读写结果，以及读取 `sstatus` 时发生的非法指令陷入。当前 syscall 仅支持串口 `write` 子集，不代表已兼容完整 Linux ABI。按 `Ctrl-C` 结束 QEMU。
 
 若 QEMU 可执行文件不在 PATH，可运行 `make run QEMU=/path/to/qemu-system-riscv64`。也可以单独运行 `make build-user` 构建用户程序。
 
@@ -31,4 +31,5 @@ make run
 - [第 10 阶段：任务直接破坏内核调度状态](docs/phase-10-kernel-state-corruption.md) 记录任务如何改写内核关键数据、导致调度失常，并引出内核与用户程序之间的权限边界。
 - [第 11 阶段：U-mode 的限制与内存访问边界](docs/phase-11-user-mode-limits.md) 对照 U-mode 的特权限制与 `satp=BARE` 下尚未建立的内存保护。
 - [第 12 阶段：独立用户程序与最小加载器](docs/phase-12-user-program-loader.md) 记录独立构建的用户程序、原始镜像加载和当前固定地址限制。
+- [第 13 阶段：Linux RISC-V `write` 系统调用](docs/phase-13-user-write-syscall.md) 记录 `ecall` 陷入、Linux syscall 寄存器约定，以及用户程序向串口输出的最小实现。
 - [项目原则与代码规范](docs/development-principles.md) 是设计和协作规范。

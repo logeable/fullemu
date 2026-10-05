@@ -10,14 +10,13 @@ _start:
     la      gp, __global_pointer$
     .option pop
 
-    /* 探针偏移 0 是内核值，偏移 8 记录读值，偏移 16 记录用户写入值。 */
-    ld      t0, 0(a0)
-    sd      t0, 8(a0)
-    li      a1, 0x55534552
-    sd      a1, 0(a0)
-    sd      a1, 16(a0)
+    /* a0 是当前实验传入的探针地址；用户主体完成探针访问和 write 系统调用。 */
+    call    user_main
 
-    /* 故意访问 S-mode CSR；预期产生非法指令陷入，陷入帧应保留 a1 标记。 */
+    /* 用寄存器标记确认系统调用返回后仍在用户程序中继续执行。 */
+    li      a1, 0x55534552
+
+    /* 故意访问 S-mode CSR；预期产生非法指令陷入。 */
     csrr    zero, sstatus
 
 .Lstop:

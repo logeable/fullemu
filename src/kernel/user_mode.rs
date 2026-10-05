@@ -15,12 +15,14 @@ struct KernelMemoryProbe {
     private_value: usize,
     user_read_value: usize,
     user_written_value: usize,
+    write_result: isize,
 }
 
 static mut KERNEL_MEMORY_PROBE: KernelMemoryProbe = KernelMemoryProbe {
     private_value: INITIAL_KERNEL_VALUE,
     user_read_value: 0,
     user_written_value: 0,
+    write_result: 0,
 };
 static mut USER_STACK: TaskStack = TaskStack([0; STACK_SIZE]);
 static mut KERNEL_TRAP_STACK: TaskStack = TaskStack([0; STACK_SIZE]);
@@ -78,56 +80,71 @@ fn stack_top(stack: *mut TaskStack) -> usize {
     }
 }
 
-/// 报告独立用户程序的执行标记、内核数据访问结果和陷入原因。
+/// 处理用户系统调用，或报告独立用户程序的最终陷入现场。
 #[no_mangle]
-pub extern "C" fn supervisor_trap_handler(frame: *mut TrapFrame) -> ! {
-    // 安全性：汇编入口已切换到静态 S-mode 陷入栈，并在那里构造完整陷入帧。
-    let (raw_cause, exception_pc, trap_value, status, user_marker) = unsafe {
-        (
-            (*frame).cause,
-            (*frame).exception_pc,
-            (*frame).trap_value,
-            (*frame).status,
-            (*frame).registers[11],
-        )
-    };
-    let cause = TrapCause::decode(raw_cause);
+pub extern "C" fn supervisor_trap_handler(frame: *mut TrapFrame) -> *mut TrapFrame {
+    // 安全性：汇编入口已切换到静态 S-mode 陷入栈，并在那里构造完整且独占的陷入帧。
+    let frame = unsafe { &mut *frame };
+    let cause = TrapCause::decode(frame.cause);
+
+    if cause == TrapCause::Exception(ExceptionCause::UserEnvironmentCall)
+        && frame.status & (1 << 8) == 0
+    {
+        let syscall_number = frame.registers[17];
+        let arguments = [
+            frame.registers[10],
+            frame.registers[11],
+            frame.registers[12],
+        ];
+        frame.registers[10] = super::syscall::dispatch(syscall_number, arguments) as usize;
+        // RISC-V 的 ecall 固定为 32 位指令；返回时从其后一条用户指令继续执行。
+        frame.exception_pc += 4;
+
+        // 安全性：U-mode 陷入帧位于专用内核栈顶下方；sscratch 必须指回该栈顶才能安全处理下一次陷入。
+        let kernel_stack_top = frame as *mut TrapFrame as usize + core::mem::size_of::<TrapFrame>();
+        unsafe { crate::arch::riscv64::trap::set_user_kernel_stack(kernel_stack_top) };
+
+        return frame as *mut TrapFrame;
+    }
 
     // 安全性：陷入期间 SIE 已关闭，U-mode 程序暂停；探针是内核静态数据且不会被其他任务并发修改。
     let probe = core::ptr::addr_of!(KERNEL_MEMORY_PROBE);
-    let (kernel_value, user_read_value, user_written_value) = unsafe {
+    let (kernel_value, user_read_value, user_written_value, write_result) = unsafe {
         (
             core::ptr::read_volatile(core::ptr::addr_of!((*probe).private_value)),
             core::ptr::read_volatile(core::ptr::addr_of!((*probe).user_read_value)),
             core::ptr::read_volatile(core::ptr::addr_of!((*probe).user_written_value)),
+            core::ptr::read_volatile(core::ptr::addr_of!((*probe).write_result)),
         )
     };
 
     println!(
         "U-mode 陷入来源：{}",
-        if status & (1 << 8) == 0 {
+        if frame.status & (1 << 8) == 0 {
             "U-mode"
         } else {
             "S-mode"
         }
     );
-    println!("独立用户程序寄存器标记：{user_marker:#018x}");
+    println!("独立用户程序寄存器标记：{:#018x}", frame.registers[11]);
     println!("U-mode 读到的内核数据：{user_read_value:#018x}");
     println!("U-mode 写入后的内核数据：{user_written_value:#018x}");
+    println!("write 系统调用返回值：{write_result}");
     println!("陷入原因：{cause:?}");
-    println!("原始 scause: {raw_cause:#018x}");
-    println!("sepc:   {exception_pc:#018x}");
-    println!("stval:  {trap_value:#018x}");
+    println!("原始 scause: {:#018x}", frame.cause);
+    println!("sepc:   {:#018x}", frame.exception_pc);
+    println!("stval:  {:#018x}", frame.trap_value);
 
     match cause {
         TrapCause::Exception(ExceptionCause::IllegalInstruction)
-            if user_marker == USER_PROGRAM_MARKER
+            if frame.registers[11] == USER_PROGRAM_MARKER
                 && kernel_value == USER_PROGRAM_MARKER
                 && user_read_value == INITIAL_KERNEL_VALUE
-                && user_written_value == USER_PROGRAM_MARKER =>
+                && user_written_value == USER_PROGRAM_MARKER
+                && write_result > 0 =>
         {
             println!(
-                "结论：独立用户程序已运行；U-mode 受 CSR 特权限制，但 satp=BARE 尚未隔离内核内存"
+                "结论：独立用户程序通过 Linux RISC-V write syscall 输出；satp=BARE 尚未隔离内核内存"
             );
         }
         other => {
