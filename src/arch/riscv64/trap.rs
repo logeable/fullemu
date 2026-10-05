@@ -115,25 +115,27 @@ impl TrapFrame {
     /// 为首次运行的内核任务构造一个可由 `sret` 恢复的陷入帧。
     #[allow(dead_code)]
     pub fn for_entry(entry: extern "C" fn() -> !, stack_pointer: usize) -> Self {
-        Self::for_privilege(entry, stack_pointer, true)
+        Self::for_privilege(entry as usize, stack_pointer, 0, true)
     }
 
-    /// 为首次运行的 U-mode 任务构造一个可由 `sret` 恢复的陷入帧。
-    pub fn for_user_entry(entry: extern "C" fn() -> !, stack_pointer: usize) -> Self {
-        Self::for_privilege(entry, stack_pointer, false)
+    /// 为独立用户程序构造陷入帧；`argument0` 将通过 RISC-V ABI 的 `a0` 传入入口。
+    pub fn for_user_entry(entry_address: usize, stack_pointer: usize, argument0: usize) -> Self {
+        Self::for_privilege(entry_address, stack_pointer, argument0, false)
     }
 
     fn for_privilege(
-        entry: extern "C" fn() -> !,
+        entry: usize,
         stack_pointer: usize,
+        argument0: usize,
         supervisor_mode: bool,
     ) -> Self {
         let mut registers = [0; 32];
         registers[2] = stack_pointer;
+        registers[10] = argument0;
 
         Self {
             registers,
-            exception_pc: entry as usize,
+            exception_pc: entry,
             // SPIE=1 使 sret 后允许 supervisor 中断；SPP 决定返回 S-mode 还是 U-mode。
             status: (usize::from(supervisor_mode) << 8) | (1 << 5),
             cause: 0,

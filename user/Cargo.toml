@@ -1,0 +1,17 @@
+[package]
+name = "fullemu-user"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "fullemu_user"
+path = "src/main.rs"
+
+[dependencies]
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"

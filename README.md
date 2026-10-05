@@ -1,10 +1,10 @@
 # fullemu
 
-fullemu 是一个以可读性和教学为优先的 Rust 操作系统项目。当前实现从 QEMU RISC-V `virt` 平台启动，进入 U-mode 展示特权指令限制，以及 `satp=BARE` 时 U-mode 仍能读写内核数据的事实。源码按内核职责和稳定概念组织，阶段编号只用于文档中的教学脉络。
+fullemu 是一个以可读性和教学为优先的 Rust 操作系统项目。当前实现从 QEMU RISC-V `virt` 平台启动，单独构建一个 no_std 用户程序，将其作为原始镜像加载后进入 U-mode。程序会展示特权指令限制，以及 `satp=BARE` 时 U-mode 仍能读写内核数据的事实。源码按内核职责和稳定概念组织，阶段编号只用于文档中的教学脉络。
 
 ## 快速开始
 
-需要 Rust 工具链、`riscv64gc-unknown-none-elf` target 和带 RISC-V system emulation 的 QEMU：
+需要 Rust 工具链、`riscv64gc-unknown-none-elf` target、`rust-objcopy`（由 `cargo-binutils` 提供）和带 RISC-V system emulation 的 QEMU：
 
 ```sh
 rustup target add riscv64gc-unknown-none-elf
@@ -12,9 +12,9 @@ make build
 make run
 ```
 
-启动后串口应显示 `fullemu: booted on QEMU virt (RISC-V)`、hart ID 和 DTB 地址，随后显示 U-mode 改写内核数据的结果，以及读取 `sstatus` 时发生的非法指令陷入。按 `Ctrl-C` 结束 QEMU。
+`make build` 会先构建独立的 `user/` 程序，将 ELF 转换为原始二进制，再把二进制镜像作为数据嵌入内核。启动后串口会显示加载地址和长度、用户程序寄存器标记、内核数据读写结果，以及读取 `sstatus` 时发生的非法指令陷入。按 `Ctrl-C` 结束 QEMU。
 
-也可以直接运行 `cargo run --release`；Cargo 会调用 `.cargo/config.toml` 配置的 QEMU runner。若 QEMU 可执行文件不在 PATH，可运行 `make run QEMU=/path/to/qemu-system-riscv64`。
+若 QEMU 可执行文件不在 PATH，可运行 `make run QEMU=/path/to/qemu-system-riscv64`。也可以单独运行 `make build-user` 构建用户程序。
 
 ## 代码与阶段说明
 
@@ -30,4 +30,5 @@ make run
 - [第 9 阶段：定时器抢占](docs/phase-9-timer-preemption.md) 记录完整陷入帧、SBI 定时器和不主动让出的任务如何被轮转。
 - [第 10 阶段：任务直接破坏内核调度状态](docs/phase-10-kernel-state-corruption.md) 记录任务如何改写内核关键数据、导致调度失常，并引出内核与用户程序之间的权限边界。
 - [第 11 阶段：U-mode 的限制与内存访问边界](docs/phase-11-user-mode-limits.md) 对照 U-mode 的特权限制与 `satp=BARE` 下尚未建立的内存保护。
+- [第 12 阶段：独立用户程序与最小加载器](docs/phase-12-user-program-loader.md) 记录独立构建的用户程序、原始镜像加载和当前固定地址限制。
 - [项目原则与代码规范](docs/development-principles.md) 是设计和协作规范。

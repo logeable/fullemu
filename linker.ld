@@ -43,6 +43,12 @@ SECTIONS
     . = ALIGN(8);
     __bss_end = .;
 
+    /* 当前加载器使用固定物理地址放置独立用户程序镜像。 */
+    __user_program_load_start = 0x80400000;
+    __user_program_load_end = 0x80410000;
+
+    ASSERT(__bss_end <= __user_program_load_start, "内核映像与用户程序加载区重叠")
+
     /DISCARD/ : {
         *(.eh_frame .eh_frame.*)
     }
