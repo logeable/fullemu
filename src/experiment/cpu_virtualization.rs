@@ -1,7 +1,7 @@
 //! 展示定时器中断如何抢占不主动让出 CPU 的任务。
 
 use crate::arch::riscv64::trap::TrapFrame;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 const TASK_COUNT: usize = 2;
 const STACK_SIZE: usize = 16 * 1024;
@@ -10,6 +10,8 @@ const TIMER_INTERVAL: u64 = 100_000;
 const REPORT_INTERVAL: usize = 25;
 const SUPERVISOR_TIMER_INTERRUPT: usize = (1usize << (usize::BITS - 1)) | 5;
 const SUPERVISOR_TIMER_ENABLE: usize = 1 << 5;
+const TASK_B_INITIAL_MARKER: usize = 0xBEEF_0001;
+const TASK_B_OVERWRITTEN_MARKER: usize = 0xA11C_E001;
 
 #[repr(align(16))]
 struct TaskStack([u8; STACK_SIZE]);
@@ -19,13 +21,17 @@ static mut CURRENT_TASK: usize = 0;
 static mut TIMER_TICKS: usize = 0;
 static TASK_A_PROGRESS: AtomicUsize = AtomicUsize::new(0);
 static TASK_B_PROGRESS: AtomicUsize = AtomicUsize::new(0);
+static TASK_B_MARKER: AtomicUsize = AtomicUsize::new(TASK_B_INITIAL_MARKER);
+static TASK_B_OBSERVED_OVERWRITE: AtomicBool = AtomicBool::new(false);
+static OVERWRITE_REPORTED: AtomicBool = AtomicBool::new(false);
 static mut TASK_A_STACK: TaskStack = TaskStack([0; STACK_SIZE]);
 static mut TASK_B_STACK: TaskStack = TaskStack([0; STACK_SIZE]);
 
-/// 启动两个内核任务，并由 S-mode 定时器中断轮转调度。
-pub fn run_preemptively() -> ! {
-    println!("\nCPU 虚拟化实验：定时器抢占");
-    println!("任务 A 不主动让出 CPU；定时器中断应让任务 B 持续取得运行机会");
+/// 启动定时器抢占，并观察任务如何改写同一地址空间中的其他任务数据。
+pub fn run_shared_memory_baseline() -> ! {
+    println!("\nCPU 虚拟化实验：抢占与共享内存隔离对照");
+    println!("任务 A 不主动让出 CPU；任务 B 的标记初值为 {TASK_B_INITIAL_MARKER:#x}");
+    println!("任务 A 将尝试直接改写该标记，任务 B 检查是否能观察到变化");
 
     initialize_task_frames();
     arm_timer().unwrap_or_else(|error| {
@@ -69,17 +75,30 @@ fn initialize_task_frames() {
     }
     TASK_A_PROGRESS.store(0, Ordering::Relaxed);
     TASK_B_PROGRESS.store(0, Ordering::Relaxed);
+    TASK_B_MARKER.store(TASK_B_INITIAL_MARKER, Ordering::Relaxed);
+    TASK_B_OBSERVED_OVERWRITE.store(false, Ordering::Relaxed);
+    OVERWRITE_REPORTED.store(false, Ordering::Relaxed);
 }
 
 extern "C" fn task_a_entry() -> ! {
+    let mut marker_overwritten = false;
     loop {
         TASK_A_PROGRESS.fetch_add(1, Ordering::Relaxed);
+
+        if !marker_overwritten {
+            // 这是有意演示缺少任务级保护：A 可写入逻辑上归 B 所有的共享内存。
+            TASK_B_MARKER.store(TASK_B_OVERWRITTEN_MARKER, Ordering::Relaxed);
+            marker_overwritten = true;
+        }
     }
 }
 
 extern "C" fn task_b_entry() -> ! {
     loop {
         TASK_B_PROGRESS.fetch_add(1, Ordering::Relaxed);
+        if TASK_B_MARKER.load(Ordering::Relaxed) == TASK_B_OVERWRITTEN_MARKER {
+            TASK_B_OBSERVED_OVERWRITE.store(true, Ordering::Relaxed);
+        }
     }
 }
 
@@ -107,6 +126,15 @@ pub extern "C" fn supervisor_trap_handler(frame: *mut TrapFrame) -> *mut TrapFra
         core::ptr::addr_of_mut!(CURRENT_TASK).write(next_task);
         let ticks = core::ptr::addr_of_mut!(TIMER_TICKS);
         *ticks = (*ticks).wrapping_add(1);
+
+        if TASK_B_OBSERVED_OVERWRITE.load(Ordering::Relaxed)
+            && !OVERWRITE_REPORTED.swap(true, Ordering::Relaxed)
+        {
+            println!(
+                "隔离失败对照：任务 B 观察到自己的标记已被改写为 {:#x}",
+                TASK_B_MARKER.load(Ordering::Relaxed)
+            );
+        }
 
         if *ticks % REPORT_INTERVAL == 0 {
             println!(

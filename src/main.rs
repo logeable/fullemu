@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 
-//! 从 OpenSBI 进入 Rust，通过 QEMU 串口报告启动信息并运行定时器抢占实验。
+//! 从 OpenSBI 进入 Rust，通过 QEMU 串口报告启动信息并运行共享内存隔离对照。
 
 mod arch;
 
@@ -110,7 +110,7 @@ pub extern "C" fn kernel_main(hart_id: usize, device_tree: usize) -> ! {
         }
     }
 
-    experiment::cpu_virtualization::run_preemptively();
+    experiment::cpu_virtualization::run_shared_memory_baseline();
 }
 
 fn report_fdt_structure_error(error: fullemu::boot::fdt::FdtStructureError) -> ! {
