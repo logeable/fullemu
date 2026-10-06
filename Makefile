@@ -7,6 +7,7 @@ HOST_TARGET := $(shell rustc -vV | sed -n 's/^host: //p')
 KERNEL := target/$(TARGET)/release/fullemu
 USER_BUILD_DIR := user/target/$(TARGET)/release
 USER_IMAGE_MANIFEST := $(USER_BUILD_DIR)/user-programs.manifest
+USER_LAYOUT_FILE := $(USER_BUILD_DIR)/user-program-layout
 
 .PHONY: all build build-kernel build-user run test-fdt clean fmt fmt-check
 
@@ -19,23 +20,16 @@ build-kernel:
 	FULLEMU_USER_IMAGE_MANIFEST= FULLEMU_LOG_LEVEL=$(LOG_LEVEL) $(CARGO) build --release --target $(TARGET)
 
 build-user:
-	cd user && $(CARGO) build --release --bins --target $(TARGET)
+	cd user && FULLEMU_USER_LAYOUT_FILE="$(CURDIR)/$(USER_LAYOUT_FILE)" $(CARGO) build --release --bins --target $(TARGET)
 	@set -eu; \
 	manifest_tmp="$(USER_IMAGE_MANIFEST).tmp"; \
-	set -- user/src/bin/*.rs; \
-	if [ ! -f "$$1" ]; then \
-		printf 'error: user/src/bin 中没有用户程序源码\n' >&2; \
-		exit 1; \
-	fi; \
 	: > "$$manifest_tmp"; \
-	for source in user/src/bin/*.rs; do \
-		program_name=$${source##*/}; \
-		program_name=$${program_name%.rs}; \
+	while read -r program_name link_address entry_offset; do \
 		program_elf="$(USER_BUILD_DIR)/$$program_name"; \
 		program_image="$$program_elf.bin"; \
 		$(OBJCOPY) --strip-all -O binary "$$program_elf" "$$program_image"; \
-		printf '%s %s\n' "$$program_name" "$$program_image" >> "$$manifest_tmp"; \
-	done; \
+		printf '%s %s %s %s\n' "$$program_name" "$$link_address" "$$entry_offset" "$$program_image" >> "$$manifest_tmp"; \
+	done < "$(USER_LAYOUT_FILE)"; \
 	mv "$$manifest_tmp" "$(USER_IMAGE_MANIFEST)"
 
 run: build

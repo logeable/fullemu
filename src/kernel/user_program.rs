@@ -4,6 +4,8 @@ const USER_PROGRAM_SLOT_SIZE: usize = 64 * 1024;
 
 struct UserProgramImage {
     name: &'static str,
+    linked_base: usize,
+    entry_offset: usize,
     bytes: &'static [u8],
 }
 
@@ -32,12 +34,13 @@ pub struct UserProgramLoadError {
     pub image_size: usize,
     /// 链接脚本预留的加载区长度。
     pub capacity: usize,
+    description: &'static str,
 }
 
 impl UserProgramLoadError {
     /// 返回用于启动诊断的错误说明。
     pub fn description(&self) -> &'static str {
-        "用户程序镜像超过固定加载区容量"
+        self.description
     }
 }
 
@@ -62,6 +65,7 @@ pub fn load(index: usize) -> Result<Option<LoadedUserProgram>, UserProgramLoadEr
             program_name: program.name,
             image_size: program.bytes.len(),
             capacity: 0,
+            description: "用户程序槽位地址计算溢出",
         });
     };
     let Some(slot_start) = load_start.checked_add(slot_offset) else {
@@ -69,6 +73,7 @@ pub fn load(index: usize) -> Result<Option<LoadedUserProgram>, UserProgramLoadEr
             program_name: program.name,
             image_size: program.bytes.len(),
             capacity: 0,
+            description: "用户程序槽位地址计算溢出",
         });
     };
     let Some(slot_end) = slot_start.checked_add(capacity) else {
@@ -76,6 +81,7 @@ pub fn load(index: usize) -> Result<Option<LoadedUserProgram>, UserProgramLoadEr
             program_name: program.name,
             image_size: program.bytes.len(),
             capacity: 0,
+            description: "用户程序槽位结束地址计算溢出",
         });
     };
 
@@ -84,8 +90,33 @@ pub fn load(index: usize) -> Result<Option<LoadedUserProgram>, UserProgramLoadEr
             program_name: program.name,
             image_size: program.bytes.len(),
             capacity: core::cmp::min(capacity, reserved_capacity.saturating_sub(slot_offset)),
+            description: "用户程序镜像超过固定加载槽位容量",
         });
     }
+    if program.linked_base != slot_start {
+        return Err(UserProgramLoadError {
+            program_name: program.name,
+            image_size: program.bytes.len(),
+            capacity,
+            description: "用户程序链接地址与目标加载槽位不一致",
+        });
+    }
+    if program.entry_offset >= program.bytes.len() {
+        return Err(UserProgramLoadError {
+            program_name: program.name,
+            image_size: program.bytes.len(),
+            capacity,
+            description: "用户程序入口偏移超出镜像范围",
+        });
+    }
+    let Some(entry) = slot_start.checked_add(program.entry_offset) else {
+        return Err(UserProgramLoadError {
+            program_name: program.name,
+            image_size: program.bytes.len(),
+            capacity,
+            description: "用户程序入口地址计算溢出",
+        });
+    };
 
     // 安全性：链接脚本保证加载区位于内核映像之后且落在 QEMU RAM 内；
     // 编译期嵌入的源镜像与目标槽位不重叠，镜像长度和槽位边界已在复制前检查。
@@ -101,7 +132,7 @@ pub fn load(index: usize) -> Result<Option<LoadedUserProgram>, UserProgramLoadEr
 
     Ok(Some(LoadedUserProgram {
         name: program.name,
-        entry: slot_start,
+        entry,
         image_size: program.bytes.len(),
     }))
 }

@@ -1,10 +1,12 @@
-/* 独立用户程序被链接到内核预留的固定物理地址，当前 satp=BARE 时可直接执行。 */
+/* 每个用户程序按构建脚本指定的槽位地址链接，当前 satp=BARE 时可直接执行。 */
 OUTPUT_ARCH(riscv)
 ENTRY(_start)
 
+PROVIDE(__user_image_base = 0x80400000);
+
 SECTIONS
 {
-    . = 0x80400000;
+    . = __user_image_base;
 
     .text : ALIGN(4) {
         KEEP(*(.text.entry))
@@ -31,7 +33,8 @@ SECTIONS
 
     __user_program_end = .;
 
-    ASSERT(__user_program_end <= 0x80410000, "用户程序超过 64 KiB 加载区")
+    ASSERT(_start == __user_image_base, "用户程序入口必须位于镜像起始地址")
+    ASSERT(__user_program_end <= __user_image_base + 0x10000, "用户程序超过 64 KiB 加载槽位")
 
     /DISCARD/ : {
         *(.eh_frame .eh_frame.*)

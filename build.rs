@@ -3,9 +3,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const IMAGE_MANIFEST_ENV: &str = "FULLEMU_USER_IMAGE_MANIFEST";
+const USER_PROGRAM_LOAD_BASE: usize = 0x8040_0000;
+const USER_PROGRAM_SLOT_SIZE: usize = 64 * 1024;
 const MAX_USER_PROGRAMS: usize = 8;
 
 fn main() {
+    println!("cargo:rustc-link-arg-bin=fullemu=-Tlinker.ld");
     println!("cargo:rerun-if-env-changed={IMAGE_MANIFEST_ENV}");
 
     let output_directory =
@@ -48,9 +51,9 @@ fn generate_catalog(manifest_path: &Path, output_directory: &Path) -> String {
         }
 
         let fields: Vec<_> = line.split_whitespace().collect();
-        if fields.len() != 2 {
+        if fields.len() != 4 {
             panic!(
-                "用户程序镜像清单第 {} 行应包含程序名和镜像路径",
+                "用户程序镜像清单第 {} 行应包含程序名、链接地址、入口偏移和镜像路径",
                 line_index + 1
             );
         }
@@ -67,7 +70,7 @@ fn generate_catalog(manifest_path: &Path, output_directory: &Path) -> String {
         }
         if entries
             .iter()
-            .any(|(existing_name, _): &(&str, PathBuf)| *existing_name == name)
+            .any(|existing_name: &&str| *existing_name == name)
         {
             panic!("用户程序镜像清单中出现重复名称：{name}");
         }
@@ -75,7 +78,23 @@ fn generate_catalog(manifest_path: &Path, output_directory: &Path) -> String {
             panic!("最多支持同时驻留 {MAX_USER_PROGRAMS} 个用户程序");
         }
 
-        let relative_image_path = Path::new(fields[1]);
+        let linked_base = parse_hexadecimal(fields[1], "链接地址", line_index + 1);
+        let entry_offset = parse_hexadecimal(fields[2], "入口偏移", line_index + 1);
+        let slot_offset = entries
+            .len()
+            .checked_mul(USER_PROGRAM_SLOT_SIZE)
+            .unwrap_or_else(|| panic!("用户程序槽位偏移溢出（清单第 {} 行）", line_index + 1));
+        let expected_base = USER_PROGRAM_LOAD_BASE
+            .checked_add(slot_offset)
+            .unwrap_or_else(|| panic!("用户程序槽位地址溢出（清单第 {} 行）", line_index + 1));
+        if linked_base != expected_base {
+            panic!(
+                "用户程序 {name} 的链接地址为 {linked_base:#x}，但清单槽位要求 {expected_base:#x}（第 {} 行）",
+                line_index + 1
+            );
+        }
+
+        let relative_image_path = Path::new(fields[3]);
         let image_path = if relative_image_path.is_absolute() {
             relative_image_path.to_path_buf()
         } else {
@@ -95,6 +114,12 @@ fn generate_catalog(manifest_path: &Path, output_directory: &Path) -> String {
         if image_bytes.is_empty() {
             panic!("用户程序镜像不能为空：{}", image_path.display());
         }
+        if entry_offset >= image_bytes.len() {
+            panic!(
+                "用户程序 {name} 的入口偏移 {entry_offset:#x} 超出镜像范围 {} 字节",
+                image_bytes.len()
+            );
+        }
 
         let copied_image_path =
             output_directory.join(format!("user_program_{}.bin", entries.len()));
@@ -107,10 +132,10 @@ fn generate_catalog(manifest_path: &Path, output_directory: &Path) -> String {
         println!("cargo:rerun-if-changed={}", image_path.display());
 
         generated_catalog.push_str(&format!(
-            "    UserProgramImage {{ name: {name:?}, bytes: include_bytes!(concat!(env!(\"OUT_DIR\"), \"/user_program_{}.bin\")) }},\n",
-            entries.len()
+            "    UserProgramImage {{ name: {name:?}, linked_base: {linked_base:#x}, entry_offset: {entry_offset:#x}, bytes: include_bytes!(concat!(env!(\"OUT_DIR\"), \"/user_program_{}.bin\")) }},\n",
+            entries.len(),
         ));
-        entries.push((name, image_path));
+        entries.push(name);
     }
 
     if entries.is_empty() {
@@ -119,4 +144,11 @@ fn generate_catalog(manifest_path: &Path, output_directory: &Path) -> String {
 
     generated_catalog.push_str("];\n");
     generated_catalog
+}
+
+fn parse_hexadecimal(value: &str, field_name: &str, line_number: usize) -> usize {
+    let digits = value.strip_prefix("0x").unwrap_or(value);
+    usize::from_str_radix(digits, 16).unwrap_or_else(|_| {
+        panic!("用户程序镜像清单第 {line_number} 行的{field_name}不是有效十六进制数：{value}");
+    })
 }
