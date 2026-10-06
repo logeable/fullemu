@@ -33,15 +33,15 @@ use fullemu::boot::info::BootInfo;
 /// 本阶段只运行一个 hart，并打印固件交接信息。
 #[no_mangle]
 pub extern "C" fn kernel_main(hart_id: usize, device_tree: usize) -> ! {
-    println!("fullemu: booted on QEMU virt (RISC-V)");
-    println!("hart: {hart_id:#018x}");
-    println!("DTB:  {device_tree:#018x}");
+    crate::klog_info!("fullemu 已在 QEMU virt (RISC-V) 启动");
+    crate::klog_info!("启动 hart：{hart_id:#018x}");
+    crate::klog_info!("设备树地址：{device_tree:#018x}");
 
     // 安全性：OpenSBI 启动约定保证 a1 指向可读的 FDT；解析器只读取固定的 40 字节头部。
     let fdt_header = match unsafe { FdtHeader::read_from_ptr(device_tree as *const u8) } {
         Ok(header) => header,
         Err(error) => {
-            println!("fullemu: FDT 头部无效：{}", error.description());
+            crate::klog_error!("FDT 头部无效：{}", error.description());
             panic!("FDT 头部无效");
         }
     };
@@ -114,24 +114,23 @@ pub extern "C" fn kernel_main(hart_id: usize, device_tree: usize) -> ! {
 }
 
 fn report_fdt_structure_error(error: fullemu::boot::fdt::FdtStructureError) -> ! {
-    println!("fullemu: FDT 结构块无效：{}", error.description());
+    crate::klog_error!("FDT 结构块无效：{}", error.description());
     panic!("FDT 结构块无效");
 }
 
 fn report_fdt_blob_error(error: fullemu::boot::fdt::FdtBlobError) -> ! {
-    println!("fullemu: FDT 文件无效：{}", error.description());
+    crate::klog_error!("FDT 文件无效：{}", error.description());
     panic!("FDT 文件无效");
 }
 
 fn report_boot_info_error(error: fullemu::boot::info::BootInfoError) -> ! {
-    println!("fullemu: 启动信息无效：{}", error.description());
+    crate::klog_error!("启动信息无效：{}", error.description());
     panic!("启动信息无效");
 }
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
-    println!("\nfullemu: kernel panic");
-    println!("{info}");
+    crate::klog_error!("内核 panic：{info}");
     loop {
         // 安全性：与 `kernel_main` 中的空闲循环相同，此处等待是有效操作。
         unsafe { core::arch::asm!("wfi", options(nomem, nostack)) };

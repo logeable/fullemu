@@ -12,8 +12,8 @@ static mut KERNEL_TRAP_STACK: TaskStack = TaskStack([0; STACK_SIZE]);
 
 /// 加载独立用户程序，进入 U-mode 并观察系统调用与特权陷入。
 pub fn run_privilege_boundary_demonstration() -> ! {
-    println!("\nU-mode 实验：独立用户程序加载与特权边界");
-    println!("当前 satp 使用 BARE；加载的程序仍未与内核内存隔离");
+    crate::klog_info!("开始 U-mode 实验：独立用户程序加载与特权边界");
+    crate::klog_warn!("satp 使用 BARE；用户程序仍未与内核内存隔离");
 
     // 安全性：仍处于 S-mode；本实验不使用定时器，清除 S-mode 外部中断源使能，避免异步陷入。
     unsafe {
@@ -28,7 +28,7 @@ pub fn run_privilege_boundary_demonstration() -> ! {
     let program = match super::user_program::load() {
         Ok(program) => program,
         Err(error) => {
-            println!(
+            crate::klog_error!(
                 "用户程序加载失败：{}（镜像 {} 字节，加载区 {} 字节）",
                 error.description(),
                 error.image_size,
@@ -37,9 +37,10 @@ pub fn run_privilege_boundary_demonstration() -> ! {
             stop_forever();
         }
     };
-    println!(
+    crate::klog_info!(
         "已加载独立用户镜像：入口 {:#018x}，大小 {} 字节",
-        program.entry, program.image_size
+        program.entry,
+        program.image_size
     );
 
     let user_stack_top = stack_top(core::ptr::addr_of_mut!(USER_STACK));
@@ -68,6 +69,7 @@ pub extern "C" fn supervisor_trap_handler(frame: *mut TrapFrame) -> *mut TrapFra
     // 安全性：汇编入口已切换到静态 S-mode 陷入栈，并在那里构造完整且独占的陷入帧。
     let frame = unsafe { &mut *frame };
     let cause = TrapCause::decode(frame.cause);
+    crate::klog_trace!("进入 supervisor trap handler：原因={cause:?}");
 
     if cause == TrapCause::Exception(ExceptionCause::UserEnvironmentCall)
         && frame.status & (1 << 8) == 0
@@ -78,6 +80,11 @@ pub extern "C" fn supervisor_trap_handler(frame: *mut TrapFrame) -> *mut TrapFra
             frame.registers[11],
             frame.registers[12],
         ];
+        crate::klog_debug!(
+            "用户系统调用：编号={}，参数={:#x?}",
+            syscall_number,
+            arguments
+        );
         match super::syscall::dispatch(syscall_number, arguments) {
             super::syscall::SyscallOutcome::Return(result) => {
                 frame.registers[10] = result as usize;
@@ -92,32 +99,24 @@ pub extern "C" fn supervisor_trap_handler(frame: *mut TrapFrame) -> *mut TrapFra
                 return frame as *mut TrapFrame;
             }
             super::syscall::SyscallOutcome::Exit(status) => {
-                println!("用户任务调用 Linux RISC-V exit 结束，状态码：{status}");
-                println!("当前尚无其他可调度任务；内核停止该任务并进入等待状态");
+                crate::klog_info!("用户任务调用 Linux RISC-V exit 结束，状态码：{status}");
+                crate::klog_info!("当前尚无其他可调度任务；内核停止该任务并进入等待状态");
                 stop_forever();
             }
         }
     }
 
-    println!(
-        "U-mode 陷入来源：{}",
+    crate::klog_error!(
+        "用户任务陷入：来源={}，原因={cause:?}，scause={:#018x}，sepc={:#018x}，stval={:#018x}",
         if frame.status & (1 << 8) == 0 {
             "U-mode"
         } else {
             "S-mode"
-        }
+        },
+        frame.cause,
+        frame.exception_pc,
+        frame.trap_value
     );
-    println!("陷入原因：{cause:?}");
-    println!("原始 scause: {:#018x}", frame.cause);
-    println!("sepc:   {:#018x}", frame.exception_pc);
-    println!("stval:  {:#018x}", frame.trap_value);
-
-    match cause {
-        TrapCause::Exception(ExceptionCause::IllegalInstruction) => {
-            println!("U-mode 程序执行了非法指令，内核停止该任务");
-        }
-        other => println!("实验结束：收到非预期陷入原因 {other:?}"),
-    }
 
     stop_forever()
 }

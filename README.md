@@ -33,4 +33,5 @@ make run
 - [第 12 阶段：独立用户程序与最小加载器](docs/phase-12-user-program-loader.md) 记录独立构建的用户程序、原始镜像加载和当前固定地址限制。
 - [第 13 阶段：Linux RISC-V `write` 系统调用](docs/phase-13-user-write-syscall.md) 记录 `ecall` 陷入、Linux syscall 寄存器约定，以及用户程序向串口输出的最小实现。
 - [第 14 阶段：Linux RISC-V `exit` 系统调用](docs/phase-14-user-exit-syscall.md) 记录用户任务如何通过系统调用结束，以及单任务阶段的终止行为。
+- [第 15 阶段：内核日志基础设施](docs/phase-15-kernel-logging.md) 记录日志级别、模块来源、过滤策略，以及日志与用户控制台输出的边界。
 - [项目原则与代码规范](docs/development-principles.md) 是设计和协作规范。
