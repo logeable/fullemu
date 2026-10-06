@@ -1,6 +1,6 @@
 # fullemu
 
-fullemu 是一个以可读性和教学为优先的 Rust 操作系统项目。当前实现从 QEMU RISC-V `virt` 平台启动，将独立构建的 no_std 用户程序作为原始镜像加载后进入 U-mode。内核支持最小的 Linux RISC-V `write`、`exit` 和 `sched_yield` 系统调用，并在单 hart 上协作式调度多个嵌入式用户程序。源码按内核职责和稳定概念组织，阶段编号只用于文档中的教学脉络。
+fullemu 是一个以可读性和教学为优先的 Rust 操作系统项目。当前实现从 QEMU RISC-V `virt` 平台启动，将独立构建的 no_std 用户程序作为原始镜像加载后进入 U-mode。内核支持最小的 Linux RISC-V `write`、`exit` 和 `sched_yield` 系统调用，并在单 hart 上协作式调度多个嵌入式用户程序。用户程序示例覆盖计算、控制台 I/O、CPU 密集执行、主动协作和非法指令异常。源码按内核职责和稳定概念组织，阶段编号只用于文档中的教学脉络。
 
 ## 快速开始
 

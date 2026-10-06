@@ -10,17 +10,22 @@
 
 ## 实现范围
 
-- `user/src/lib.rs` 提供共用的 `no_std` 运行时，统一链接入口汇编、panic handler、`print!`/`println!` 输出宏和入口适配。输出宏经 `core::fmt::Write` 与 `write` syscall 写入 fd 1，不需要堆分配；格式化输出错误由便捷宏忽略，需要检查时可调用 `fullemu_user::print`。panic handler 输出 panic 信息后通过 `exit(1)` 结束当前任务，避免协作式调度下自旋占用 CPU。每个 bin 用普通 Rust `pub fn main()` 表达程序主体，并调用 `fullemu_user::user_entry!(main)` 生成汇编所需的 `user_main` C ABI 入口；该适配入口在 `main` 正常返回后通过 `exit(0)` 结束程序。程序需要报告非零状态时仍可显式调用 `syscall::exit(状态码)`。
+- `user/src/lib.rs` 提供共用的 `no_std` 运行时，统一链接入口汇编、panic handler、`print!`/`println!` 输出宏和入口适配。输出宏经 `core::fmt::Write` 与 `write` syscall 写入 fd 1，不需要堆分配；内核验证缓冲区位于当前程序镜像或任务栈内。格式化输出错误由便捷宏忽略，需要检查时可调用 `fullemu_user::print`。panic handler 输出 panic 信息后通过 `exit(1)` 结束当前任务，避免协作式调度下自旋占用 CPU。每个 bin 用普通 Rust `pub fn main()` 表达程序主体，并调用 `fullemu_user::user_entry!(main)` 生成汇编所需的 `user_main` C ABI 入口；该适配入口在 `main` 正常返回后通过 `exit(0)` 结束程序。程序需要报告非零状态时仍可显式调用 `syscall::exit(状态码)`。
 - 构建清单中的每个镜像复制到独立的 64 KiB 槽位。链接脚本为最多 8 个镜像预留连续区域；用户程序槽位按清单索引分配。
 - 每个任务拥有独立的 16 KiB U-mode 栈、16 KiB S-mode 陷入栈和完整 `TrapFrame`。陷入时保存当前帧；恢复时可以返回另一个任务的帧。
-- 调度器使用固定数组记录 `Empty`、`Ready`、`Running` 和 `Exited` 状态，不动态分配内存。选择策略为按清单顺序轮转。
+- 调度器使用固定数组记录 `Empty`、`Ready`、`Running`、`Exited` 和 `Faulted` 状态，不动态分配内存。选择策略为按清单顺序轮转。
 - 内核识别 `sched_yield`，将当前任务标为就绪并选择下一个就绪任务。任务再次被选中时从 `ecall` 之后继续执行，系统调用返回值为 0。
-- `fullemu_user_task_a` 和 `fullemu_user_task_b` 各输出三步进度，每步后主动让出 CPU，展示两份执行现场交替恢复。
-- 任务调用现有 `exit` 后标为结束，调度器继续运行其他就绪任务；所有任务退出后，hart 进入等待状态。
+- `fullemu_user_compute` 计算 1 到 10000 的平方和并格式化输出结果；`fullemu_user_io` 展示 stdout、stderr 和多次写入。
+- `fullemu_user_cpu_hog` 执行有限的长循环且不主动让出 CPU，用于观察协作式调度无法在任务运行中切换。
+- `fullemu_user_cooperative_a` 和 `fullemu_user_cooperative_b` 各输出三步进度，每步后主动让出 CPU，展示两份执行现场交替恢复。
+- `fullemu_user_illegal_instruction` 执行非法机器指令；内核记录用户异常，将该任务标记为异常终止并继续运行其他就绪任务。
+- 任务调用现有 `exit` 后标为结束；U-mode 指令异常将当前任务标为异常终止，调度器继续运行其他就绪任务。所有任务结束或异常终止后，hart 进入等待状态。
+- 用户程序通过具名 bin 演示计算、控制台输出、有限时长的 CPU 密集执行、`sched_yield` 协作切换和非法指令异常；CPU 密集程序不主动让出 CPU，用于观察其他就绪任务在它退出前无法运行。
 
 ## 暂不实现
 
 - 当前只有协作式切换。一个任务若不调用 `sched_yield` 或其他会切换的系统调用，就能持续占有 CPU；尚未把 SBI 定时器中断接入当前用户任务调度路径。
+- 用户态异常只会终止当前任务并继续调度，不支持信号、异常恢复或完整 Linux 进程退出语义。
 - 尚无阻塞任务、等待队列、用户态 `read`、设备中断唤醒或空闲任务。`sched_yield` 让出的是调度机会，不代表任务在等待 I/O。
 - `satp=BARE`，U-mode 程序仍可读写内核和其他任务的内存。独立镜像槽位和栈只是资源分配，不构成权限隔离；当前任务仅用于受控教学演示。
 - 镜像仍是编译期嵌入的原始二进制，不支持 ELF 重定位或动态加载。当前简单程序在不同槽位运行已由 QEMU 验证，不代表任意位置相关程序都可搬移。
@@ -34,7 +39,7 @@ make build
 make run
 ```
 
-QEMU 串口应先报告所有程序已装入不同入口地址。基础演示程序退出后，应交替显示 `Task A: step 1`、`Task B: step 1`、`Task A: step 2`、`Task B: step 2`、`Task A: step 3`、`Task B: step 3`。最后两个任务分别通过 `exit` 结束，内核报告所有任务均已退出。
+QEMU 串口应显示计算结果和标准输出/错误输出示例。CPU 密集程序的“开始”和“完成”之间不应出现其他用户任务输出；协作任务的步骤应交错出现；非法指令程序应记录 `IllegalInstruction` 并被终止，随后其他任务仍能继续运行。所有任务结束或异常终止后，内核报告调度完成。
 
 ## 后续连接
 

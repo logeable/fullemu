@@ -17,6 +17,7 @@ enum TaskState {
     Ready,
     Running,
     Exited,
+    Faulted,
 }
 
 static mut USER_STACKS: [TaskStack; MAX_USER_TASKS] =
@@ -162,12 +163,22 @@ pub extern "C" fn supervisor_trap_handler(frame: *mut TrapFrame) -> *mut TrapFra
         frame.trap_value
     );
 
+    if frame.status & (1 << 8) == 0 {
+        save_current_frame(current_index, frame);
+        set_task_state(current_index, TaskState::Faulted);
+        crate::klog_warn!("用户任务 {} 因异常终止", current_index);
+        return schedule_next(current_index);
+    }
+
     stop_forever()
 }
 
 fn schedule_next(previous_index: usize) -> *mut TrapFrame {
     let Some(next_index) = find_next_ready_task(previous_index) else {
-        crate::klog_info!("所有用户任务均已退出，共运行 {} 个任务", task_count());
+        crate::klog_info!(
+            "所有用户任务均已结束或异常终止，共运行 {} 个任务",
+            task_count()
+        );
         stop_forever();
     };
 
@@ -289,6 +300,32 @@ fn set_task_state(index: usize, state: TaskState) {
             state,
         );
     }
+}
+
+/// 判断缓冲区是否完整位于指定任务的 U-mode 栈中。
+pub(super) fn contains_user_stack_range(index: usize, address: usize, length: usize) -> bool {
+    if length == 0 {
+        return true;
+    }
+    if index >= task_count() {
+        return false;
+    }
+
+    let Some(stack_offset) = index.checked_mul(core::mem::size_of::<TaskStack>()) else {
+        return false;
+    };
+    let Some(stack_start) = (core::ptr::addr_of!(USER_STACKS) as usize).checked_add(stack_offset)
+    else {
+        return false;
+    };
+    let Some(stack_end) = stack_start.checked_add(USER_STACK_SIZE) else {
+        return false;
+    };
+    let Some(buffer_end) = address.checked_add(length) else {
+        return false;
+    };
+
+    address >= stack_start && buffer_end <= stack_end
 }
 
 fn report_load_error(error: super::user_program::UserProgramLoadError) {

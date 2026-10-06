@@ -61,11 +61,21 @@ fn write(
         return 0;
     }
 
-    if !super::user_program::contains_buffer_range(program_index, buffer_address, count) {
+    let buffer_is_in_program =
+        super::user_program::contains_buffer_range(program_index, buffer_address, count);
+    let buffer_is_in_stack =
+        super::user_mode::contains_user_stack_range(program_index, buffer_address, count);
+    if !buffer_is_in_program && !buffer_is_in_stack {
+        crate::klog_trace!(
+            "拒绝任务 {} 的 write 缓冲区：地址={:#018x}，长度={}",
+            program_index,
+            buffer_address,
+            count
+        );
         return LinuxErrno::Fault.return_value();
     }
 
-    // 安全性：范围检查保证每个待读字节位于已加载的用户镜像内；单 hart 实验中用户程序在陷入期间暂停。
+    // 安全性：范围检查保证待读字节位于当前任务的镜像或独立用户栈内；系统调用期间任务暂停。
     for offset in 0..count {
         let byte = unsafe { core::ptr::read_volatile((buffer_address as *const u8).add(offset)) };
         console::write_byte(byte);

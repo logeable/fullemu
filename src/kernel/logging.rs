@@ -1,4 +1,4 @@
-//! 为内核诊断提供级别、来源和统一前缀；实际字节输出仍由平台 console 完成。
+//! 为内核诊断提供时间计数、级别、来源和统一前缀；实际字节输出仍由平台 console 完成。
 
 use core::fmt;
 
@@ -57,9 +57,11 @@ pub fn log(level: Level, target: &str, arguments: fmt::Arguments<'_>) {
         return;
     }
 
+    let time = crate::arch::riscv64::sbi::read_time();
     console::write_fmt(format_args!(
-        "[{} {}] {}\n",
+        "[{} tick={} {}] {}\n",
         level.label(),
+        time,
         target,
         arguments
     ));
