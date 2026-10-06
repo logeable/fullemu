@@ -7,8 +7,6 @@ use core::fmt;
 
 const UART_BASE: usize = 0x1000_0000;
 const UART_LINE_STATUS: usize = UART_BASE + 5;
-// 当前 CPU 饥饿基线不读取串口；该状态位供后续交互实验复用。
-#[allow(dead_code)]
 const RECEIVER_DATA_READY: u8 = 1 << 0;
 const TRANSMITTER_EMPTY: u8 = 1 << 5;
 
@@ -34,18 +32,25 @@ pub fn write_fmt(arguments: fmt::Arguments<'_>) {
 /// 阻塞等待并读取一个串口输入字节。
 ///
 /// 当前通过轮询接收状态寄存器等待数据，不依赖中断或调度器。
-// 当前 CPU 饥饿基线不处理输入，保留此接口供后续交互实验使用。
-#[allow(dead_code)]
 pub fn read_byte() -> u8 {
     loop {
-        // 安全性：UART 状态寄存器和接收数据寄存器位于 QEMU `virt` 约定的 MMIO 地址；
-        // 只有状态寄存器报告接收数据就绪后，才读取接收数据寄存器。
-        unsafe {
-            if core::ptr::read_volatile(UART_LINE_STATUS as *const u8) & RECEIVER_DATA_READY != 0 {
-                return core::ptr::read_volatile(UART_BASE as *const u8);
-            }
+        if let Some(byte) = try_read_byte() {
+            return byte;
         }
         core::hint::spin_loop();
+    }
+}
+
+/// 若 UART 接收寄存器已有数据则读取一个字节，否则立即返回。
+pub fn try_read_byte() -> Option<u8> {
+    // 安全性：UART 状态寄存器和接收数据寄存器位于 QEMU `virt` 约定的 MMIO 地址；
+    // 只有状态寄存器报告接收数据就绪后，才读取接收数据寄存器。
+    unsafe {
+        if core::ptr::read_volatile(UART_LINE_STATUS as *const u8) & RECEIVER_DATA_READY != 0 {
+            Some(core::ptr::read_volatile(UART_BASE as *const u8))
+        } else {
+            None
+        }
     }
 }
 

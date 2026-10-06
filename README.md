@@ -1,6 +1,6 @@
 # fullemu
 
-fullemu 是一个以可读性和教学为优先的 Rust 操作系统项目。当前实现从 QEMU RISC-V `virt` 平台启动，将独立构建的 no_std 用户程序作为原始镜像加载后进入 U-mode。内核支持最小的 Linux RISC-V `write`、`exit` 和 `sched_yield` 系统调用，并在单 hart 上通过 `sched_yield` 和定时器中断调度多个嵌入式用户程序。用户程序示例覆盖计算、控制台 I/O、CPU 密集执行、主动协作和非法指令异常。源码按内核职责和稳定概念组织，阶段编号只用于文档中的教学脉络。
+fullemu 是一个以可读性和教学为优先的 Rust 操作系统项目。当前实现从 QEMU RISC-V `virt` 平台启动，将独立构建的 no_std 用户程序作为原始镜像加载后进入 U-mode。内核默认启动用户态 shell，支持输入、通过 `help` 查看内置命令，以及通过 `uptime` 显示单调运行时间。内核实现 Linux RISC-V `read`、`write`、`clock_gettime`、`exit` 和 `sched_yield` 的有限子集，并使用定时器中断调度用户任务。其他用户程序示例仍会嵌入内核，但当前 shell 尚不能启动它们。源码按内核职责和稳定概念组织，阶段编号只用于文档中的教学脉络。
 
 ## 快速开始
 
@@ -12,7 +12,7 @@ make build
 make run
 ```
 
-`make build` 会先构建独立的 `user/` 程序，将每个 bin 链接到构建清单分配的固定 64 KiB 槽位，再把 ELF 转换为原始二进制。`user/target/riscv64gc-unknown-none-elf/release/user-programs.manifest` 记录程序名、链接基址、入口偏移和镜像路径，内核构建与运行时加载都会校验链接基址和目标槽位一致。新增或移除 `user/src/bin/` 下的程序时，布局及镜像清单会随 `make build-user` 更新。若只需编译不含用户程序的内核，可运行 `make build-kernel` 或直接运行 `cargo build --target riscv64gc-unknown-none-elf`；无镜像时内核启动后会记录提示并等待。当前 syscall 仅支持串口 `write` 子集和 `exit`，不代表已兼容完整 Linux ABI。按 `Ctrl-C` 结束 QEMU。
+`make build` 会先构建独立的 `user/` 程序，将每个 bin 链接到构建清单分配的固定 64 KiB 槽位，再把 ELF 转换为原始二进制。`user/target/riscv64gc-unknown-none-elf/release/user-programs.manifest` 记录程序名、链接基址、入口偏移和镜像路径，内核构建与运行时加载都会校验链接基址和目标槽位一致。新增或移除 `user/src/bin/` 下的程序时，布局及镜像清单会随 `make build-user` 更新。若只需编译不含用户程序的内核，可运行 `make build-kernel` 或直接运行 `cargo build --target riscv64gc-unknown-none-elf`；无 shell 镜像时内核启动后会记录提示并等待。当前 syscall 仅实现上述 Linux ABI 的有限子集，不代表已兼容完整 Linux 用户态。按 `Ctrl-C` 结束 QEMU。
 
 若 QEMU 可执行文件不在 PATH，可运行 `make run QEMU=/path/to/qemu-system-riscv64`。也可以单独运行 `make build-user` 构建用户程序。
 
@@ -37,4 +37,5 @@ make run
 - [第 16 阶段：多个嵌入式用户程序批量执行](docs/phase-16-user-program-batch.md) 记录独立用户二进制的构建、逐个装载、通过 `exit` 切换及当前批处理限制。
 - [第 17 阶段：协作式多道用户程序](docs/phase-17-cooperative-multiprogramming.md) 记录多个用户程序同时驻留、`sched_yield` 轮转和当前调度限制。
 - [第 18 阶段：用户任务定时器抢占](docs/phase-18-user-timer-preemption.md) 记录 SBI 定时器如何让不主动让出的 U-mode 任务被切出，避免其他就绪任务饥饿。
+- [第 19 阶段：用户态简易 shell](docs/phase-19-user-shell.md) 记录内核默认启动 shell、UART 输入系统调用，以及 `help` 和 `uptime` 内置命令。
 - [项目原则与代码规范](docs/development-principles.md) 是设计和协作规范。

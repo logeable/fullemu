@@ -3,11 +3,12 @@
 use crate::arch::riscv64::trap::{ExceptionCause, InterruptCause, TrapCause, TrapFrame};
 
 const MAX_USER_TASKS: usize = 8;
+const SHELL_PROGRAM_NAME: &str = "fullemu_user_shell";
 const USER_STACK_SIZE: usize = 16 * 1024;
 const KERNEL_TRAP_STACK_SIZE: usize = 16 * 1024;
 const SSTATUS_SPP: usize = 1 << 8;
-// QEMU virt 的 timebase 为 10 MHz；100,000 tick 对应 10 ms 时间片。
-const TIME_SLICE_TICKS: u64 = 100_000;
+// 按 QEMU virt 的时间基准将时间片固定为 10 ms。
+const TIME_SLICE_TICKS: u64 = crate::arch::riscv64::sbi::QEMU_VIRT_TIMEBASE_FREQUENCY_HZ / 100;
 
 #[repr(align(16))]
 #[derive(Clone, Copy)]
@@ -29,76 +30,65 @@ static mut KERNEL_TRAP_STACKS: [TaskStack; MAX_USER_TASKS] =
     [TaskStack([0; USER_STACK_SIZE]); MAX_USER_TASKS];
 static mut TASK_STATES: [TaskState; MAX_USER_TASKS] = [TaskState::Empty; MAX_USER_TASKS];
 static mut SAVED_FRAMES: [usize; MAX_USER_TASKS] = [0; MAX_USER_TASKS];
+static mut TASK_PROGRAM_INDICES: [usize; MAX_USER_TASKS] = [0; MAX_USER_TASKS];
 static mut TASK_COUNT: usize = 0;
 static mut CURRENT_TASK_INDEX: usize = 0;
 
-/// 装入所有程序并从第一个任务开始协作式轮转。
-pub fn run_user_programs() -> ! {
-    let task_count = super::user_program::count();
-    if task_count == 0 {
-        crate::klog_info!("内核未嵌入用户程序；hart 进入等待状态");
+/// 装入默认用户态 shell 并开始运行。
+pub fn run_shell() -> ! {
+    let Some(program_index) = super::user_program::find_index(SHELL_PROGRAM_NAME) else {
+        crate::klog_info!("内核未嵌入默认 shell；hart 进入等待状态");
         stop_forever();
-    }
-    if task_count > MAX_USER_TASKS {
-        crate::klog_error!("用户程序数量超过静态任务上限：{}", task_count);
-        stop_forever();
-    }
+    };
 
-    // 安全性：初始化只在单 hart 启动路径执行，所有任务静态槽位此时尚未运行。
+    // 安全性：初始化只在单 hart 启动路径执行，唯一任务位于静态槽位零。
     unsafe {
-        core::ptr::write_volatile(core::ptr::addr_of_mut!(TASK_COUNT), task_count);
+        core::ptr::write_volatile(core::ptr::addr_of_mut!(TASK_COUNT), 1);
         core::ptr::write_volatile(core::ptr::addr_of_mut!(CURRENT_TASK_INDEX), 0);
+        core::ptr::write_volatile(
+            core::ptr::addr_of_mut!(TASK_PROGRAM_INDICES).cast::<usize>(),
+            program_index,
+        );
     }
 
-    for index in 0..task_count {
-        let program = match super::user_program::load(index) {
-            Ok(Some(program)) => program,
-            Ok(None) => {
-                crate::klog_error!("程序清单在索引 {} 处意外结束", index);
-                stop_forever();
-            }
-            Err(error) => {
-                report_load_error(error);
-                stop_forever();
-            }
-        };
-
-        let user_stack_top = reset_user_stack(index);
-        let kernel_stack_top = task_kernel_stack_top(index);
-        let initial_frame_address = kernel_stack_top - core::mem::size_of::<TrapFrame>();
-        let initial_frame = TrapFrame::for_user_entry(program.entry, user_stack_top);
-
-        // 安全性：索引已限制在静态数组范围内，陷入帧放在对应任务专属内核栈的顶部。
-        unsafe {
-            core::ptr::write(initial_frame_address as *mut TrapFrame, initial_frame);
-            core::ptr::write_volatile(
-                core::ptr::addr_of_mut!(SAVED_FRAMES)
-                    .cast::<usize>()
-                    .add(index),
-                initial_frame_address,
-            );
-            core::ptr::write_volatile(
-                core::ptr::addr_of_mut!(TASK_STATES)
-                    .cast::<TaskState>()
-                    .add(index),
-                TaskState::Ready,
-            );
+    let program = match super::user_program::load(program_index) {
+        Ok(Some(program)) => program,
+        Ok(None) => {
+            crate::klog_error!("用户程序清单在索引 {} 处没有 shell", program_index);
+            stop_forever();
         }
+        Err(error) => {
+            report_load_error(error);
+            stop_forever();
+        }
+    };
 
-        crate::klog_info!(
-            "任务 {} 已驻留：{}，入口 {:#018x}，镜像 {} 字节",
-            index,
-            program.name,
-            program.entry,
-            program.image_size
+    let user_stack_top = reset_user_stack(0);
+    let kernel_stack_top = task_kernel_stack_top(0);
+    let initial_frame_address = kernel_stack_top - core::mem::size_of::<TrapFrame>();
+    let initial_frame = TrapFrame::for_user_entry(program.entry, user_stack_top);
+
+    // 安全性：陷入帧放在首个静态任务专属内核栈的顶部，任务索引固定为零。
+    unsafe {
+        core::ptr::write(initial_frame_address as *mut TrapFrame, initial_frame);
+        core::ptr::write_volatile(
+            core::ptr::addr_of_mut!(SAVED_FRAMES).cast::<usize>(),
+            initial_frame_address,
+        );
+        core::ptr::write_volatile(
+            core::ptr::addr_of_mut!(TASK_STATES).cast::<TaskState>(),
+            TaskState::Ready,
         );
     }
 
     crate::klog_info!(
-        "启动 {} 个用户任务；sched_yield 与 10 ms 定时器时间片共同触发切换",
-        task_count
+        "默认 shell 已装入：{}，入口 {:#018x}，镜像 {} 字节",
+        program.name,
+        program.entry,
+        program.image_size
     );
-    crate::klog_warn!("当前 satp 使用 BARE，用户任务仍可访问内核和其他任务的内存");
+    crate::klog_info!("启动用户态 shell；定时器中断保持调度响应");
+    crate::klog_warn!("当前 satp 使用 BARE，shell 仍可访问内核内存");
 
     // 安全性：初始化期间先关闭所有 S-mode 中断；用户任务启动前再单独开启定时器中断。
     unsafe {
@@ -155,7 +145,12 @@ pub extern "C" fn supervisor_trap_handler(frame: *mut TrapFrame) -> *mut TrapFra
             frame.registers[11],
             frame.registers[12],
         ];
-        match super::syscall::dispatch(current_index, syscall_number, arguments) {
+        match super::syscall::dispatch(
+            current_index,
+            task_program_index(current_index),
+            syscall_number,
+            arguments,
+        ) {
             super::syscall::SyscallOutcome::Return(result) => {
                 frame.registers[10] = result as usize;
                 frame.exception_pc += 4;
@@ -307,6 +302,17 @@ fn save_current_frame(index: usize, frame: &mut TrapFrame) {
 fn current_task_index() -> usize {
     // 安全性：当前任务索引只由单 hart 的启动路径和陷入处理器访问。
     unsafe { core::ptr::read_volatile(core::ptr::addr_of!(CURRENT_TASK_INDEX)) }
+}
+
+fn task_program_index(index: usize) -> usize {
+    // 安全性：当前任务索引由调度器限制在已创建任务范围内。
+    unsafe {
+        core::ptr::read_volatile(
+            core::ptr::addr_of!(TASK_PROGRAM_INDICES)
+                .cast::<usize>()
+                .add(index),
+        )
+    }
 }
 
 fn task_count() -> usize {

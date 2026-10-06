@@ -44,9 +44,11 @@ impl UserProgramLoadError {
     }
 }
 
-/// 返回构建清单中的程序数量。
-pub fn count() -> usize {
-    USER_PROGRAMS.len()
+/// 按构建清单名称查找程序索引。
+pub fn find_index(name: &str) -> Option<usize> {
+    USER_PROGRAMS
+        .iter()
+        .position(|program| program.name == name)
 }
 
 /// 将指定程序装入独立槽位；索引超出清单时表示没有该程序。

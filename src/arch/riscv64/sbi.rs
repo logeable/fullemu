@@ -2,6 +2,8 @@
 
 const TIME_EXTENSION_ID: usize = 0x5449_4d45;
 const SET_TIMER_FUNCTION_ID: usize = 0;
+/// 当前目标 QEMU `virt` 的 `timebase-frequency`。
+pub const QEMU_VIRT_TIMEBASE_FREQUENCY_HZ: u64 = 10_000_000;
 
 /// SBI 返回的错误码。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

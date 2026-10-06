@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 
-//! 从 OpenSBI 进入 Rust，通过 QEMU 串口报告启动信息并运行 U-mode 特权边界演示。
+//! 从 OpenSBI 进入 Rust，通过 QEMU 串口报告启动信息并运行用户态 shell。
 
 mod arch;
 
@@ -15,6 +15,7 @@ use fullemu::boot::info::BootInfo;
 /// 本阶段只运行一个 hart，并打印固件交接信息。
 #[no_mangle]
 pub extern "C" fn kernel_main(hart_id: usize, device_tree: usize) -> ! {
+    kernel::clock::initialize();
     crate::klog_info!("fullemu 已在 QEMU virt (RISC-V) 启动");
     crate::klog_info!("启动 hart：{hart_id:#018x}");
     crate::klog_info!("设备树地址：{device_tree:#018x}");
@@ -87,7 +88,7 @@ pub extern "C" fn kernel_main(hart_id: usize, device_tree: usize) -> ! {
         }
     }
 
-    kernel::user_mode::run_user_programs();
+    kernel::user_mode::run_shell();
 }
 
 fn report_fdt_structure_error(error: fullemu::boot::fdt::FdtStructureError) -> ! {
