@@ -5,24 +5,6 @@
 
 mod arch;
 
-/// 使用当前平台的串口输出 Rust 格式化内容。
-macro_rules! print {
-    ($($argument:tt)*) => {{
-        $crate::arch::riscv64::console::write_fmt(core::format_args!($($argument)*));
-    }};
-}
-
-/// 输出一行格式化内容，并追加换行符。
-macro_rules! println {
-    () => {
-        print!("\n");
-    };
-    ($($argument:tt)*) => {{
-        print!($($argument)*);
-        print!("\n");
-    }};
-}
-
 mod kernel;
 
 use fullemu::boot::fdt::{FdtBlob, FdtHeader, FdtStructureEvent};
@@ -46,15 +28,14 @@ pub extern "C" fn kernel_main(hart_id: usize, device_tree: usize) -> ! {
         }
     };
 
-    println!("FDT version:      {}", fdt_header.version);
-    println!("FDT total size:   {} bytes", fdt_header.total_size);
-    println!(
-        "FDT structure:    offset {:#010x}, size {} bytes",
-        fdt_header.structure_offset, fdt_header.structure_size
-    );
-    println!(
-        "FDT strings:      offset {:#010x}, size {} bytes",
-        fdt_header.strings_offset, fdt_header.strings_size
+    crate::klog_debug!(
+        "FDT 头部：版本={}，总长度={} 字节，结构区=偏移 {:#010x}/{} 字节，字符串区=偏移 {:#010x}/{} 字节",
+        fdt_header.version,
+        fdt_header.total_size,
+        fdt_header.structure_offset,
+        fdt_header.structure_size,
+        fdt_header.strings_offset,
+        fdt_header.strings_size
     );
 
     // 安全性：OpenSBI 提供完整且可读的 FDT；头部已验证总长度至少覆盖所有声明区块。
@@ -70,38 +51,34 @@ pub extern "C" fn kernel_main(hart_id: usize, device_tree: usize) -> ! {
         Err(error) => report_boot_info_error(error),
     };
 
-    println!("物理内存范围：");
     for region in boot_info.memory_regions() {
-        println!(
-            "  起始地址：{:#018x}，长度：{:#018x}",
-            region.start, region.size
+        crate::klog_debug!(
+            "FDT 物理内存区域：起始地址={:#018x}，长度={:#018x}",
+            region.start,
+            region.size
         );
     }
 
-    println!("固件保留范围：");
     for region in boot_info.reservations() {
-        println!(
-            "  起始地址：{:#018x}，长度：{:#018x}",
-            region.address, region.size
+        crate::klog_debug!(
+            "FDT 固件保留区域：起始地址={:#018x}，长度={:#018x}",
+            region.address,
+            region.size
         );
     }
 
     let mut structure = fdt.structure();
 
-    println!("FDT 结构摘要：");
     loop {
         match structure.next_event() {
             Ok(Some(FdtStructureEvent::BeginNode { name, depth })) => {
-                for _ in 0..depth {
-                    print!("  ");
-                }
-                println!("- {name}");
+                crate::klog_trace!("FDT 节点：深度={depth}，名称={name}");
             }
             Ok(Some(FdtStructureEvent::Property { name, value, depth })) => {
-                for _ in 0..depth {
-                    print!("  ");
-                }
-                println!("  {name}: {} bytes", value.len());
+                crate::klog_trace!(
+                    "FDT 属性：深度={depth}，名称={name}，长度={} 字节",
+                    value.len()
+                );
             }
             Ok(Some(FdtStructureEvent::End)) => break,
             Ok(Some(_)) => {}

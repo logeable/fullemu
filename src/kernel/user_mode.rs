@@ -81,7 +81,7 @@ pub extern "C" fn supervisor_trap_handler(frame: *mut TrapFrame) -> *mut TrapFra
             frame.registers[12],
         ];
         crate::klog_debug!(
-            "用户系统调用：编号={}，参数={:#x?}",
+            "用户系统调用：编号={}，参数={:x?}",
             syscall_number,
             arguments
         );

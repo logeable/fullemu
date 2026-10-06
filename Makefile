@@ -1,6 +1,7 @@
 CARGO ?= cargo
 QEMU ?= qemu-system-riscv64
 OBJCOPY ?= rust-objcopy
+LOG_LEVEL ?= info
 TARGET := riscv64gc-unknown-none-elf
 HOST_TARGET := $(shell rustc -vV | sed -n 's/^host: //p')
 KERNEL := target/$(TARGET)/release/fullemu
@@ -12,7 +13,7 @@ USER_APP_BIN := $(USER_APP_ELF).bin
 all: build
 
 build: build-user
-	$(CARGO) build --release --target $(TARGET)
+	FULLEMU_LOG_LEVEL=$(LOG_LEVEL) $(CARGO) build --release --target $(TARGET)
 
 build-user:
 	cd user && $(CARGO) build --release --target $(TARGET)

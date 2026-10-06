@@ -31,15 +31,29 @@ impl Level {
     }
 }
 
-/// 当前日志阈值：仅输出错误、警告和重要运行事件。
-const MAXIMUM_LEVEL: Level = Level::Info;
+/// 根据编译时环境变量选择日志阈值；未设置或取值无效时使用 `Info`。
+fn maximum_level() -> Option<Level> {
+    match option_env!("FULLEMU_LOG_LEVEL").unwrap_or("info") {
+        "off" => None,
+        "error" => Some(Level::Error),
+        "warn" => Some(Level::Warn),
+        "info" => Some(Level::Info),
+        "debug" => Some(Level::Debug),
+        "trace" => Some(Level::Trace),
+        _ => Some(Level::Info),
+    }
+}
 
 /// 输出一条带级别和模块来源的内核日志。
 ///
 /// 日志通过平台 console 同步输出，不申请堆内存。当前实现没有锁，调用方不得依赖它
 /// 在多个 hart、可抢占上下文或嵌套中断之间保持整条记录的原子性。
 pub fn log(level: Level, target: &str, arguments: fmt::Arguments<'_>) {
-    if level > MAXIMUM_LEVEL {
+    let Some(maximum_level) = maximum_level() else {
+        return;
+    };
+
+    if level > maximum_level {
         return;
     }
 
