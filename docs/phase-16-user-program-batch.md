@@ -10,7 +10,7 @@
 
 ## 实现范围
 
-- `user/src/bin/` 集中放置每个独立用户程序的入口源码；Cargo 自动按文件名发现二进制目标。`user/src/` 保留共享的 syscall 封装和启动汇编，避免程序入口目录混入公共实现。`make build-user` 构建这些二进制，用 `rust-objcopy` 转成原始镜像，并自动生成 `user/target/<目标三元组>/release/user-programs.manifest`；新增或移除入口源码会同步改变清单内容。
+- `user/src/bin/` 集中放置每个独立用户程序的入口源码；Cargo 自动按文件名发现二进制目标。`user/src/lib.rs` 和 `user/src/syscall.rs` 提供共享运行时，避免每个程序重复定义 panic handler 和引入启动汇编。`make build-user` 构建这些二进制，用 `rust-objcopy` 转成原始镜像，并自动生成 `user/target/<目标三元组>/release/user-programs.manifest`；新增或移除入口源码会同步改变清单内容。
 - 内核包的 `build.rs` 将清单中的镜像复制到 Cargo `OUT_DIR` 并生成静态程序清单。未设置 `FULLEMU_USER_IMAGE_MANIFEST` 时生成空清单，因此 `cargo build` 可独立构建内核；`make build` 先执行 `build-user`，再设置环境变量完成包含用户程序的完整构建。`make build-kernel` 显式清空该变量，构建不嵌入用户程序的内核。
 - 加载器按清单索引返回程序名称、入口和镜像长度，将镜像复制到同一个固定 64 KiB 区域。每次装入前清零整个区域并执行 `fence.i`。
 - 用户程序共享一个静态栈；每次启动前由内核清零。批次仅串行执行一个用户程序，不保存并发任务的上下文。
@@ -38,4 +38,4 @@ QEMU 串口应依次显示 `[stdout]` 问候、`[stderr]` 诊断文本，以及�
 
 ## 后续连接
 
-批处理证明内核可管理多个应用的顺序执行，但共享加载区不提供安全隔离。下一步应建立 Sv39 用户地址映射和权限边界，让用户程序无法读写内核映射；之后再考虑独立地址空间、文件系统加载和 shell 命令执行。
+顺序批处理证明内核可依次管理多个应用，但没有同时驻留的执行现场。第 17 阶段开始让多个 U-mode 程序同时驻留并协作切换；它们仍共享可访问的内存，之后需要 Sv39 建立真正的地址空间隔离，才能安全运行互不信任的程序。

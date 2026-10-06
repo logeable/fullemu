@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const IMAGE_MANIFEST_ENV: &str = "FULLEMU_USER_IMAGE_MANIFEST";
+const MAX_USER_PROGRAMS: usize = 8;
 
 fn main() {
     println!("cargo:rerun-if-env-changed={IMAGE_MANIFEST_ENV}");
@@ -69,6 +70,9 @@ fn generate_catalog(manifest_path: &Path, output_directory: &Path) -> String {
             .any(|(existing_name, _): &(&str, PathBuf)| *existing_name == name)
         {
             panic!("用户程序镜像清单中出现重复名称：{name}");
+        }
+        if entries.len() == MAX_USER_PROGRAMS {
+            panic!("最多支持同时驻留 {MAX_USER_PROGRAMS} 个用户程序");
         }
 
         let relative_image_path = Path::new(fields[1]);

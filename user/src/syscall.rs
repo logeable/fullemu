@@ -39,3 +39,23 @@ pub fn exit(status: i32) -> ! {
         core::hint::spin_loop();
     }
 }
+
+/// 主动让出 CPU，并在再次获得调度时从系统调用之后继续执行。
+// 多个独立二进制共享此封装，只有需要协作切换的程序会调用它。
+#[allow(dead_code)]
+pub fn sched_yield() -> isize {
+    let mut result = 0isize;
+    let syscall_number = 124;
+
+    // 安全性：寄存器和调用指令遵循 Linux RISC-V syscall ABI；内核负责选择下一个就绪任务。
+    unsafe {
+        core::arch::asm!(
+            "ecall",
+            inlateout("a0") result,
+            in("a7") syscall_number,
+            options(nostack)
+        );
+    }
+
+    result
+}

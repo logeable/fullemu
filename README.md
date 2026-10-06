@@ -1,6 +1,6 @@
 # fullemu
 
-fullemu 是一个以可读性和教学为优先的 Rust 操作系统项目。当前实现从 QEMU RISC-V `virt` 平台启动，将独立构建的 no_std 用户程序作为原始镜像加载后进入 U-mode。内核支持最小的 Linux RISC-V `write` 和 `exit` 系统调用，并顺序批量运行多个嵌入式用户程序。源码按内核职责和稳定概念组织，阶段编号只用于文档中的教学脉络。
+fullemu 是一个以可读性和教学为优先的 Rust 操作系统项目。当前实现从 QEMU RISC-V `virt` 平台启动，将独立构建的 no_std 用户程序作为原始镜像加载后进入 U-mode。内核支持最小的 Linux RISC-V `write`、`exit` 和 `sched_yield` 系统调用，并在单 hart 上协作式调度多个嵌入式用户程序。源码按内核职责和稳定概念组织，阶段编号只用于文档中的教学脉络。
 
 ## 快速开始
 
@@ -35,4 +35,5 @@ make run
 - [第 14 阶段：Linux RISC-V `exit` 系统调用](docs/phase-14-user-exit-syscall.md) 记录用户任务如何通过系统调用结束，以及单任务阶段的终止行为。
 - [第 15 阶段：内核日志基础设施](docs/phase-15-kernel-logging.md) 记录日志级别、模块来源、过滤策略，以及日志与用户控制台输出的边界。
 - [第 16 阶段：多个嵌入式用户程序批量执行](docs/phase-16-user-program-batch.md) 记录独立用户二进制的构建、逐个装载、通过 `exit` 切换及当前批处理限制。
+- [第 17 阶段：协作式多道用户程序](docs/phase-17-cooperative-multiprogramming.md) 记录多个用户程序同时驻留、`sched_yield` 轮转和当前调度限制。
 - [项目原则与代码规范](docs/development-principles.md) 是设计和协作规范。

@@ -1,34 +1,99 @@
-//! 依次运行独立构建的 U-mode 程序，并处理系统调用与特权陷入。
+//! 在单 hart 上协作式调度多个同时驻留的 U-mode 程序。
 
 use crate::arch::riscv64::trap::{ExceptionCause, TrapCause, TrapFrame};
 
-const STACK_SIZE: usize = 16 * 1024;
+const MAX_USER_TASKS: usize = 8;
+const USER_STACK_SIZE: usize = 16 * 1024;
+const KERNEL_TRAP_STACK_SIZE: usize = 16 * 1024;
 
 #[repr(align(16))]
-struct TaskStack([u8; STACK_SIZE]);
+#[derive(Clone, Copy)]
+struct TaskStack([u8; USER_STACK_SIZE]);
 
-static mut USER_STACK: TaskStack = TaskStack([0; STACK_SIZE]);
-static mut KERNEL_TRAP_STACK: TaskStack = TaskStack([0; STACK_SIZE]);
-static mut CURRENT_PROGRAM_INDEX: usize = 0;
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TaskState {
+    Empty,
+    Ready,
+    Running,
+    Exited,
+}
 
-/// 按清单顺序批量运行所有嵌入内核的用户程序。
-pub fn run_user_program_batch() -> ! {
-    let first_program = match super::user_program::load(0) {
-        Ok(Some(program)) => program,
-        Ok(None) => {
-            crate::klog_info!("内核未嵌入用户程序；hart 进入等待状态");
-            stop_forever();
+static mut USER_STACKS: [TaskStack; MAX_USER_TASKS] =
+    [TaskStack([0; USER_STACK_SIZE]); MAX_USER_TASKS];
+static mut KERNEL_TRAP_STACKS: [TaskStack; MAX_USER_TASKS] =
+    [TaskStack([0; USER_STACK_SIZE]); MAX_USER_TASKS];
+static mut TASK_STATES: [TaskState; MAX_USER_TASKS] = [TaskState::Empty; MAX_USER_TASKS];
+static mut SAVED_FRAMES: [usize; MAX_USER_TASKS] = [0; MAX_USER_TASKS];
+static mut TASK_COUNT: usize = 0;
+static mut CURRENT_TASK_INDEX: usize = 0;
+
+/// 装入所有程序并从第一个任务开始协作式轮转。
+pub fn run_user_programs() -> ! {
+    let task_count = super::user_program::count();
+    if task_count == 0 {
+        crate::klog_info!("内核未嵌入用户程序；hart 进入等待状态");
+        stop_forever();
+    }
+    if task_count > MAX_USER_TASKS {
+        crate::klog_error!("用户程序数量超过静态任务上限：{}", task_count);
+        stop_forever();
+    }
+
+    // 安全性：初始化只在单 hart 启动路径执行，所有任务静态槽位此时尚未运行。
+    unsafe {
+        core::ptr::write_volatile(core::ptr::addr_of_mut!(TASK_COUNT), task_count);
+        core::ptr::write_volatile(core::ptr::addr_of_mut!(CURRENT_TASK_INDEX), 0);
+    }
+
+    for index in 0..task_count {
+        let program = match super::user_program::load(index) {
+            Ok(Some(program)) => program,
+            Ok(None) => {
+                crate::klog_error!("程序清单在索引 {} 处意外结束", index);
+                stop_forever();
+            }
+            Err(error) => {
+                report_load_error(error);
+                stop_forever();
+            }
+        };
+
+        let user_stack_top = reset_user_stack(index);
+        let kernel_stack_top = task_kernel_stack_top(index);
+        let initial_frame_address = kernel_stack_top - core::mem::size_of::<TrapFrame>();
+        let initial_frame = TrapFrame::for_user_entry(program.entry, user_stack_top);
+
+        // 安全性：索引已限制在静态数组范围内，陷入帧放在对应任务专属内核栈的顶部。
+        unsafe {
+            core::ptr::write(initial_frame_address as *mut TrapFrame, initial_frame);
+            core::ptr::write_volatile(
+                core::ptr::addr_of_mut!(SAVED_FRAMES)
+                    .cast::<usize>()
+                    .add(index),
+                initial_frame_address,
+            );
+            core::ptr::write_volatile(
+                core::ptr::addr_of_mut!(TASK_STATES)
+                    .cast::<TaskState>()
+                    .add(index),
+                TaskState::Ready,
+            );
         }
-        Err(error) => {
-            report_load_error(error);
-            stop_forever();
-        }
-    };
 
-    crate::klog_info!("开始用户程序批量执行；当前 satp 使用 BARE");
-    crate::klog_warn!("批次中的用户程序仍未与内核内存隔离");
+        crate::klog_info!(
+            "任务 {} 已驻留：{}，入口 {:#018x}，镜像 {} 字节",
+            index,
+            program.name,
+            program.entry,
+            program.image_size
+        );
+    }
 
-    // 安全性：当前批处理不使用定时器；关闭 S-mode 中断并明确保持物理地址直映。
+    crate::klog_info!("启动 {} 个用户任务；使用 sched_yield 协作切换", task_count);
+    crate::klog_warn!("当前 satp 使用 BARE，用户任务仍可访问内核和其他任务的内存");
+
+    // 安全性：本阶段不使用定时器；关中断并保持物理地址直映，任务只在系统调用时切换。
     unsafe {
         core::arch::asm!(
             "csrw sie, zero",
@@ -36,61 +101,27 @@ pub fn run_user_program_batch() -> ! {
             "sfence.vma zero, zero",
             options(nostack)
         );
-    }
-
-    // 安全性：批次索引仅在单 hart 的 S-mode 初始化和系统调用陷入中访问。
-    unsafe {
-        core::ptr::write_volatile(core::ptr::addr_of_mut!(CURRENT_PROGRAM_INDEX), 0);
-    }
-    crate::klog_info!(
-        "装入批次程序 1：{}，入口 {:#018x}，大小 {} 字节",
-        first_program.name,
-        first_program.entry,
-        first_program.image_size
-    );
-
-    let user_stack_top = reset_user_stack();
-    let kernel_stack_top = stack_top(core::ptr::addr_of_mut!(KERNEL_TRAP_STACK));
-    let initial_frame = TrapFrame::for_user_entry(first_program.entry, user_stack_top);
-
-    // 安全性：陷入栈是静态分配且按 16 字节对齐；U-mode 陷入入口会切换到该栈保存现场。
-    unsafe { crate::arch::riscv64::trap::set_user_kernel_stack(kernel_stack_top) };
-
-    // 安全性：初始帧位于当前有效的 S-mode 栈上，入口和用户栈均由固定链接布局保证有效。
-    unsafe { crate::arch::riscv64::trap::start_first_task(&initial_frame) }
-}
-
-fn stack_top(stack: *mut TaskStack) -> usize {
-    // 安全性：调用方传入静态 TaskStack 的独占裸指针；只计算其末尾地址，不解引用。
-    unsafe {
-        core::ptr::addr_of_mut!((*stack).0)
-            .cast::<u8>()
-            .add(STACK_SIZE) as usize
-    }
-}
-
-fn reset_user_stack() -> usize {
-    let stack = core::ptr::addr_of_mut!(USER_STACK);
-
-    // 安全性：首次启动时仍在 S-mode；批次切换时前一程序已陷入且不再运行，用户栈此时可整体清零。
-    unsafe {
-        core::ptr::write_bytes(
-            core::ptr::addr_of_mut!((*stack).0).cast::<u8>(),
-            0,
-            STACK_SIZE,
+        core::ptr::write_volatile(
+            core::ptr::addr_of_mut!(TASK_STATES).cast::<TaskState>(),
+            TaskState::Running,
         );
     }
 
-    stack_top(stack)
+    let first_frame = saved_frame_pointer(0);
+    // 安全性：首个陷入帧及其用户栈、内核栈均为静态分配且按 16 字节对齐。
+    unsafe { crate::arch::riscv64::trap::set_user_kernel_stack(task_kernel_stack_top(0)) };
+    // 安全性：首个陷入帧在对应任务整个生命周期内有效，入口不返回。
+    unsafe { crate::arch::riscv64::trap::start_first_task(first_frame) }
 }
 
-/// 处理用户系统调用、批次切换，或报告不可恢复的用户陷入。
+/// 处理系统调用并返回下一项任务应恢复的陷入帧。
 #[no_mangle]
 pub extern "C" fn supervisor_trap_handler(frame: *mut TrapFrame) -> *mut TrapFrame {
-    // 安全性：汇编入口已切换到静态 S-mode 陷入栈，并在那里构造完整且独占的陷入帧。
+    // 安全性：汇编入口已切换到当前任务的专用内核栈，并在那里构造完整陷入帧。
     let frame = unsafe { &mut *frame };
+    let current_index = current_task_index();
     let cause = TrapCause::decode(frame.cause);
-    crate::klog_trace!("进入 supervisor trap handler：原因={cause:?}");
+    crate::klog_trace!("任务 {} 进入 trap handler：原因={cause:?}", current_index);
 
     if cause == TrapCause::Exception(ExceptionCause::UserEnvironmentCall)
         && frame.status & (1 << 8) == 0
@@ -101,36 +132,31 @@ pub extern "C" fn supervisor_trap_handler(frame: *mut TrapFrame) -> *mut TrapFra
             frame.registers[11],
             frame.registers[12],
         ];
-        crate::klog_debug!(
-            "用户系统调用：编号={}，参数={:x?}",
-            syscall_number,
-            arguments
-        );
-        match super::syscall::dispatch(syscall_number, arguments) {
+        match super::syscall::dispatch(current_index, syscall_number, arguments) {
             super::syscall::SyscallOutcome::Return(result) => {
                 frame.registers[10] = result as usize;
-                // RISC-V 的 ecall 固定为 32 位指令；返回时从其后一条用户指令继续执行。
                 frame.exception_pc += 4;
                 return restore_user_frame(frame);
             }
+            super::syscall::SyscallOutcome::Yield => {
+                frame.registers[10] = 0;
+                frame.exception_pc += 4;
+                save_current_frame(current_index, frame);
+                set_task_state(current_index, TaskState::Ready);
+                return schedule_next(current_index);
+            }
             super::syscall::SyscallOutcome::Exit(status) => {
-                let current_index = current_program_index();
-                crate::klog_info!(
-                    "批次程序 {} 调用 exit 结束，状态码：{status}",
-                    current_index + 1
-                );
-                return start_next_program(frame, current_index + 1);
+                crate::klog_info!("任务 {} 调用 exit 结束，状态码：{status}", current_index);
+                save_current_frame(current_index, frame);
+                set_task_state(current_index, TaskState::Exited);
+                return schedule_next(current_index);
             }
         }
     }
 
     crate::klog_error!(
-        "用户任务陷入：来源={}，原因={cause:?}，scause={:#018x}，sepc={:#018x}，stval={:#018x}",
-        if frame.status & (1 << 8) == 0 {
-            "U-mode"
-        } else {
-            "S-mode"
-        },
+        "用户任务 {} 陷入：原因={cause:?}，scause={:#018x}，sepc={:#018x}，stval={:#018x}",
+        current_index,
         frame.cause,
         frame.exception_pc,
         frame.trap_value
@@ -139,50 +165,135 @@ pub extern "C" fn supervisor_trap_handler(frame: *mut TrapFrame) -> *mut TrapFra
     stop_forever()
 }
 
-fn current_program_index() -> usize {
-    // 安全性：只有本 hart 的 S-mode 初始化和陷入处理器读取该字段；satp=BARE 仍允许用户程序直接访问内核 RAM。
-    unsafe { core::ptr::read_volatile(core::ptr::addr_of!(CURRENT_PROGRAM_INDEX)) }
-}
-
-fn start_next_program(frame: &mut TrapFrame, index: usize) -> *mut TrapFrame {
-    let program = match super::user_program::load(index) {
-        Ok(Some(program)) => program,
-        Ok(None) => {
-            crate::klog_info!("用户程序批次完成，共运行 {index} 个程序");
-            stop_forever();
-        }
-        Err(error) => {
-            report_load_error(error);
-            stop_forever();
-        }
+fn schedule_next(previous_index: usize) -> *mut TrapFrame {
+    let Some(next_index) = find_next_ready_task(previous_index) else {
+        crate::klog_info!("所有用户任务均已退出，共运行 {} 个任务", task_count());
+        stop_forever();
     };
 
-    // 安全性：任务切换在当前 U-mode 任务已陷入后执行，只有本 hart 更新批次索引。
+    set_task_state(next_index, TaskState::Running);
+    // 安全性：只有单 hart 的陷入处理器修改当前任务索引。
     unsafe {
-        core::ptr::write_volatile(core::ptr::addr_of_mut!(CURRENT_PROGRAM_INDEX), index);
+        core::ptr::write_volatile(core::ptr::addr_of_mut!(CURRENT_TASK_INDEX), next_index);
     }
-    crate::klog_info!(
-        "装入批次程序 {}：{}，入口 {:#018x}，大小 {} 字节",
-        index + 1,
-        program.name,
-        program.entry,
-        program.image_size
-    );
 
-    *frame = TrapFrame::for_user_entry(program.entry, reset_user_stack());
-    restore_user_frame(frame)
+    if next_index != previous_index {
+        crate::klog_debug!("任务切换：{} -> {}", previous_index, next_index);
+    }
+
+    let next_frame = saved_frame_pointer(next_index);
+    // 安全性：调度器只返回初始化或先前 trap 保存的专属任务陷入帧。
+    let next_frame = unsafe { &mut *next_frame };
+    restore_user_frame(next_frame)
+}
+
+fn find_next_ready_task(previous_index: usize) -> Option<usize> {
+    let count = task_count();
+    for offset in 1..=count {
+        let candidate = (previous_index + offset) % count;
+        if task_state(candidate) == TaskState::Ready {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn reset_user_stack(index: usize) -> usize {
+    // 安全性：索引已通过任务数量检查；初始化时该任务尚未执行。
+    let stack = unsafe {
+        core::ptr::addr_of_mut!(USER_STACKS)
+            .cast::<TaskStack>()
+            .add(index)
+    };
+    // 安全性：启动或任务首次初始化时，当前任务栈尚无有效现场需要保留。
+    unsafe {
+        core::ptr::write_bytes(
+            core::ptr::addr_of_mut!((*stack).0).cast::<u8>(),
+            0,
+            USER_STACK_SIZE,
+        );
+    }
+    stack_top(stack, USER_STACK_SIZE)
+}
+
+fn task_kernel_stack_top(index: usize) -> usize {
+    // 安全性：索引已通过任务数量检查，地址计算不解引用栈内容。
+    let stack = unsafe {
+        core::ptr::addr_of_mut!(KERNEL_TRAP_STACKS)
+            .cast::<TaskStack>()
+            .add(index)
+    };
+    stack_top(stack, KERNEL_TRAP_STACK_SIZE)
+}
+
+fn stack_top(stack: *mut TaskStack, size: usize) -> usize {
+    // 安全性：调用方传入静态 TaskStack 的有效裸指针；只计算数组末尾地址，不解引用。
+    unsafe { core::ptr::addr_of_mut!((*stack).0).cast::<u8>().add(size) as usize }
 }
 
 fn restore_user_frame(frame: &mut TrapFrame) -> *mut TrapFrame {
-    // 安全性：陷入帧位于专用内核栈顶下方；sscratch 必须恢复为该栈顶以处理下一次 U-mode 陷入。
+    // 安全性：陷入帧位于专用内核栈顶部下方；sscratch 指回该任务的栈顶以处理下一次陷入。
     let kernel_stack_top = frame as *mut TrapFrame as usize + core::mem::size_of::<TrapFrame>();
     unsafe { crate::arch::riscv64::trap::set_user_kernel_stack(kernel_stack_top) };
     frame as *mut TrapFrame
 }
 
+fn saved_frame_pointer(index: usize) -> *mut TrapFrame {
+    // 安全性：索引已限制在任务数组范围内，陷入帧在该任务栈生命周期内保持有效。
+    unsafe {
+        core::ptr::read_volatile(core::ptr::addr_of!(SAVED_FRAMES).cast::<usize>().add(index))
+            as *mut TrapFrame
+    }
+}
+
+fn save_current_frame(index: usize, frame: &mut TrapFrame) {
+    // 安全性：当前陷入帧由本 hart 独占，索引是当前正在运行的有效任务。
+    unsafe {
+        core::ptr::write_volatile(
+            core::ptr::addr_of_mut!(SAVED_FRAMES)
+                .cast::<usize>()
+                .add(index),
+            frame as *mut TrapFrame as usize,
+        );
+    }
+}
+
+fn current_task_index() -> usize {
+    // 安全性：当前任务索引只由单 hart 的启动路径和陷入处理器访问。
+    unsafe { core::ptr::read_volatile(core::ptr::addr_of!(CURRENT_TASK_INDEX)) }
+}
+
+fn task_count() -> usize {
+    // 安全性：任务数量在首次进入 U-mode 前初始化，此后保持不变。
+    unsafe { core::ptr::read_volatile(core::ptr::addr_of!(TASK_COUNT)) }
+}
+
+fn task_state(index: usize) -> TaskState {
+    // 安全性：调用方只传入已创建任务索引，单 hart 保证状态读写不会并发。
+    unsafe {
+        core::ptr::read_volatile(
+            core::ptr::addr_of!(TASK_STATES)
+                .cast::<TaskState>()
+                .add(index),
+        )
+    }
+}
+
+fn set_task_state(index: usize, state: TaskState) {
+    // 安全性：调用方只传入已创建任务索引，单 hart 保证状态读写不会并发。
+    unsafe {
+        core::ptr::write_volatile(
+            core::ptr::addr_of_mut!(TASK_STATES)
+                .cast::<TaskState>()
+                .add(index),
+            state,
+        );
+    }
+}
+
 fn report_load_error(error: super::user_program::UserProgramLoadError) {
     crate::klog_error!(
-        "用户程序 {} 加载失败：{}（镜像 {} 字节，加载区 {} 字节）",
+        "用户程序 {} 加载失败：{}（镜像 {} 字节，加载槽位 {} 字节）",
         error.program_name,
         error.description(),
         error.image_size,
@@ -192,7 +303,7 @@ fn report_load_error(error: super::user_program::UserProgramLoadError) {
 
 fn stop_forever() -> ! {
     loop {
-        // 安全性：当前批次没有更多可运行任务；WFI 让 hart 等待，不再恢复已结束的用户程序。
+        // 安全性：当前没有可运行任务；WFI 让 hart 等待，不再恢复已退出或异常的任务。
         unsafe { core::arch::asm!("wfi", options(nomem, nostack)) };
     }
 }

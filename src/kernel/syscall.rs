@@ -4,6 +4,7 @@ use crate::arch::riscv64::console;
 
 const LINUX_WRITE_SYSCALL: usize = 64;
 const LINUX_EXIT_SYSCALL: usize = 93;
+const LINUX_SCHED_YIELD_SYSCALL: usize = 124;
 const STDOUT_FILE_DESCRIPTOR: usize = 1;
 const STDERR_FILE_DESCRIPTOR: usize = 2;
 
@@ -27,20 +28,31 @@ pub enum SyscallOutcome {
     Return(isize),
     /// 当前任务调用 `exit`；Linux 对外可观察的正常退出码只有低 8 位。
     Exit(u8),
+    /// 当前任务主动让出 CPU，调度器运行另一个就绪任务。
+    Yield,
 }
 
 /// 按 Linux RISC-V syscall ABI 分发调用，并描述返回或任务退出结果。
-pub fn dispatch(number: usize, arguments: [usize; 3]) -> SyscallOutcome {
+pub fn dispatch(program_index: usize, number: usize, arguments: [usize; 3]) -> SyscallOutcome {
     match number {
-        LINUX_WRITE_SYSCALL => {
-            SyscallOutcome::Return(write(arguments[0], arguments[1], arguments[2]))
-        }
+        LINUX_WRITE_SYSCALL => SyscallOutcome::Return(write(
+            program_index,
+            arguments[0],
+            arguments[1],
+            arguments[2],
+        )),
         LINUX_EXIT_SYSCALL => SyscallOutcome::Exit(arguments[0] as i32 as u8),
+        LINUX_SCHED_YIELD_SYSCALL => SyscallOutcome::Yield,
         _ => SyscallOutcome::Return(LinuxErrno::NoSystemCall.return_value()),
     }
 }
 
-fn write(file_descriptor: usize, buffer_address: usize, count: usize) -> isize {
+fn write(
+    program_index: usize,
+    file_descriptor: usize,
+    buffer_address: usize,
+    count: usize,
+) -> isize {
     if file_descriptor != STDOUT_FILE_DESCRIPTOR && file_descriptor != STDERR_FILE_DESCRIPTOR {
         return LinuxErrno::BadFileDescriptor.return_value();
     }
@@ -49,7 +61,7 @@ fn write(file_descriptor: usize, buffer_address: usize, count: usize) -> isize {
         return 0;
     }
 
-    if !super::user_program::contains_buffer_range(buffer_address, count) {
+    if !super::user_program::contains_buffer_range(program_index, buffer_address, count) {
         return LinuxErrno::Fault.return_value();
     }
 
