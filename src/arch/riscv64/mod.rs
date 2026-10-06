@@ -4,8 +4,7 @@ pub mod console;
 // 此上下文切换实现保留第 8 阶段的调用点切换示例，当前默认实验改用完整陷入帧。
 #[allow(dead_code)]
 pub mod context;
-// SBI TIME 接口保留第 9 阶段定时器实验；当前阶段暂不启动定时器。
-#[allow(dead_code)]
+pub mod interrupt;
 pub mod sbi;
 pub mod trap;
 

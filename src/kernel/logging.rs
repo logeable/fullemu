@@ -4,6 +4,9 @@ use core::fmt;
 
 use crate::arch::riscv64::console;
 
+// 当前唯一验证平台 QEMU virt 的 timebase-frequency 为 10 MHz。
+const TIMEBASE_FREQUENCY_HZ: u64 = 10_000_000;
+
 /// 内核日志的严重程度，顺序也表示过滤时的优先级。
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Level {
@@ -57,11 +60,12 @@ pub fn log(level: Level, target: &str, arguments: fmt::Arguments<'_>) {
         return;
     }
 
-    let time = crate::arch::riscv64::sbi::read_time();
+    let counter = crate::arch::riscv64::sbi::read_time();
+    let seconds = counter / TIMEBASE_FREQUENCY_HZ;
+    let microseconds = (counter % TIMEBASE_FREQUENCY_HZ) * 1_000_000 / TIMEBASE_FREQUENCY_HZ;
     console::write_fmt(format_args!(
-        "[{} tick={} {}] {}\n",
+        "[{} time={seconds}.{microseconds:06}s {}] {}\n",
         level.label(),
-        time,
         target,
         arguments
     ));

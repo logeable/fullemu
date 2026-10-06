@@ -1,6 +1,6 @@
 # fullemu
 
-fullemu 是一个以可读性和教学为优先的 Rust 操作系统项目。当前实现从 QEMU RISC-V `virt` 平台启动，将独立构建的 no_std 用户程序作为原始镜像加载后进入 U-mode。内核支持最小的 Linux RISC-V `write`、`exit` 和 `sched_yield` 系统调用，并在单 hart 上协作式调度多个嵌入式用户程序。用户程序示例覆盖计算、控制台 I/O、CPU 密集执行、主动协作和非法指令异常。源码按内核职责和稳定概念组织，阶段编号只用于文档中的教学脉络。
+fullemu 是一个以可读性和教学为优先的 Rust 操作系统项目。当前实现从 QEMU RISC-V `virt` 平台启动，将独立构建的 no_std 用户程序作为原始镜像加载后进入 U-mode。内核支持最小的 Linux RISC-V `write`、`exit` 和 `sched_yield` 系统调用，并在单 hart 上通过 `sched_yield` 和定时器中断调度多个嵌入式用户程序。用户程序示例覆盖计算、控制台 I/O、CPU 密集执行、主动协作和非法指令异常。源码按内核职责和稳定概念组织，阶段编号只用于文档中的教学脉络。
 
 ## 快速开始
 
@@ -36,4 +36,5 @@ make run
 - [第 15 阶段：内核日志基础设施](docs/phase-15-kernel-logging.md) 记录日志级别、模块来源、过滤策略，以及日志与用户控制台输出的边界。
 - [第 16 阶段：多个嵌入式用户程序批量执行](docs/phase-16-user-program-batch.md) 记录独立用户二进制的构建、逐个装载、通过 `exit` 切换及当前批处理限制。
 - [第 17 阶段：协作式多道用户程序](docs/phase-17-cooperative-multiprogramming.md) 记录多个用户程序同时驻留、`sched_yield` 轮转和当前调度限制。
+- [第 18 阶段：用户任务定时器抢占](docs/phase-18-user-timer-preemption.md) 记录 SBI 定时器如何让不主动让出的 U-mode 任务被切出，避免其他就绪任务饥饿。
 - [项目原则与代码规范](docs/development-principles.md) 是设计和协作规范。

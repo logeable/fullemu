@@ -1,10 +1,13 @@
-//! 在单 hart 上协作式调度多个同时驻留的 U-mode 程序。
+//! 在单 hart 上以协作和定时器抢占方式调度多个同时驻留的 U-mode 程序。
 
-use crate::arch::riscv64::trap::{ExceptionCause, TrapCause, TrapFrame};
+use crate::arch::riscv64::trap::{ExceptionCause, InterruptCause, TrapCause, TrapFrame};
 
 const MAX_USER_TASKS: usize = 8;
 const USER_STACK_SIZE: usize = 16 * 1024;
 const KERNEL_TRAP_STACK_SIZE: usize = 16 * 1024;
+const SSTATUS_SPP: usize = 1 << 8;
+// QEMU virt 的 timebase 为 10 MHz；100,000 tick 对应 10 ms 时间片。
+const TIME_SLICE_TICKS: u64 = 100_000;
 
 #[repr(align(16))]
 #[derive(Clone, Copy)]
@@ -91,10 +94,13 @@ pub fn run_user_programs() -> ! {
         );
     }
 
-    crate::klog_info!("启动 {} 个用户任务；使用 sched_yield 协作切换", task_count);
+    crate::klog_info!(
+        "启动 {} 个用户任务；sched_yield 与 10 ms 定时器时间片共同触发切换",
+        task_count
+    );
     crate::klog_warn!("当前 satp 使用 BARE，用户任务仍可访问内核和其他任务的内存");
 
-    // 安全性：本阶段不使用定时器；关中断并保持物理地址直映，任务只在系统调用时切换。
+    // 安全性：初始化期间先关闭所有 S-mode 中断；用户任务启动前再单独开启定时器中断。
     unsafe {
         core::arch::asm!(
             "csrw sie, zero",
@@ -107,6 +113,9 @@ pub fn run_user_programs() -> ! {
             TaskState::Running,
         );
     }
+
+    arm_next_timer_or_stop();
+    crate::arch::riscv64::interrupt::enable_supervisor_timer();
 
     let first_frame = saved_frame_pointer(0);
     // 安全性：首个陷入帧及其用户栈、内核栈均为静态分配且按 16 字节对齐。
@@ -124,8 +133,21 @@ pub extern "C" fn supervisor_trap_handler(frame: *mut TrapFrame) -> *mut TrapFra
     let cause = TrapCause::decode(frame.cause);
     crate::klog_trace!("任务 {} 进入 trap handler：原因={cause:?}", current_index);
 
+    if cause == TrapCause::Interrupt(InterruptCause::SupervisorTimer) {
+        arm_next_timer_or_stop();
+
+        // S-mode 中断目前不会在内核临界路径中嵌套；若未来启用嵌套，保留原帧直接返回。
+        if frame.status & SSTATUS_SPP != 0 {
+            return frame;
+        }
+
+        save_current_frame(current_index, frame);
+        set_task_state(current_index, TaskState::Ready);
+        return schedule_next(current_index);
+    }
+
     if cause == TrapCause::Exception(ExceptionCause::UserEnvironmentCall)
-        && frame.status & (1 << 8) == 0
+        && frame.status & SSTATUS_SPP == 0
     {
         let syscall_number = frame.registers[17];
         let arguments = [
@@ -163,7 +185,7 @@ pub extern "C" fn supervisor_trap_handler(frame: *mut TrapFrame) -> *mut TrapFra
         frame.trap_value
     );
 
-    if frame.status & (1 << 8) == 0 {
+    if frame.status & SSTATUS_SPP == 0 {
         save_current_frame(current_index, frame);
         set_task_state(current_index, TaskState::Faulted);
         crate::klog_warn!("用户任务 {} 因异常终止", current_index);
@@ -196,6 +218,19 @@ fn schedule_next(previous_index: usize) -> *mut TrapFrame {
     // 安全性：调度器只返回初始化或先前 trap 保存的专属任务陷入帧。
     let next_frame = unsafe { &mut *next_frame };
     restore_user_frame(next_frame)
+}
+
+fn arm_next_timer_or_stop() {
+    let Some(deadline) = crate::arch::riscv64::sbi::read_time().checked_add(TIME_SLICE_TICKS)
+    else {
+        crate::klog_error!("计算下一次定时器截止时间时溢出");
+        stop_forever();
+    };
+
+    if let Err(error) = crate::arch::riscv64::sbi::set_timer(deadline) {
+        crate::klog_error!("SBI 设置 supervisor 定时器失败：错误码 {}", error.0);
+        stop_forever();
+    }
 }
 
 fn find_next_ready_task(previous_index: usize) -> Option<usize> {
