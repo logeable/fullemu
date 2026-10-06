@@ -5,25 +5,38 @@ LOG_LEVEL ?= info
 TARGET := riscv64gc-unknown-none-elf
 HOST_TARGET := $(shell rustc -vV | sed -n 's/^host: //p')
 KERNEL := target/$(TARGET)/release/fullemu
-USER_APP_ELF := user/target/$(TARGET)/release/fullemu_user
-USER_APP_BIN := $(USER_APP_ELF).bin
-USER_STDERR_ELF := user/target/$(TARGET)/release/fullemu_user_stderr
-USER_STDERR_BIN := $(USER_STDERR_ELF).bin
-USER_SYSCALL_ERROR_ELF := user/target/$(TARGET)/release/fullemu_user_syscall_error
-USER_SYSCALL_ERROR_BIN := $(USER_SYSCALL_ERROR_ELF).bin
+USER_BUILD_DIR := user/target/$(TARGET)/release
+USER_IMAGE_MANIFEST := $(USER_BUILD_DIR)/user-programs.manifest
 
-.PHONY: all build build-user run test-fdt clean fmt fmt-check
+.PHONY: all build build-kernel build-user run test-fdt clean fmt fmt-check
 
 all: build
 
 build: build-user
-	FULLEMU_LOG_LEVEL=$(LOG_LEVEL) $(CARGO) build --release --target $(TARGET)
+	FULLEMU_USER_IMAGE_MANIFEST=$(USER_IMAGE_MANIFEST) FULLEMU_LOG_LEVEL=$(LOG_LEVEL) $(CARGO) build --release --target $(TARGET)
+
+build-kernel:
+	FULLEMU_USER_IMAGE_MANIFEST= FULLEMU_LOG_LEVEL=$(LOG_LEVEL) $(CARGO) build --release --target $(TARGET)
 
 build-user:
 	cd user && $(CARGO) build --release --bins --target $(TARGET)
-	$(OBJCOPY) --strip-all -O binary $(USER_APP_ELF) $(USER_APP_BIN)
-	$(OBJCOPY) --strip-all -O binary $(USER_STDERR_ELF) $(USER_STDERR_BIN)
-	$(OBJCOPY) --strip-all -O binary $(USER_SYSCALL_ERROR_ELF) $(USER_SYSCALL_ERROR_BIN)
+	@set -eu; \
+	manifest_tmp="$(USER_IMAGE_MANIFEST).tmp"; \
+	set -- user/src/bin/*.rs; \
+	if [ ! -f "$$1" ]; then \
+		printf 'error: user/src/bin 中没有用户程序源码\n' >&2; \
+		exit 1; \
+	fi; \
+	: > "$$manifest_tmp"; \
+	for source in user/src/bin/*.rs; do \
+		program_name=$${source##*/}; \
+		program_name=$${program_name%.rs}; \
+		program_elf="$(USER_BUILD_DIR)/$$program_name"; \
+		program_image="$$program_elf.bin"; \
+		$(OBJCOPY) --strip-all -O binary "$$program_elf" "$$program_image"; \
+		printf '%s %s\n' "$$program_name" "$$program_image" >> "$$manifest_tmp"; \
+	done; \
+	mv "$$manifest_tmp" "$(USER_IMAGE_MANIFEST)"
 
 run: build
 	QEMU="$(QEMU)" ./scripts/run-qemu.sh "$(KERNEL)"

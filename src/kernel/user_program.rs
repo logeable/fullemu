@@ -5,26 +5,7 @@ struct UserProgramImage {
     bytes: &'static [u8],
 }
 
-const USER_PROGRAMS: &[UserProgramImage] = &[
-    UserProgramImage {
-        name: "fullemu_user",
-        bytes: include_bytes!(
-            "../../user/target/riscv64gc-unknown-none-elf/release/fullemu_user.bin"
-        ),
-    },
-    UserProgramImage {
-        name: "fullemu_user_stderr",
-        bytes: include_bytes!(
-            "../../user/target/riscv64gc-unknown-none-elf/release/fullemu_user_stderr.bin"
-        ),
-    },
-    UserProgramImage {
-        name: "fullemu_user_syscall_error",
-        bytes: include_bytes!(
-            "../../user/target/riscv64gc-unknown-none-elf/release/fullemu_user_syscall_error.bin"
-        ),
-    },
-];
+include!(concat!(env!("OUT_DIR"), "/user_program_catalog.rs"));
 
 static mut CURRENT_IMAGE_SIZE: usize = 0;
 

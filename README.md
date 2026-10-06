@@ -1,6 +1,6 @@
 # fullemu
 
-fullemu 是一个以可读性和教学为优先的 Rust 操作系统项目。当前实现从 QEMU RISC-V `virt` 平台启动，单独构建一个 no_std 用户程序，将其作为原始镜像加载后进入 U-mode。用户程序通过 Linux RISC-V syscall ABI 调用 `write` 向串口输出；实验也展示特权指令限制，以及 `satp=BARE` 时 U-mode 仍能读写内核数据的事实。源码按内核职责和稳定概念组织，阶段编号只用于文档中的教学脉络。
+fullemu 是一个以可读性和教学为优先的 Rust 操作系统项目。当前实现从 QEMU RISC-V `virt` 平台启动，将独立构建的 no_std 用户程序作为原始镜像加载后进入 U-mode。内核支持最小的 Linux RISC-V `write` 和 `exit` 系统调用，并顺序批量运行多个嵌入式用户程序。源码按内核职责和稳定概念组织，阶段编号只用于文档中的教学脉络。
 
 ## 快速开始
 
@@ -12,7 +12,7 @@ make build
 make run
 ```
 
-`make build` 会先构建独立的 `user/` 程序，将 ELF 转换为原始二进制，再把二进制镜像作为数据嵌入内核。启动后串口会显示用户程序输出、`write` 返回值、内核数据读写结果，以及读取 `sstatus` 时发生的非法指令陷入。当前 syscall 仅支持串口 `write` 子集，不代表已兼容完整 Linux ABI。按 `Ctrl-C` 结束 QEMU。
+`make build` 会先构建独立的 `user/` 程序，将 ELF 转换为原始二进制，并在 `user/target/riscv64gc-unknown-none-elf/release/user-programs.manifest` 自动生成镜像清单，再把清单中的镜像嵌入内核。新增或移除 `user/src/bin/` 下的程序时，清单会随 `make build-user` 更新。若只需编译不含用户程序的内核，可运行 `make build-kernel` 或直接运行 `cargo build --target riscv64gc-unknown-none-elf`；无镜像时内核启动后会记录提示并等待。当前 syscall 仅支持串口 `write` 子集和 `exit`，不代表已兼容完整 Linux ABI。按 `Ctrl-C` 结束 QEMU。
 
 若 QEMU 可执行文件不在 PATH，可运行 `make run QEMU=/path/to/qemu-system-riscv64`。也可以单独运行 `make build-user` 构建用户程序。
 

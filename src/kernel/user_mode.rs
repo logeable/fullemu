@@ -13,6 +13,18 @@ static mut CURRENT_PROGRAM_INDEX: usize = 0;
 
 /// 按清单顺序批量运行所有嵌入内核的用户程序。
 pub fn run_user_program_batch() -> ! {
+    let first_program = match super::user_program::load(0) {
+        Ok(Some(program)) => program,
+        Ok(None) => {
+            crate::klog_info!("内核未嵌入用户程序；hart 进入等待状态");
+            stop_forever();
+        }
+        Err(error) => {
+            report_load_error(error);
+            stop_forever();
+        }
+    };
+
     crate::klog_info!("开始用户程序批量执行；当前 satp 使用 BARE");
     crate::klog_warn!("批次中的用户程序仍未与内核内存隔离");
 
@@ -26,17 +38,6 @@ pub fn run_user_program_batch() -> ! {
         );
     }
 
-    let first_program = match super::user_program::load(0) {
-        Ok(Some(program)) => program,
-        Ok(None) => {
-            crate::klog_error!("用户程序批次清单为空");
-            stop_forever();
-        }
-        Err(error) => {
-            report_load_error(error);
-            stop_forever();
-        }
-    };
     // 安全性：批次索引仅在单 hart 的 S-mode 初始化和系统调用陷入中访问。
     unsafe {
         core::ptr::write_volatile(core::ptr::addr_of_mut!(CURRENT_PROGRAM_INDEX), 0);
