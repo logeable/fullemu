@@ -1,15 +1,42 @@
-//! 将独立构建的用户程序原始镜像复制到固定加载区。
+//! 管理批量执行所需的独立用户程序镜像，并逐个复制到固定加载区。
 
-const USER_PROGRAM_IMAGE: &[u8] =
-    include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/fullemu_user.bin");
+struct UserProgramImage {
+    name: &'static str,
+    bytes: &'static [u8],
+}
+
+const USER_PROGRAMS: &[UserProgramImage] = &[
+    UserProgramImage {
+        name: "fullemu_user",
+        bytes: include_bytes!(
+            "../../user/target/riscv64gc-unknown-none-elf/release/fullemu_user.bin"
+        ),
+    },
+    UserProgramImage {
+        name: "fullemu_user_stderr",
+        bytes: include_bytes!(
+            "../../user/target/riscv64gc-unknown-none-elf/release/fullemu_user_stderr.bin"
+        ),
+    },
+    UserProgramImage {
+        name: "fullemu_user_syscall_error",
+        bytes: include_bytes!(
+            "../../user/target/riscv64gc-unknown-none-elf/release/fullemu_user_syscall_error.bin"
+        ),
+    },
+];
+
+static mut CURRENT_IMAGE_SIZE: usize = 0;
 
 extern "C" {
     static __user_program_load_start: u8;
     static __user_program_load_end: u8;
 }
 
-/// 已复制到内存中的用户程序入口和镜像长度。
+/// 已复制到内存中的用户程序入口和镜像信息。
 pub struct LoadedUserProgram {
+    /// 用户程序在批次清单中的名称。
+    pub name: &'static str,
     /// 用户程序入口地址。
     pub entry: usize,
     /// 从独立构建产物复制的字节数。
@@ -18,6 +45,8 @@ pub struct LoadedUserProgram {
 
 /// 固定加载区容量不足时返回该错误。
 pub struct UserProgramLoadError {
+    /// 无法装入的用户程序名称。
+    pub program_name: &'static str,
     /// 用户程序镜像实际长度。
     pub image_size: usize,
     /// 链接脚本预留的加载区长度。
@@ -31,16 +60,21 @@ impl UserProgramLoadError {
     }
 }
 
-/// 将独立用户程序镜像复制到链接脚本指定的物理内存区。
-pub fn load() -> Result<LoadedUserProgram, UserProgramLoadError> {
+/// 按批次索引加载用户程序；索引超出清单时表示批次结束。
+pub fn load(index: usize) -> Result<Option<LoadedUserProgram>, UserProgramLoadError> {
+    let Some(program) = USER_PROGRAMS.get(index) else {
+        return Ok(None);
+    };
+
     // 链接器将这两个符号定义为加载区首尾地址，而非存放数据的变量。
     let load_start = core::ptr::addr_of!(__user_program_load_start) as usize;
     let load_end = core::ptr::addr_of!(__user_program_load_end) as usize;
     let capacity = load_end - load_start;
 
-    if USER_PROGRAM_IMAGE.len() > capacity {
+    if program.bytes.len() > capacity {
         return Err(UserProgramLoadError {
-            image_size: USER_PROGRAM_IMAGE.len(),
+            program_name: program.name,
+            image_size: program.bytes.len(),
             capacity,
         });
     }
@@ -50,27 +84,35 @@ pub fn load() -> Result<LoadedUserProgram, UserProgramLoadError> {
     unsafe {
         core::ptr::write_bytes(load_start as *mut u8, 0, capacity);
         core::ptr::copy_nonoverlapping(
-            USER_PROGRAM_IMAGE.as_ptr(),
+            program.bytes.as_ptr(),
             load_start as *mut u8,
-            USER_PROGRAM_IMAGE.len(),
+            program.bytes.len(),
         );
         core::arch::asm!("fence.i", options(nostack));
+        // 安全性：加载仅在任务启动或切换前执行，当前单 hart 没有其他读取该字段的执行流。
+        core::ptr::write_volatile(
+            core::ptr::addr_of_mut!(CURRENT_IMAGE_SIZE),
+            program.bytes.len(),
+        );
     }
 
-    Ok(LoadedUserProgram {
+    Ok(Some(LoadedUserProgram {
+        name: program.name,
         entry: load_start,
-        image_size: USER_PROGRAM_IMAGE.len(),
-    })
+        image_size: program.bytes.len(),
+    }))
 }
 
-/// 判断缓冲区是否完全落在当前固定加载的用户程序镜像中。
+/// 判断缓冲区是否完全落在当前已加载的用户程序镜像中。
 pub fn contains_buffer_range(address: usize, length: usize) -> bool {
     if length == 0 {
         return true;
     }
 
     let image_start = core::ptr::addr_of!(__user_program_load_start) as usize;
-    let Some(image_end) = image_start.checked_add(USER_PROGRAM_IMAGE.len()) else {
+    // 安全性：加载器在运行用户程序前写入当前镜像长度；系统调用时用户程序已暂停。
+    let image_size = unsafe { core::ptr::read_volatile(core::ptr::addr_of!(CURRENT_IMAGE_SIZE)) };
+    let Some(image_end) = image_start.checked_add(image_size) else {
         return false;
     };
     let Some(buffer_end) = address.checked_add(length) else {

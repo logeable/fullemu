@@ -87,7 +87,7 @@ pub extern "C" fn kernel_main(hart_id: usize, device_tree: usize) -> ! {
         }
     }
 
-    kernel::user_mode::run_privilege_boundary_demonstration();
+    kernel::user_mode::run_user_program_batch();
 }
 
 fn report_fdt_structure_error(error: fullemu::boot::fdt::FdtStructureError) -> ! {

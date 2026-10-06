@@ -6,7 +6,15 @@ publish = false
 
 [[bin]]
 name = "fullemu_user"
-path = "src/main.rs"
+path = "src/bin/fullemu_user.rs"
+
+[[bin]]
+name = "fullemu_user_stderr"
+path = "src/bin/fullemu_user_stderr.rs"
+
+[[bin]]
+name = "fullemu_user_syscall_error"
+path = "src/bin/fullemu_user_syscall_error.rs"
 
 [dependencies]
 

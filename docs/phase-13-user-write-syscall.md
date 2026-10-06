@@ -34,13 +34,13 @@ make build
 make run
 ```
 
-串口应先出现：
+阶段 13 初始版本首次 `write` 的输出为：
 
 ```text
 Hello from an independent U-mode program via write syscall!
 ```
 
-阶段 13 初始验收通过在 `write` 返回后触发非法指令，证明 `ecall` 回到原用户上下文继续执行。当前集成程序在 `write` 返回后调用阶段 14 的 `exit` 结束；探针已从当前实现移除。本阶段只记录输出系统调用的接口和行为。
+阶段 13 初始验收通过在 `write` 返回后触发非法指令，证明 `ecall` 回到原用户上下文继续执行。当前集成程序通过 `write` 输出后调用 `exit`；多个用户程序的批量验收见第 16 阶段。本阶段只记录输出系统调用的接口和行为。
 
 ## 后续连接
 
