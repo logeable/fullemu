@@ -16,6 +16,7 @@ Sv39 使用三级页表，虚拟地址由三级 9 位页号索引和 12 位页�
 - 页表只映射启动后仍需访问的区域：内核映像及 BSS、当前 shell 的完整 64 KiB 用户程序槽位、当前任务的 16 KiB 用户栈，以及 QEMU `virt` UART 所在的 4 KiB 页面。以上虚拟地址均恒等映射到相同物理地址。
 - 内核映像和 UART 页面只允许 S-mode 访问。当前 shell 的代码槽位允许 U-mode 读、写、执行，以兼容没有 ELF 段权限信息的原始镜像；用户栈允许 U-mode 读、写，不允许执行。
 - 用户栈按 4 KiB 对齐，确保栈页面不与相邻内核状态共享页面。
+- 新增 `fullemu_user_memory_fault` 用户程序，尝试从 U-mode 读取 `0x80200000`，预期触发加载页故障。内核默认入口为 `fullemu_user_shell`，可通过 `make run BOOT_PROGRAM=fullemu_user_memory_fault` 在构建时选择该示例；shell 启动其他程序仍留待后续实验。
 - 在进入首个用户任务前写入 `satp` 并执行 `sfence.vma`。切换后内核 PC、内核栈和链接地址保持有效。
 - 系统调用仍只接受已知程序镜像或当前用户栈范围内的缓冲区。访问这些经范围检查的地址时，内核仅在单次读写期间设置 `sstatus.SUM`，随后立即清除；其他内核代码保持默认的 U 页面访问限制。
 - 取指、加载和存储页故障由现有用户任务异常路径记录 `scause`、`sepc`、`stval`，并结束当前任务。
@@ -36,7 +37,7 @@ make build
 make run
 ```
 
-启动日志应显示 Sv39 用户/内核页面权限边界已启用。shell 应继续支持输入回显、`help` 和 `uptime`，定时器中断也应继续返回内核。权限拒绝的验收使用临时用户态探针执行 `read_volatile(0x80200000 as *const usize)`；预期 `scause` 报告加载页故障，`stval` 显示 `0x80200000`，内核日志仍可经 UART 输出。探针仅用于验收，验证后移除。仅观察到 shell 正常启动不能证明内核页面权限正确，因此验收还应覆盖一次被拒绝的用户态访问。
+默认运行 `make run` 时，内核应启动 shell。运行 `make run BOOT_PROGRAM=fullemu_user_memory_fault` 时，探针应先打印即将访问的地址，随后内核报告 `LoadPageFault`，`stval` 为 `0x80200000`，并结束该用户任务。仅观察到 shell 正常启动不能证明内核页面权限正确，因此验收还应覆盖一次被拒绝的用户态访问。
 
 ## 后续连接
 

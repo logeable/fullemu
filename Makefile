@@ -2,6 +2,7 @@ CARGO ?= cargo
 QEMU ?= qemu-system-riscv64
 OBJCOPY ?= rust-objcopy
 LOG_LEVEL ?= info
+BOOT_PROGRAM ?= fullemu_user_shell
 TARGET := riscv64gc-unknown-none-elf
 HOST_TARGET := $(shell rustc -vV | sed -n 's/^host: //p')
 KERNEL := target/$(TARGET)/release/fullemu
@@ -14,10 +15,10 @@ USER_LAYOUT_FILE := $(USER_BUILD_DIR)/user-program-layout
 all: build
 
 build: build-user
-	FULLEMU_USER_IMAGE_MANIFEST=$(USER_IMAGE_MANIFEST) FULLEMU_LOG_LEVEL=$(LOG_LEVEL) $(CARGO) build --release --target $(TARGET)
+	FULLEMU_USER_IMAGE_MANIFEST=$(USER_IMAGE_MANIFEST) FULLEMU_LOG_LEVEL=$(LOG_LEVEL) FULLEMU_BOOT_PROGRAM=$(BOOT_PROGRAM) $(CARGO) build --release --target $(TARGET)
 
 build-kernel:
-	FULLEMU_USER_IMAGE_MANIFEST= FULLEMU_LOG_LEVEL=$(LOG_LEVEL) $(CARGO) build --release --target $(TARGET)
+	FULLEMU_USER_IMAGE_MANIFEST= FULLEMU_LOG_LEVEL=$(LOG_LEVEL) FULLEMU_BOOT_PROGRAM=$(BOOT_PROGRAM) $(CARGO) build --release --target $(TARGET)
 
 build-user:
 	cd user && FULLEMU_USER_LAYOUT_FILE="$(CURDIR)/$(USER_LAYOUT_FILE)" $(CARGO) build --release --bins --target $(TARGET)

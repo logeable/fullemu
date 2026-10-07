@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const IMAGE_MANIFEST_ENV: &str = "FULLEMU_USER_IMAGE_MANIFEST";
+const BOOT_PROGRAM_ENV: &str = "FULLEMU_BOOT_PROGRAM";
 const USER_PROGRAM_LOAD_BASE: usize = 0x8040_0000;
 const USER_PROGRAM_SLOT_SIZE: usize = 64 * 1024;
 const MAX_USER_PROGRAMS: usize = 8;
@@ -10,6 +11,7 @@ const MAX_USER_PROGRAMS: usize = 8;
 fn main() {
     println!("cargo:rustc-link-arg-bin=fullemu=-Tlinker.ld");
     println!("cargo:rerun-if-env-changed={IMAGE_MANIFEST_ENV}");
+    println!("cargo:rerun-if-env-changed={BOOT_PROGRAM_ENV}");
 
     let output_directory =
         PathBuf::from(env::var_os("OUT_DIR").expect("Cargo 应为构建脚本提供 OUT_DIR"));

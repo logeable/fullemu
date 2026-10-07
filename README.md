@@ -12,6 +12,8 @@ make build
 make run
 ```
 
+内核默认启动 `fullemu_user_shell`。需要选择其他已嵌入的用户程序时，可指定入口名称，例如 `make run BOOT_PROGRAM=fullemu_user_memory_fault`；该名称在构建时写入内核。当前 shell 尚未实现从 shell 启动其他用户程序。
+
 `make build` 会先构建独立的 `user/` 程序，将每个 bin 链接到构建清单分配的固定 64 KiB 槽位，再把 ELF 转换为原始二进制。`user/target/riscv64gc-unknown-none-elf/release/user-programs.manifest` 记录程序名、链接基址、入口偏移和镜像路径，内核构建与运行时加载都会校验链接基址和目标槽位一致。新增或移除 `user/src/bin/` 下的程序时，布局及镜像清单会随 `make build-user` 更新。若只需编译不含用户程序的内核，可运行 `make build-kernel` 或直接运行 `cargo build --target riscv64gc-unknown-none-elf`；无 shell 镜像时内核启动后会记录提示并等待。当前 syscall 仅实现上述 Linux ABI 的有限子集，不代表已兼容完整 Linux 用户态。按 `Ctrl-C` 结束 QEMU。
 
 若 QEMU 可执行文件不在 PATH，可运行 `make run QEMU=/path/to/qemu-system-riscv64`。也可以单独运行 `make build-user` 构建用户程序。

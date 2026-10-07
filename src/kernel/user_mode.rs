@@ -3,7 +3,10 @@
 use crate::arch::riscv64::trap::{ExceptionCause, InterruptCause, TrapCause, TrapFrame};
 
 const MAX_USER_TASKS: usize = 8;
-const SHELL_PROGRAM_NAME: &str = "fullemu_user_shell";
+const BOOT_PROGRAM_NAME: &str = match option_env!("FULLEMU_BOOT_PROGRAM") {
+    Some(name) => name,
+    None => "fullemu_user_shell",
+};
 const USER_STACK_SIZE: usize = 16 * 1024;
 const KERNEL_TRAP_STACK_SIZE: usize = 16 * 1024;
 const SSTATUS_SPP: usize = 1 << 8;
@@ -34,10 +37,10 @@ static mut TASK_PROGRAM_INDICES: [usize; MAX_USER_TASKS] = [0; MAX_USER_TASKS];
 static mut TASK_COUNT: usize = 0;
 static mut CURRENT_TASK_INDEX: usize = 0;
 
-/// 装入默认用户态 shell 并开始运行。
-pub fn run_shell() -> ! {
-    let Some(program_index) = super::user_program::find_index(SHELL_PROGRAM_NAME) else {
-        crate::klog_info!("内核未嵌入默认 shell；hart 进入等待状态");
+/// 装入构建配置指定的入口用户程序并开始运行。
+pub fn run_boot_program() -> ! {
+    let Some(program_index) = super::user_program::find_index(BOOT_PROGRAM_NAME) else {
+        crate::klog_error!("用户程序清单中没有入口程序：{BOOT_PROGRAM_NAME}");
         stop_forever();
     };
 
@@ -54,7 +57,7 @@ pub fn run_shell() -> ! {
     let program = match super::user_program::load(program_index) {
         Ok(Some(program)) => program,
         Ok(None) => {
-            crate::klog_error!("用户程序清单在索引 {} 处没有 shell", program_index);
+            crate::klog_error!("入口用户程序在清单中缺失：{BOOT_PROGRAM_NAME}");
             stop_forever();
         }
         Err(error) => {
@@ -86,7 +89,7 @@ pub fn run_shell() -> ! {
     }
 
     crate::klog_info!(
-        "默认 shell 已装入：{}，入口 {:#018x}，镜像 {} 字节",
+        "入口用户程序已装入：{}，入口 {:#018x}，镜像 {} 字节",
         program.name,
         program.entry,
         program.image_size
@@ -116,8 +119,8 @@ pub fn run_shell() -> ! {
         stop_forever();
     }
 
-    crate::klog_info!("启动用户态 shell；已启用 Sv39 用户/内核页权限边界");
-    crate::klog_info!("定时器中断保持 shell 的调度响应");
+    crate::klog_info!("已启用 Sv39 用户/内核页权限边界");
+    crate::klog_info!("启动用户程序；定时器中断保持调度响应");
 
     arm_next_timer_or_stop();
     crate::arch::riscv64::interrupt::enable_supervisor_timer();
