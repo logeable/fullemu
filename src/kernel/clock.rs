@@ -11,6 +11,7 @@ pub fn initialize() {
 
 /// Linux RISC-V 64 位 ABI 使用的时间结构布局。
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct Timespec {
     /// 从内核时钟起点经过的整秒数。
     pub seconds: i64,

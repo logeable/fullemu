@@ -8,6 +8,7 @@ ENTRY(_start)
 SECTIONS
 {
     . = 0x80200000;
+    __kernel_start = .;
 
     .text : ALIGN(4) {
         KEEP(*(.text.entry))

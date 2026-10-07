@@ -4,6 +4,7 @@
 
 pub(crate) mod clock;
 pub mod logging;
+pub(crate) mod memory;
 mod syscall;
 pub mod user_mode;
 mod user_program;

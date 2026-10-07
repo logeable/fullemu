@@ -22,6 +22,10 @@ pub struct LoadedUserProgram {
     pub name: &'static str,
     /// 用户程序入口地址。
     pub entry: usize,
+    /// 用户程序固定加载槽位的起始地址。
+    pub slot_start: usize,
+    /// 用户程序固定加载槽位的结束地址。
+    pub slot_end: usize,
     /// 从独立构建产物复制的字节数。
     pub image_size: usize,
 }
@@ -135,6 +139,8 @@ pub fn load(index: usize) -> Result<Option<LoadedUserProgram>, UserProgramLoadEr
     Ok(Some(LoadedUserProgram {
         name: program.name,
         entry,
+        slot_start,
+        slot_end,
         image_size: program.bytes.len(),
     }))
 }

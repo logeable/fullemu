@@ -87,9 +87,9 @@ fn read(task_index: usize, file_descriptor: usize, buffer_address: usize, count:
             byte
         };
 
-        // 安全性：范围检查保证目标完全位于当前任务独立的可写用户栈中。
+        // 安全性：前面的范围检查保证该字节位于当前任务已映射的可写用户栈内。
         unsafe {
-            core::ptr::write((buffer_address as *mut u8).add(bytes_read), byte);
+            super::memory::write_user_value(buffer_address + bytes_read, byte);
         }
         bytes_read += 1;
     }
@@ -126,9 +126,10 @@ fn write(
         return LinuxErrno::Fault.return_value();
     }
 
-    // 安全性：范围检查保证待读字节位于当前任务的镜像或独立用户栈内；系统调用期间任务暂停。
+    // 安全性：范围检查保证待读字节位于当前任务已映射的镜像或栈内。
     for offset in 0..count {
-        let byte = unsafe { core::ptr::read_volatile((buffer_address as *const u8).add(offset)) };
+        // 安全性：完整缓冲区已验证，单字节读取期间由 memory 模块短暂开启 SUM。
+        let byte = unsafe { super::memory::read_user_byte(buffer_address + offset) };
         console::write_byte(byte);
     }
 
@@ -149,9 +150,9 @@ fn clock_gettime(task_index: usize, clock_id: usize, timespec_address: usize) ->
     }
 
     let time = super::clock::monotonic_timespec();
-    // 安全性：对齐检查和栈范围检查保证目标是当前任务可写的完整 timespec 缓冲区。
+    // 安全性：对齐检查和栈范围检查保证目标是当前任务已映射的完整可写 timespec。
     unsafe {
-        core::ptr::write(timespec_address as *mut super::clock::Timespec, time);
+        super::memory::write_user_value(timespec_address, time);
     }
 
     0

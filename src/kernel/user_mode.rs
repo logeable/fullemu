@@ -10,7 +10,7 @@ const SSTATUS_SPP: usize = 1 << 8;
 // 按 QEMU virt 的时间基准将时间片固定为 10 ms。
 const TIME_SLICE_TICKS: u64 = crate::arch::riscv64::sbi::QEMU_VIRT_TIMEBASE_FREQUENCY_HZ / 100;
 
-#[repr(align(16))]
+#[repr(align(4096))]
 #[derive(Clone, Copy)]
 struct TaskStack([u8; USER_STACK_SIZE]);
 
@@ -64,6 +64,10 @@ pub fn run_shell() -> ! {
     };
 
     let user_stack_top = reset_user_stack(0);
+    let Some(user_stack_range) = user_stack_range(0) else {
+        crate::klog_error!("无法计算首个用户任务的栈范围");
+        stop_forever();
+    };
     let kernel_stack_top = task_kernel_stack_top(0);
     let initial_frame_address = kernel_stack_top - core::mem::size_of::<TrapFrame>();
     let initial_frame = TrapFrame::for_user_entry(program.entry, user_stack_top);
@@ -87,10 +91,7 @@ pub fn run_shell() -> ! {
         program.entry,
         program.image_size
     );
-    crate::klog_info!("启动用户态 shell；定时器中断保持调度响应");
-    crate::klog_warn!("当前 satp 使用 BARE，shell 仍可访问内核内存");
-
-    // 安全性：初始化期间先关闭所有 S-mode 中断；用户任务启动前再单独开启定时器中断。
+    // 安全性：页表初始化前确保仍处于恒等寻址模式，并关闭中断避免启动状态被抢占。
     unsafe {
         core::arch::asm!(
             "csrw sie, zero",
@@ -103,6 +104,20 @@ pub fn run_shell() -> ! {
             TaskState::Running,
         );
     }
+
+    // 安全性：链接脚本将内核、用户镜像槽位和静态栈放在恒等映射地址；栈已按页对齐。
+    let kernel_end = core::ptr::addr_of!(__bss_end) as usize;
+    if let Err(error) = super::memory::initialize(
+        kernel_end,
+        user_stack_range,
+        (program.slot_start, program.slot_end),
+    ) {
+        crate::klog_error!("Sv39 初始化失败：{}", error.description());
+        stop_forever();
+    }
+
+    crate::klog_info!("启动用户态 shell；已启用 Sv39 用户/内核页权限边界");
+    crate::klog_info!("定时器中断保持 shell 的调度响应");
 
     arm_next_timer_or_stop();
     crate::arch::riscv64::interrupt::enable_supervisor_timer();
@@ -352,14 +367,7 @@ pub(super) fn contains_user_stack_range(index: usize, address: usize, length: us
         return false;
     }
 
-    let Some(stack_offset) = index.checked_mul(core::mem::size_of::<TaskStack>()) else {
-        return false;
-    };
-    let Some(stack_start) = (core::ptr::addr_of!(USER_STACKS) as usize).checked_add(stack_offset)
-    else {
-        return false;
-    };
-    let Some(stack_end) = stack_start.checked_add(USER_STACK_SIZE) else {
+    let Some((stack_start, stack_end)) = user_stack_range(index) else {
         return false;
     };
     let Some(buffer_end) = address.checked_add(length) else {
@@ -367,6 +375,16 @@ pub(super) fn contains_user_stack_range(index: usize, address: usize, length: us
     };
 
     address >= stack_start && buffer_end <= stack_end
+}
+
+fn user_stack_range(index: usize) -> Option<(usize, usize)> {
+    if index >= MAX_USER_TASKS {
+        return None;
+    }
+    let stack_offset = index.checked_mul(core::mem::size_of::<TaskStack>())?;
+    let stack_start = (core::ptr::addr_of!(USER_STACKS) as usize).checked_add(stack_offset)?;
+    let stack_end = stack_start.checked_add(USER_STACK_SIZE)?;
+    Some((stack_start, stack_end))
 }
 
 fn report_load_error(error: super::user_program::UserProgramLoadError) {
@@ -384,4 +402,8 @@ fn stop_forever() -> ! {
         // 安全性：当前没有可运行任务；WFI 让 hart 等待，不再恢复已退出或异常的任务。
         unsafe { core::arch::asm!("wfi", options(nomem, nostack)) };
     }
+}
+
+extern "C" {
+    static __bss_end: u8;
 }

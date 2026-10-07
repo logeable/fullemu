@@ -1,6 +1,6 @@
 # fullemu
 
-fullemu 是一个以可读性和教学为优先的 Rust 操作系统项目。当前实现从 QEMU RISC-V `virt` 平台启动，将独立构建的 no_std 用户程序作为原始镜像加载后进入 U-mode。内核默认启动用户态 shell，支持输入、通过 `help` 查看内置命令，以及通过 `uptime` 显示单调运行时间。内核实现 Linux RISC-V `read`、`write`、`clock_gettime`、`exit` 和 `sched_yield` 的有限子集，并使用定时器中断调度用户任务。其他用户程序示例仍会嵌入内核，但当前 shell 尚不能启动它们。源码按内核职责和稳定概念组织，阶段编号只用于文档中的教学脉络。
+fullemu 是一个以可读性和教学为优先的 Rust 操作系统项目。当前实现从 QEMU RISC-V `virt` 平台启动，将独立构建的 no_std 用户程序作为原始镜像加载后进入 U-mode。内核默认启动用户态 shell，并通过静态 Sv39 页表建立当前用户任务与内核之间的页面权限边界。shell 支持输入、通过 `help` 查看内置命令，以及通过 `uptime` 显示单调运行时间。内核实现 Linux RISC-V `read`、`write`、`clock_gettime`、`exit` 和 `sched_yield` 的有限子集，并使用定时器中断调度用户任务。其他用户程序示例仍会嵌入内核，但当前 shell 尚不能启动它们。源码按内核职责和稳定概念组织，阶段编号只用于文档中的教学脉络。
 
 ## 快速开始
 
@@ -38,4 +38,5 @@ make run
 - [第 17 阶段：协作式多道用户程序](docs/phase-17-cooperative-multiprogramming.md) 记录多个用户程序同时驻留、`sched_yield` 轮转和当前调度限制。
 - [第 18 阶段：用户任务定时器抢占](docs/phase-18-user-timer-preemption.md) 记录 SBI 定时器如何让不主动让出的 U-mode 任务被切出，避免其他就绪任务饥饿。
 - [第 19 阶段：用户态简易 shell](docs/phase-19-user-shell.md) 记录内核默认启动 shell、UART 输入系统调用，以及 `help` 和 `uptime` 内置命令。
+- [第 20 阶段：Sv39 用户/内核页面权限边界](docs/phase-20-sv39-user-protection.md) 记录静态恒等映射、U/S 页面权限和系统调用访问用户缓冲区的方式。
 - [项目原则与代码规范](docs/development-principles.md) 是设计和协作规范。
