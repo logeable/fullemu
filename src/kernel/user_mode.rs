@@ -172,6 +172,7 @@ fn start_programs(program_indices: &[usize]) -> ! {
         stop_forever();
     }
 
+    super::memory::log_address_spaces();
     crate::klog_info!("已启用 Sv39 用户/内核页权限边界");
     crate::klog_info!(
         "启动 {} 个用户任务；定时器中断保持调度响应",

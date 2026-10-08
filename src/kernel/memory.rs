@@ -22,6 +22,7 @@ const PTE_ACCESSED: usize = 1 << 6;
 const PTE_DIRTY: usize = 1 << 7;
 
 const SSTATUS_SUM: usize = 1 << 18;
+const SV39_VIRTUAL_ADDRESS_MASK: usize = (1 << 39) - 1;
 
 #[repr(C, align(4096))]
 struct PageTable([usize; PAGE_TABLE_ENTRIES]);
@@ -194,6 +195,186 @@ pub fn activate_address_space(address_space_index: usize) -> Result<(), PageTabl
             .add(address_space_index * PAGE_TABLES_PER_ADDRESS_SPACE)
     };
     activate(root_table as usize)
+}
+
+/// 以调试日志输出每个任务页表中的有效映射。
+///
+/// 连续虚拟页映射到连续物理页且权限相同的条目会合并为一个范围。
+pub fn log_address_spaces() {
+    if !crate::kernel::logging::is_enabled(crate::kernel::logging::Level::Debug) {
+        return;
+    }
+
+    // 安全性：任务地址空间数量仅在所有页表初始化完成后写入。
+    let address_space_count =
+        unsafe { core::ptr::read_volatile(core::ptr::addr_of!(ADDRESS_SPACE_COUNT)) };
+    for address_space_index in 0..address_space_count {
+        // 安全性：索引小于已验证的地址空间数量，根表位于静态页表池内且恒等映射可见。
+        let root_table = unsafe {
+            core::ptr::addr_of!(PAGE_TABLES)
+                .cast::<PageTable>()
+                .add(address_space_index * PAGE_TABLES_PER_ADDRESS_SPACE)
+        };
+        crate::klog_debug!(
+            "Sv39 页表：任务={}，根页表物理地址={:#018x}",
+            address_space_index,
+            root_table as usize
+        );
+
+        let mut mapping_run = None;
+        let table_pool_start = root_table as usize;
+        let table_pool_end = table_pool_start + PAGE_TABLES_PER_ADDRESS_SPACE * PAGE_SIZE;
+        walk_page_table(
+            root_table,
+            2,
+            0,
+            table_pool_start,
+            table_pool_end,
+            address_space_index,
+            &mut mapping_run,
+        );
+        flush_mapping_run(address_space_index, mapping_run);
+    }
+}
+
+#[derive(Clone, Copy)]
+struct MappingRun {
+    virtual_start: usize,
+    physical_start: usize,
+    size: usize,
+    permissions: usize,
+}
+
+fn walk_page_table(
+    table: *const PageTable,
+    level: usize,
+    virtual_page_number: usize,
+    table_pool_start: usize,
+    table_pool_end: usize,
+    address_space_index: usize,
+    mapping_run: &mut Option<MappingRun>,
+) {
+    for index in 0..PAGE_TABLE_ENTRIES {
+        // 安全性：当前表来自静态页表池，索引由固定的 512 项表长度限制。
+        let entry = unsafe { core::ptr::read_volatile(core::ptr::addr_of!((*table).0[index])) };
+        if entry & PTE_VALID == 0 {
+            continue;
+        }
+
+        let next_virtual_page_number = (virtual_page_number << 9) | index;
+        if entry & (PTE_READ | PTE_WRITE | PTE_EXECUTE) != 0 {
+            let page_shift = 12 + level * 9;
+            let mapping_size = 1usize << page_shift;
+            let virtual_start = canonicalize_sv39(next_virtual_page_number << page_shift);
+            let physical_start = ((entry >> 10) << 12) & !(mapping_size - 1);
+            record_mapping(
+                address_space_index,
+                MappingRun {
+                    virtual_start,
+                    physical_start,
+                    size: mapping_size,
+                    permissions: entry & (PTE_USER | PTE_READ | PTE_WRITE | PTE_EXECUTE),
+                },
+                mapping_run,
+            );
+            continue;
+        }
+
+        if level == 0 {
+            crate::klog_error!(
+                "Sv39 页表无效：任务={}，最低级页表项不是叶子映射，虚拟页号={:#x}",
+                address_space_index,
+                next_virtual_page_number
+            );
+            continue;
+        }
+
+        let child_table_address = ((entry >> 10) << 12) as usize;
+        if child_table_address < table_pool_start
+            || child_table_address + PAGE_SIZE > table_pool_end
+            || child_table_address & PAGE_MASK != 0
+        {
+            crate::klog_error!(
+                "Sv39 页表无效：任务={}，子页表地址 {child_table_address:#018x} 不在本任务页表池中",
+                address_space_index
+            );
+            continue;
+        }
+
+        walk_page_table(
+            child_table_address as *const PageTable,
+            level - 1,
+            next_virtual_page_number,
+            table_pool_start,
+            table_pool_end,
+            address_space_index,
+            mapping_run,
+        );
+    }
+}
+
+fn record_mapping(
+    address_space_index: usize,
+    next_mapping: MappingRun,
+    mapping_run: &mut Option<MappingRun>,
+) {
+    if let Some(current) = mapping_run.as_mut() {
+        let virtual_end = current.virtual_start + current.size;
+        let physical_end = current.physical_start + current.size;
+        if virtual_end == next_mapping.virtual_start
+            && physical_end == next_mapping.physical_start
+            && current.permissions == next_mapping.permissions
+        {
+            current.size += next_mapping.size;
+            return;
+        }
+    }
+
+    flush_mapping_run(address_space_index, *mapping_run);
+    *mapping_run = Some(next_mapping);
+}
+
+fn flush_mapping_run(address_space_index: usize, mapping_run: Option<MappingRun>) {
+    let Some(mapping) = mapping_run else {
+        return;
+    };
+
+    crate::klog_debug!(
+        "页表映射：任务={}，虚拟={:#018x}..{:#018x}，物理={:#018x}..{:#018x}，权限={}{}{}{}",
+        address_space_index,
+        mapping.virtual_start,
+        mapping.virtual_start + mapping.size,
+        mapping.physical_start,
+        mapping.physical_start + mapping.size,
+        if mapping.permissions & PTE_USER != 0 {
+            "U"
+        } else {
+            "S"
+        },
+        if mapping.permissions & PTE_READ != 0 {
+            "R"
+        } else {
+            "-"
+        },
+        if mapping.permissions & PTE_WRITE != 0 {
+            "W"
+        } else {
+            "-"
+        },
+        if mapping.permissions & PTE_EXECUTE != 0 {
+            "X"
+        } else {
+            "-"
+        }
+    );
+}
+
+fn canonicalize_sv39(address: usize) -> usize {
+    if address & (1 << 38) == 0 {
+        address & SV39_VIRTUAL_ADDRESS_MASK
+    } else {
+        address | !SV39_VIRTUAL_ADDRESS_MASK
+    }
 }
 
 fn ranges_overlap(

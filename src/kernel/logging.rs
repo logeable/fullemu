@@ -44,16 +44,17 @@ fn maximum_level() -> Option<Level> {
     }
 }
 
+/// 判断指定级别的日志是否会输出。
+pub fn is_enabled(level: Level) -> bool {
+    maximum_level().is_some_and(|maximum_level| level <= maximum_level)
+}
+
 /// 输出一条带级别和模块来源的内核日志。
 ///
 /// 日志通过平台 console 同步输出，不申请堆内存。当前实现没有锁，调用方不得依赖它
 /// 在多个 hart、可抢占上下文或嵌套中断之间保持整条记录的原子性。
 pub fn log(level: Level, target: &str, arguments: fmt::Arguments<'_>) {
-    let Some(maximum_level) = maximum_level() else {
-        return;
-    };
-
-    if level > maximum_level {
+    if !is_enabled(level) {
         return;
     }
 
