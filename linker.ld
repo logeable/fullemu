@@ -10,36 +10,49 @@ SECTIONS
     . = 0x80200000;
     __kernel_start = .;
 
-    .text : ALIGN(4) {
+    . = ALIGN(4);
+    __text_start = .;
+    .text : {
         KEEP(*(.text.entry))
         *(.text .text.*)
     }
+    __text_end = .;
 
-    .rodata : ALIGN(8) {
+    . = ALIGN(8);
+    __rodata_start = .;
+    .rodata : {
         *(.rodata .rodata.*)
     }
+    __rodata_end = .;
 
-    .data : ALIGN(8) {
-        __data_start = .;
+    . = ALIGN(8);
+    __data_start = .;
+    .data : {
         *(.sdata .sdata.*)
         *(.data .data.*)
     }
+    __data_end = .;
 
     /* 进入编译后的 Rust 代码前，必须先初始化 gp。 */
     __global_pointer$ = __data_start + 0x800;
 
-    .bss (NOLOAD) : ALIGN(8) {
-        __bss_start = .;
+    . = ALIGN(8);
+    __bss_start = .;
+    .bss (NOLOAD) : {
         *(.sbss .sbss.*)
         *(.bss .bss.*)
         *(COMMON)
     }
+    __bss_data_end = .;
 
     /* 第一个阶段只运行一个 hart，并为它分配独立的启动栈。 */
-    .bss.stack (NOLOAD) : ALIGN(16) {
+    . = ALIGN(16);
+    __boot_stack_start = .;
+    .bss.stack (NOLOAD) : {
         . += 16K;
         boot_stack_top = .;
     }
+    __boot_stack_end = .;
 
     . = ALIGN(8);
     __bss_end = .;

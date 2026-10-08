@@ -44,4 +44,5 @@ make run
 - [第 21 阶段：Sv39 下的多道程序批处理入口](docs/phase-21-sv39-multiprogram-batch.md) 记录批处理刚接入 Sv39 时的共享页表设计，以及禁用 bin 的构建约定。
 - [第 22 阶段：每任务独立 Sv39 页表](docs/phase-22-per-task-page-tables.md) 记录任务地址空间隔离、调度时切换 `satp` 和跨任务访问验证。
 - [第 23 阶段：统一用户程序虚拟入口](docs/phase-23-common-user-entry.md) 说明所有用户程序如何通过各自页表从共同虚拟地址映射到独立物理镜像。
+- [第 24 阶段：有界内核堆分配器](docs/phase-24-kernel-heap.md) 记录固定 BSS 堆区域、可释放 first-fit 空闲链表及当前未接入全局分配器的边界。
 - [项目原则与代码规范](docs/development-principles.md) 是设计和协作规范。

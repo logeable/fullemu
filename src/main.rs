@@ -10,12 +10,32 @@ mod kernel;
 use fullemu::boot::fdt::{FdtBlob, FdtHeader, FdtStructureEvent};
 use fullemu::boot::info::BootInfo;
 
+extern "C" {
+    static __kernel_start: u8;
+    static __text_start: u8;
+    static __text_end: u8;
+    static __rodata_start: u8;
+    static __rodata_end: u8;
+    static __data_start: u8;
+    static __data_end: u8;
+    static __bss_start: u8;
+    static __bss_data_end: u8;
+    static __boot_stack_start: u8;
+    static __boot_stack_end: u8;
+    static __bss_end: u8;
+}
+
 /// RISC-V 汇编入口完成栈和 `.bss` 初始化后调用此 Rust 入口。
 /// OpenSBI 通过 `a0` 传入 hart ID，通过 `a1` 传入 DTB 地址；
 /// 本阶段只运行一个 hart，并打印固件交接信息。
 #[no_mangle]
 pub extern "C" fn kernel_main(hart_id: usize, device_tree: usize) -> ! {
     kernel::clock::initialize();
+    if let Err(error) = kernel::heap::run_boot_experiment() {
+        crate::klog_error!("内核堆实验失败：{}", error.description());
+        panic!("内核堆实验失败");
+    }
+    log_kernel_sections();
     crate::klog_info!("fullemu 已在 QEMU virt (RISC-V) 启动");
     crate::klog_info!("启动 hart：{hart_id:#018x}");
     crate::klog_info!("设备树地址：{device_tree:#018x}");
@@ -93,6 +113,50 @@ pub extern "C" fn kernel_main(hart_id: usize, device_tree: usize) -> ! {
         "batch" => kernel::user_mode::run_batch_programs(),
         _ => unreachable!("build.rs 已验证启动模式"),
     }
+}
+
+/// 输出链接器定义的内核映像和各段范围；结束地址采用不包含式。
+fn log_kernel_sections() {
+    log_kernel_range(
+        "内核映像",
+        core::ptr::addr_of!(__kernel_start) as usize,
+        core::ptr::addr_of!(__bss_end) as usize,
+    );
+    log_kernel_range(
+        ".text",
+        core::ptr::addr_of!(__text_start) as usize,
+        core::ptr::addr_of!(__text_end) as usize,
+    );
+    log_kernel_range(
+        ".rodata",
+        core::ptr::addr_of!(__rodata_start) as usize,
+        core::ptr::addr_of!(__rodata_end) as usize,
+    );
+    log_kernel_range(
+        ".data",
+        core::ptr::addr_of!(__data_start) as usize,
+        core::ptr::addr_of!(__data_end) as usize,
+    );
+    log_kernel_range(
+        ".bss",
+        core::ptr::addr_of!(__bss_start) as usize,
+        core::ptr::addr_of!(__bss_data_end) as usize,
+    );
+    log_kernel_range(
+        "启动栈",
+        core::ptr::addr_of!(__boot_stack_start) as usize,
+        core::ptr::addr_of!(__boot_stack_end) as usize,
+    );
+}
+
+fn log_kernel_range(name: &str, start: usize, end: usize) {
+    crate::klog_info!(
+        "内核范围 {}：{:#018x}..{:#018x}，大小={} 字节",
+        name,
+        start,
+        end,
+        end - start
+    );
 }
 
 fn report_fdt_structure_error(error: fullemu::boot::fdt::FdtStructureError) -> ! {
