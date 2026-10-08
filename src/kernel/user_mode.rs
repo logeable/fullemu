@@ -47,30 +47,17 @@ pub fn run_boot_program() -> ! {
     start_programs(&[program_index]);
 }
 
-/// 同时装入并调度构建清单中的批处理程序。
-///
-/// 交互式 shell 会在 `read` 系统调用中等待输入，因此不属于批处理任务集合。
+/// 同时装入并调度构建清单中的全部程序。
 pub fn run_batch_programs() -> ! {
-    let shell_index = super::user_program::find_index("fullemu_user_shell");
-    let mut program_indices = [0; MAX_USER_TASKS];
-    let mut program_count = 0;
-
-    for program_index in 0..super::user_program::count() {
-        if Some(program_index) == shell_index {
-            continue;
-        }
-
-        if program_count == MAX_USER_TASKS {
-            crate::klog_error!("批处理程序数量超过任务上限：{MAX_USER_TASKS}");
-            stop_forever();
-        }
-        program_indices[program_count] = program_index;
-        program_count += 1;
+    let program_count = super::user_program::count();
+    if program_count == 0 || program_count > MAX_USER_TASKS {
+        crate::klog_error!("批处理程序数量无效：{program_count}");
+        stop_forever();
     }
 
-    if program_count == 0 {
-        crate::klog_error!("用户程序清单中没有可批处理运行的程序");
-        stop_forever();
+    let mut program_indices = [0; MAX_USER_TASKS];
+    for (program_index, slot) in program_indices.iter_mut().take(program_count).enumerate() {
+        *slot = program_index;
     }
 
     start_programs(&program_indices[..program_count]);

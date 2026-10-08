@@ -4,6 +4,7 @@ OBJCOPY ?= rust-objcopy
 LOG_LEVEL ?= info
 BOOT_PROGRAM ?= fullemu_user_shell
 BOOT_MODE ?= shell
+BATCH_EXCLUDED_BINS ?= fullemu_user_shell
 TARGET := riscv64gc-unknown-none-elf
 HOST_TARGET := $(shell rustc -vV | sed -n 's/^host: //p')
 KERNEL := target/$(TARGET)/release/fullemu
@@ -12,6 +13,9 @@ USER_IMAGE_MANIFEST := $(USER_BUILD_DIR)/user-programs.manifest
 USER_LAYOUT_FILE := $(USER_BUILD_DIR)/user-program-layout
 USER_BIN_SOURCES := $(filter-out user/src/bin/disabled-%,$(wildcard user/src/bin/*.rs))
 USER_BIN_NAMES := $(patsubst user/src/bin/%.rs,%,$(USER_BIN_SOURCES))
+ifeq ($(BOOT_MODE),batch)
+USER_BIN_NAMES := $(filter-out $(BATCH_EXCLUDED_BINS),$(USER_BIN_NAMES))
+endif
 USER_BIN_FLAGS := $(foreach bin,$(USER_BIN_NAMES),--bin $(bin))
 
 .PHONY: all build build-kernel build-user run test-fdt clean fmt fmt-check
@@ -25,7 +29,7 @@ build-kernel:
 	FULLEMU_USER_IMAGE_MANIFEST= FULLEMU_LOG_LEVEL=$(LOG_LEVEL) FULLEMU_BOOT_PROGRAM=$(BOOT_PROGRAM) FULLEMU_BOOT_MODE=$(BOOT_MODE) $(CARGO) build --release --target $(TARGET)
 
 build-user:
-	cd user && FULLEMU_USER_LAYOUT_FILE="$(CURDIR)/$(USER_LAYOUT_FILE)" $(CARGO) build --release --target $(TARGET) $(USER_BIN_FLAGS)
+	cd user && FULLEMU_USER_LAYOUT_FILE="$(CURDIR)/$(USER_LAYOUT_FILE)" FULLEMU_BOOT_MODE=$(BOOT_MODE) FULLEMU_BATCH_EXCLUDED_BINS="$(BATCH_EXCLUDED_BINS)" $(CARGO) build --release --target $(TARGET) $(USER_BIN_FLAGS)
 	@set -eu; \
 	manifest_tmp="$(USER_IMAGE_MANIFEST).tmp"; \
 	: > "$$manifest_tmp"; \

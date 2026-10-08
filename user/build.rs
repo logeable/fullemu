@@ -6,15 +6,37 @@ const USER_IMAGE_BASE: usize = 0x8040_0000;
 const USER_IMAGE_SLOT_SIZE: usize = 64 * 1024;
 const MAX_USER_PROGRAMS: usize = 8;
 const LAYOUT_FILE_ENV: &str = "FULLEMU_USER_LAYOUT_FILE";
+const BOOT_MODE_ENV: &str = "FULLEMU_BOOT_MODE";
+const BATCH_EXCLUDED_BINS_ENV: &str = "FULLEMU_BATCH_EXCLUDED_BINS";
 
 fn main() {
     println!("cargo:rerun-if-changed=src/bin");
     println!("cargo:rerun-if-changed=linker.ld");
     println!("cargo:rerun-if-env-changed={LAYOUT_FILE_ENV}");
+    println!("cargo:rerun-if-env-changed={BOOT_MODE_ENV}");
+    println!("cargo:rerun-if-env-changed={BATCH_EXCLUDED_BINS_ENV}");
+
+    let boot_mode = env::var(BOOT_MODE_ENV).unwrap_or_else(|_| "shell".to_owned());
+    if boot_mode != "shell" && boot_mode != "batch" {
+        panic!("{BOOT_MODE_ENV} 只支持 shell 或 batch，当前值为：{boot_mode}");
+    }
+    let excluded_bins = if boot_mode == "batch" {
+        env::var(BATCH_EXCLUDED_BINS_ENV)
+            .unwrap_or_else(|_| "fullemu_user_shell".to_owned())
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
 
     let package_directory =
         PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("Cargo 应提供清单目录"));
     let mut binary_sources = binary_sources(&package_directory.join("src/bin"));
+    binary_sources.retain(|source_path| {
+        let program_name = source_path.file_stem().and_then(|name| name.to_str());
+        !program_name.is_some_and(|name| excluded_bins.iter().any(|excluded| excluded == name))
+    });
     binary_sources.sort();
 
     if binary_sources.is_empty() {
