@@ -5,7 +5,7 @@ use crate::arch::riscv64::trap::{ExceptionCause, InterruptCause, TrapCause, Trap
 const MAX_USER_TASKS: usize = 8;
 const BOOT_PROGRAM_NAME: &str = match option_env!("FULLEMU_BOOT_PROGRAM") {
     Some(name) => name,
-    None => "fullemu_user_shell",
+    None => "shell",
 };
 const USER_STACK_SIZE: usize = 16 * 1024;
 const KERNEL_TRAP_STACK_SIZE: usize = 16 * 1024;

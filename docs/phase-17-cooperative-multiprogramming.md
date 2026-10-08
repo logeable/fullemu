@@ -16,10 +16,10 @@
 - 每个任务拥有独立的 16 KiB U-mode 栈、16 KiB S-mode 陷入栈和完整 `TrapFrame`。陷入时保存当前帧；恢复时可以返回另一个任务的帧。
 - 调度器使用固定数组记录 `Empty`、`Ready`、`Running`、`Exited` 和 `Faulted` 状态，不动态分配内存。选择策略为按清单顺序轮转。
 - 内核识别 `sched_yield`，将当前任务标为就绪并选择下一个就绪任务。任务再次被选中时从 `ecall` 之后继续执行，系统调用返回值为 0。
-- `fullemu_user_compute` 计算 1 到 10000 的平方和并格式化输出结果；`fullemu_user_io` 展示 stdout、stderr 和多次写入。
-- `fullemu_user_cpu_hog` 执行约 15 亿次迭代且不主动让出 CPU，让串口上“开始计算”与“计算完成”之间出现明显等待，用于观察协作式调度无法在任务运行中切换。
-- `fullemu_user_cooperative_a` 和 `fullemu_user_cooperative_b` 各输出三步进度，每步后主动让出 CPU，展示两份执行现场交替恢复。
-- `fullemu_user_illegal_instruction` 执行非法机器指令；内核记录用户异常，将该任务标记为异常终止并继续运行其他就绪任务。
+- `compute` 计算 1 到 10000 的平方和并格式化输出结果；`io` 展示 stdout、stderr 和多次写入。
+- `cpu_hog` 执行约 15 亿次迭代且不主动让出 CPU，让串口上“开始计算”与“计算完成”之间出现明显等待，用于观察协作式调度无法在任务运行中切换。
+- `cooperative_a` 和 `cooperative_b` 各输出三步进度，每步后主动让出 CPU，展示两份执行现场交替恢复。
+- `illegal_instruction` 执行非法机器指令；内核记录用户异常，将该任务标记为异常终止并继续运行其他就绪任务。
 - 任务调用现有 `exit` 后标为结束；U-mode 指令异常将当前任务标为异常终止，调度器继续运行其他就绪任务。所有任务结束或异常终止后，hart 进入等待状态。
 - 用户程序通过具名 bin 演示计算、控制台输出、有限时长的 CPU 密集执行、`sched_yield` 协作切换和非法指令异常；CPU 密集程序不主动让出 CPU，用于观察其他就绪任务在它退出前无法运行。
 

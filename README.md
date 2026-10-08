@@ -12,7 +12,7 @@ make build
 make run
 ```
 
-内核默认以 shell 模式启动 `fullemu_user_shell`。运行 `make run BOOT_MODE=batch` 可启动多道程序批处理；默认通过 `BATCH_EXCLUDED_BINS=fullemu_user_shell` 在构建时排除交互式 shell。可调整该变量指定不参与批处理的程序。也可在 shell 模式下选择其他入口，例如 `make run BOOT_PROGRAM=fullemu_user_memory_fault`。这两项配置分别选择运行模式和 shell 模式的入口程序。
+内核默认以 shell 模式启动 `shell`。运行 `make run BOOT_MODE=batch` 可启动多道程序批处理；默认通过 `BATCH_EXCLUDED_BINS=shell` 在构建时排除交互式 shell。可调整该变量指定不参与批处理的程序。也可在 shell 模式下选择其他入口，例如 `make run BOOT_PROGRAM=memory_fault`。这两项配置分别选择运行模式和 shell 模式的入口程序。
 
 `make build` 会先构建独立的 `user/` 程序，将每个 bin 链接到构建清单分配的固定 64 KiB 槽位，再把 ELF 转换为原始二进制。`user/target/riscv64gc-unknown-none-elf/release/user-programs.manifest` 记录程序名、链接基址、入口偏移和镜像路径，内核构建与运行时加载都会校验链接基址和目标槽位一致。以 `disabled-` 开头的 bin 源文件会被 `make build-user` 和用户构建脚本忽略；新增或移除其他 `user/src/bin/` 程序时，布局及镜像清单会随 `make build-user` 更新。若只需编译不含用户程序的内核，可运行 `make build-kernel` 或直接运行 `cargo build --target riscv64gc-unknown-none-elf`。当前 syscall 仅实现上述 Linux ABI 的有限子集，不代表已兼容完整 Linux 用户态。按 `Ctrl-C` 结束 QEMU。
 

@@ -11,7 +11,7 @@ Sv39 已为单个用户任务建立内核/用户页面权限边界。本阶段�
 ## 实现范围
 
 - `FULLEMU_BOOT_MODE` 选择启动入口：`shell` 启动 `FULLEMU_BOOT_PROGRAM` 指定的程序，`batch` 启动用户构建清单中的全部程序。Makefile 通过 `BOOT_MODE=shell|batch` 暴露此配置，默认值为 `shell`。
-- `BATCH_EXCLUDED_BINS` 是构建时手动排除的程序名称列表，默认值为 `fullemu_user_shell`。用户构建脚本不会为这些程序生成布局和镜像清单，Makefile 也不会把它们作为 Cargo bin 目标构建。
+- `BATCH_EXCLUDED_BINS` 是构建时手动排除的程序名称列表，默认值为 `shell`。用户构建脚本不会为这些程序生成布局和镜像清单，Makefile 也不会把它们作为 Cargo bin 目标构建。
 - `run_batch_programs` 是批处理入口。它不按程序名筛选，只依次装入清单中的全部程序，为每个任务准备独立陷入现场和 16 KiB 用户栈，然后启动已有的协作与定时器抢占调度器。
 - Sv39 页表初始化接收多个用户栈和镜像范围，并为它们设置 U-mode 权限。页表根仍只有一份，因此批处理任务之间可以访问其他任务映射的用户页面；这不是任务隔离。
 - 默认排除交互式 shell，因为它的 `read` 当前在内核态轮询等待输入，加入批次会阻塞 S-mode 调度路径。需要调整批次内容时，在构建命令中修改 `BATCH_EXCLUDED_BINS`，内核任务管理代码不需要知道这些策略。
@@ -30,8 +30,8 @@ Sv39 已为单个用户任务建立内核/用户页面权限边界。本阶段�
 
 ```sh
 make fmt-check
-make build BOOT_MODE=batch BATCH_EXCLUDED_BINS=fullemu_user_shell
-make run BOOT_MODE=batch BATCH_EXCLUDED_BINS=fullemu_user_shell
+make build BOOT_MODE=batch BATCH_EXCLUDED_BINS=shell
+make run BOOT_MODE=batch BATCH_EXCLUDED_BINS=shell
 ```
 
 串口应显示多个任务装入信息，并看到它们的输出在定时器抢占和主动让出时交错出现。异常演示程序应被标记为异常终止，其他就绪任务继续运行。批次结束后，内核报告已运行任务数并等待。运行 `make run` 应仍启动交互式 shell。

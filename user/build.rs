@@ -22,7 +22,7 @@ fn main() {
     }
     let excluded_bins = if boot_mode == "batch" {
         env::var(BATCH_EXCLUDED_BINS_ENV)
-            .unwrap_or_else(|_| "fullemu_user_shell".to_owned())
+            .unwrap_or_else(|_| "shell".to_owned())
             .split_whitespace()
             .map(str::to_owned)
             .collect::<Vec<_>>()
