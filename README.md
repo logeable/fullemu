@@ -1,6 +1,6 @@
 # fullemu
 
-fullemu 是一个以可读性和教学为优先的 Rust 操作系统项目。当前实现从 QEMU RISC-V `virt` 平台启动，将独立构建的 no_std 用户程序作为原始镜像加载后进入 U-mode。内核默认启动用户态 shell，并通过静态 Sv39 页表建立用户任务与内核之间的页面权限边界；也可选择多道程序批处理入口，让构建清单中的非 shell 程序同时驻留并由定时器调度。shell 支持输入、通过 `help` 查看内置命令，以及通过 `uptime` 显示单调运行时间。内核实现 Linux RISC-V `read`、`write`、`clock_gettime`、`exit` 和 `sched_yield` 的有限子集。批处理任务共用当前页表，尚未实现任务之间的内存隔离。源码按内核职责和稳定概念组织，阶段编号只用于文档中的教学脉络。
+fullemu 是一个以可读性和教学为优先的 Rust 操作系统项目。当前实现从 QEMU RISC-V `virt` 平台启动，将独立构建的 no_std 用户程序作为原始镜像加载后进入 U-mode。内核默认启动用户态 shell，并通过静态 Sv39 页表建立用户任务与内核之间的页面权限边界；也可选择多道程序批处理入口，让构建清单中的非 shell 程序同时驻留并由定时器调度。shell 支持输入、通过 `help` 查看内置命令，以及通过 `uptime` 显示单调运行时间。内核实现 Linux RISC-V `read`、`write`、`clock_gettime`、`exit` 和 `sched_yield` 的有限子集。每个批处理任务有独立页表，用户程序从共同虚拟入口运行，但仍使用静态物理镜像槽位、页表和任务栈。源码按内核职责和稳定概念组织，阶段编号只用于文档中的教学脉络。
 
 ## 快速开始
 
@@ -14,7 +14,7 @@ make run
 
 内核默认以 shell 模式启动 `shell`。运行 `make run BOOT_MODE=batch` 可启动多道程序批处理；默认通过 `BATCH_EXCLUDED_BINS=shell` 在构建时排除交互式 shell。可调整该变量指定不参与批处理的程序。也可在 shell 模式下选择其他入口，例如 `make run BOOT_PROGRAM=memory_fault`。这两项配置分别选择运行模式和 shell 模式的入口程序。
 
-`make build` 会先构建独立的 `user/` 程序，将每个 bin 链接到构建清单分配的固定 64 KiB 槽位，再把 ELF 转换为原始二进制。`user/target/riscv64gc-unknown-none-elf/release/user-programs.manifest` 记录程序名、链接基址、入口偏移和镜像路径，内核构建与运行时加载都会校验链接基址和目标槽位一致。以 `disabled-` 开头的 bin 源文件会被 `make build-user` 和用户构建脚本忽略；新增或移除其他 `user/src/bin/` 程序时，布局及镜像清单会随 `make build-user` 更新。若只需编译不含用户程序的内核，可运行 `make build-kernel` 或直接运行 `cargo build --target riscv64gc-unknown-none-elf`。当前 syscall 仅实现上述 Linux ABI 的有限子集，不代表已兼容完整 Linux 用户态。按 `Ctrl-C` 结束 QEMU。
+`make build` 会先构建独立的 `user/` 程序，将每个 bin 链接到共同虚拟地址 `0x80400000`，再把 ELF 转换为原始二进制并由内核复制到各自的固定物理槽位。`user/target/riscv64gc-unknown-none-elf/release/user-programs.manifest` 记录程序名、虚拟基址和镜像路径；链接脚本保证入口位于虚拟基址，内核构建会校验所有程序使用统一虚拟基址，运行时页表将其映射到当前程序的物理槽位。以 `disabled-` 开头的 bin 源文件会被 `make build-user` 和用户构建脚本忽略；新增或移除其他 `user/src/bin/` 程序时，布局及镜像清单会随 `make build-user` 更新。若只需编译不含用户程序的内核，可运行 `make build-kernel` 或直接运行 `cargo build --target riscv64gc-unknown-none-elf`。当前 syscall 仅实现上述 Linux ABI 的有限子集，不代表已兼容完整 Linux 用户态。按 `Ctrl-C` 结束 QEMU。
 
 若 QEMU 可执行文件不在 PATH，可运行 `make run QEMU=/path/to/qemu-system-riscv64`。也可以单独运行 `make build-user` 构建用户程序。
 
@@ -41,6 +41,7 @@ make run
 - [第 18 阶段：用户任务定时器抢占](docs/phase-18-user-timer-preemption.md) 记录 SBI 定时器如何让不主动让出的 U-mode 任务被切出，避免其他就绪任务饥饿。
 - [第 19 阶段：用户态简易 shell](docs/phase-19-user-shell.md) 记录内核默认启动 shell、UART 输入系统调用，以及 `help` 和 `uptime` 内置命令。
 - [第 20 阶段：Sv39 用户/内核页面权限边界](docs/phase-20-sv39-user-protection.md) 记录静态恒等映射、U/S 页面权限和系统调用访问用户缓冲区的方式。
-- [第 21 阶段：Sv39 下的多道程序批处理入口](docs/phase-21-sv39-multiprogram-batch.md) 记录 shell 与批处理两种启动策略、多个用户任务共用页表的当前边界，以及禁用 bin 的构建约定。
+- [第 21 阶段：Sv39 下的多道程序批处理入口](docs/phase-21-sv39-multiprogram-batch.md) 记录批处理刚接入 Sv39 时的共享页表设计，以及禁用 bin 的构建约定。
 - [第 22 阶段：每任务独立 Sv39 页表](docs/phase-22-per-task-page-tables.md) 记录任务地址空间隔离、调度时切换 `satp` 和跨任务访问验证。
+- [第 23 阶段：统一用户程序虚拟入口](docs/phase-23-common-user-entry.md) 说明所有用户程序如何通过各自页表从共同虚拟地址映射到独立物理镜像。
 - [项目原则与代码规范](docs/development-principles.md) 是设计和协作规范。

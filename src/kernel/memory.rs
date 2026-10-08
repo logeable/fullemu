@@ -1,7 +1,7 @@
-//! 为每个用户任务建立独立的 Sv39 恒等映射和 U/S 权限边界。
+//! 为每个用户任务建立独立 Sv39 地址空间和 U/S 权限边界。
 //!
-//! 页表和页表页池均静态分配。每个任务有独立根页表，只映射共享内核、自己的用户程序
-//! 和用户栈，以及 QEMU `virt` UART；尚不提供物理页分配器。
+//! 页表和页表页池均静态分配。每个任务有独立根页表，内核、用户栈和 QEMU `virt` UART
+//! 使用恒等映射；共同的用户程序虚拟区域映射到任务自己的物理镜像槽位。尚不提供物理页分配器。
 
 const PAGE_SIZE: usize = 4096;
 const PAGE_MASK: usize = PAGE_SIZE - 1;
@@ -30,15 +30,23 @@ static mut PAGE_TABLES: [PageTable; TOTAL_PAGE_TABLES] =
     [const { PageTable([0; PAGE_TABLE_ENTRIES]) }; TOTAL_PAGE_TABLES];
 static mut ADDRESS_SPACE_COUNT: usize = 0;
 
+/// 描述某个任务中用户程序虚拟区域到其独立物理镜像槽位的映射。
+#[derive(Clone, Copy)]
+pub(crate) struct UserImageMapping {
+    pub virtual_start: usize,
+    pub physical_start: usize,
+    pub size: usize,
+}
+
 /// 为每个任务建立独立页表，并激活第一个任务的地址空间。
 ///
 /// `kernel_end` 是内核映像及 BSS 的结束地址；两个切片按任务索引对应，分别描述该任务
-/// 的用户栈和已装入程序的完整固定槽位。所有页表都映射相同的 S-mode 内核区域，
-/// 但每张表只映射对应任务自己的 U-mode 区域。
+/// 的用户栈和用户程序映射。所有程序使用相同虚拟起始地址，但映射到各自物理镜像槽位。
+/// 所有页表都映射相同的 S-mode 内核区域，每张表只映射对应任务自己的 U-mode 区域。
 pub fn initialize(
     kernel_end: usize,
     user_stacks: &[(usize, usize)],
-    user_images: &[(usize, usize)],
+    user_images: &[UserImageMapping],
 ) -> Result<(), PageTableError> {
     let kernel_start = core::ptr::addr_of!(__kernel_start) as usize;
     let kernel_end = align_up(kernel_end)?;
@@ -68,19 +76,29 @@ pub fn initialize(
         }
     }
 
-    if user_images.is_empty() {
-        return Err(PageTableError::InvalidRange);
-    }
-    for (index, &(image_start, image_end)) in user_images.iter().enumerate() {
-        if image_start & PAGE_MASK != 0
-            || image_end & PAGE_MASK != 0
-            || image_start < kernel_end
-            || image_end <= image_start
-            || user_images[..index]
-                .iter()
-                .any(|&(other_start, other_end)| {
-                    ranges_overlap(image_start, image_end, other_start, other_end)
-                })
+    for (index, image) in user_images.iter().enumerate() {
+        let Some(virtual_end) = image.virtual_start.checked_add(image.size) else {
+            return Err(PageTableError::InvalidRange);
+        };
+        let Some(physical_end) = image.physical_start.checked_add(image.size) else {
+            return Err(PageTableError::InvalidRange);
+        };
+        if image.virtual_start & PAGE_MASK != 0
+            || image.physical_start & PAGE_MASK != 0
+            || image.size == 0
+            || image.size & PAGE_MASK != 0
+            || image.virtual_start < kernel_end
+            || image.physical_start < kernel_end
+            || virtual_end <= image.virtual_start
+            || physical_end <= image.physical_start
+            || user_images[..index].iter().any(|other| {
+                ranges_overlap(
+                    image.physical_start,
+                    physical_end,
+                    other.physical_start,
+                    other.physical_start.saturating_add(other.size),
+                )
+            })
         {
             return Err(PageTableError::InvalidRange);
         }
@@ -91,7 +109,7 @@ pub fn initialize(
     // 安全性：清零范围由静态页表池的固定长度确定。
     unsafe { core::ptr::write_bytes(all_page_tables, 0, TOTAL_PAGE_TABLES) };
 
-    for (address_space_index, (&(stack_start, stack_end), &(image_start, image_end))) in
+    for (address_space_index, (&(stack_start, stack_end), image)) in
         user_stacks.iter().zip(user_images).enumerate()
     {
         // 安全性：索引来自已经限制在静态地址空间数量内的输入切片。
@@ -107,21 +125,23 @@ pub fn initialize(
                 root_table,
                 &mut next_table,
                 kernel_page,
+                kernel_page,
                 PTE_READ | PTE_WRITE | PTE_EXECUTE,
             )?;
             kernel_page += PAGE_SIZE;
         }
 
-        let mut image_page = image_start;
-        while image_page < image_end {
+        let mut image_offset = 0;
+        while image_offset < image.size {
             map_page(
                 page_tables,
                 root_table,
                 &mut next_table,
-                image_page,
+                image.virtual_start + image_offset,
+                image.physical_start + image_offset,
                 PTE_READ | PTE_WRITE | PTE_EXECUTE | PTE_USER,
             )?;
-            image_page += PAGE_SIZE;
+            image_offset += PAGE_SIZE;
         }
 
         let mut stack_page = stack_start;
@@ -130,6 +150,7 @@ pub fn initialize(
                 page_tables,
                 root_table,
                 &mut next_table,
+                stack_page,
                 stack_page,
                 PTE_READ | PTE_WRITE | PTE_USER,
             )?;
@@ -140,6 +161,7 @@ pub fn initialize(
             page_tables,
             root_table,
             &mut next_table,
+            UART_BASE,
             UART_BASE,
             PTE_READ | PTE_WRITE,
         )?;
@@ -217,6 +239,7 @@ fn map_page(
     root_table: *mut PageTable,
     next_table: &mut usize,
     virtual_address: usize,
+    physical_address: usize,
     permissions: usize,
 ) -> Result<(), PageTableError> {
     let indices = [
@@ -255,11 +278,11 @@ fn map_page(
 
     // 安全性：最低层索引也由 9 位 VPN 字段计算，且表指针来自当前页表树。
     let leaf = unsafe { core::ptr::addr_of_mut!((*table).0[indices[2]]) };
-    // 安全性：叶子 PTE 位于有效 L0 页表内；映射物理地址与虚拟地址恒等。
+    // 安全性：叶子 PTE 位于有效 L0 页表内；物理页由调用方提供并按页对齐。
     unsafe {
         core::ptr::write(
             leaf,
-            ((virtual_address >> 12) << 10)
+            ((physical_address >> 12) << 10)
                 | permissions
                 | PTE_VALID
                 | PTE_ACCESSED

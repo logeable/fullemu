@@ -33,11 +33,11 @@ build-user:
 	@set -eu; \
 	manifest_tmp="$(USER_IMAGE_MANIFEST).tmp"; \
 	: > "$$manifest_tmp"; \
-	while read -r program_name link_address entry_offset; do \
+	while read -r program_name link_address; do \
 		program_elf="$(USER_BUILD_DIR)/$$program_name"; \
 		program_image="$$program_elf.bin"; \
 		$(OBJCOPY) --strip-all -O binary "$$program_elf" "$$program_image"; \
-		printf '%s %s %s %s\n' "$$program_name" "$$link_address" "$$entry_offset" "$$program_image" >> "$$manifest_tmp"; \
+		printf '%s %s %s\n' "$$program_name" "$$link_address" "$$program_image" >> "$$manifest_tmp"; \
 	done < "$(USER_LAYOUT_FILE)"; \
 	mv "$$manifest_tmp" "$(USER_IMAGE_MANIFEST)"
 

@@ -1,11 +1,11 @@
-//! 管理同时驻留的用户程序镜像，并复制到各自固定的加载槽位。
+//! 管理同时驻留的用户程序镜像，并复制到各自固定的物理加载槽位。
 
 const USER_PROGRAM_SLOT_SIZE: usize = 64 * 1024;
+const USER_PROGRAM_VIRTUAL_BASE: usize = 0x8040_0000;
 
 struct UserProgramImage {
     name: &'static str,
     linked_base: usize,
-    entry_offset: usize,
     bytes: &'static [u8],
 }
 
@@ -22,6 +22,8 @@ pub struct LoadedUserProgram {
     pub name: &'static str,
     /// 用户程序入口地址。
     pub entry: usize,
+    /// 用户程序链接时使用的固定虚拟起始地址。
+    pub virtual_start: usize,
     /// 用户程序固定加载槽位的起始地址。
     pub slot_start: usize,
     /// 用户程序固定加载槽位的结束地址。
@@ -104,33 +106,16 @@ pub fn load(index: usize) -> Result<Option<LoadedUserProgram>, UserProgramLoadEr
             description: "用户程序镜像超过固定加载槽位容量",
         });
     }
-    if program.linked_base != slot_start {
+    if program.linked_base != USER_PROGRAM_VIRTUAL_BASE {
         return Err(UserProgramLoadError {
             program_name: program.name,
             image_size: program.bytes.len(),
             capacity,
-            description: "用户程序链接地址与目标加载槽位不一致",
+            description: "用户程序没有链接到统一的虚拟起始地址",
         });
     }
-    if program.entry_offset >= program.bytes.len() {
-        return Err(UserProgramLoadError {
-            program_name: program.name,
-            image_size: program.bytes.len(),
-            capacity,
-            description: "用户程序入口偏移超出镜像范围",
-        });
-    }
-    let Some(entry) = slot_start.checked_add(program.entry_offset) else {
-        return Err(UserProgramLoadError {
-            program_name: program.name,
-            image_size: program.bytes.len(),
-            capacity,
-            description: "用户程序入口地址计算溢出",
-        });
-    };
-
     // 安全性：链接脚本保证加载区位于内核映像之后且落在 QEMU RAM 内；
-    // 编译期嵌入的源镜像与目标槽位不重叠，镜像长度和槽位边界已在复制前检查。
+    // 编译期嵌入的源镜像与目标物理槽位不重叠，镜像长度和槽位边界已在复制前检查。
     unsafe {
         core::ptr::write_bytes(slot_start as *mut u8, 0, capacity);
         core::ptr::copy_nonoverlapping(
@@ -143,7 +128,8 @@ pub fn load(index: usize) -> Result<Option<LoadedUserProgram>, UserProgramLoadEr
 
     Ok(Some(LoadedUserProgram {
         name: program.name,
-        entry,
+        entry: program.linked_base,
+        virtual_start: program.linked_base,
         slot_start,
         slot_end,
         image_size: program.bytes.len(),
@@ -156,22 +142,15 @@ pub fn contains_buffer_range(program_index: usize, address: usize, length: usize
         return true;
     }
 
-    let image_start = core::ptr::addr_of!(__user_program_load_start) as usize;
     let Some(program) = USER_PROGRAMS.get(program_index) else {
         return false;
     };
-    let Some(slot_offset) = program_index.checked_mul(USER_PROGRAM_SLOT_SIZE) else {
-        return false;
-    };
-    let Some(program_start) = image_start.checked_add(slot_offset) else {
-        return false;
-    };
-    let Some(image_end) = program_start.checked_add(program.bytes.len()) else {
+    let Some(image_end) = program.linked_base.checked_add(program.bytes.len()) else {
         return false;
     };
     let Some(buffer_end) = address.checked_add(length) else {
         return false;
     };
 
-    address >= program_start && buffer_end <= image_end
+    address >= program.linked_base && buffer_end <= image_end
 }

@@ -76,7 +76,11 @@ fn start_programs(program_indices: &[usize]) -> ! {
     }
 
     let mut user_stack_ranges = [(0, 0); MAX_USER_TASKS];
-    let mut user_image_ranges = [(0, 0); MAX_USER_TASKS];
+    let mut user_image_mappings = [super::memory::UserImageMapping {
+        virtual_start: 0,
+        physical_start: 0,
+        size: 0,
+    }; MAX_USER_TASKS];
 
     for (task_index, program_index) in program_indices.iter().copied().enumerate() {
         // 安全性：任务索引来自已检查长度的切片，程序索引由启动策略从构建清单生成。
@@ -107,7 +111,11 @@ fn start_programs(program_indices: &[usize]) -> ! {
             stop_forever();
         };
         user_stack_ranges[task_index] = user_stack_range;
-        user_image_ranges[task_index] = (program.slot_start, program.slot_end);
+        user_image_mappings[task_index] = super::memory::UserImageMapping {
+            virtual_start: program.virtual_start,
+            physical_start: program.slot_start,
+            size: program.slot_end - program.slot_start,
+        };
 
         let kernel_stack_top = task_kernel_stack_top(task_index);
         let initial_frame_address = kernel_stack_top - core::mem::size_of::<TrapFrame>();
@@ -153,12 +161,12 @@ fn start_programs(program_indices: &[usize]) -> ! {
         );
     }
 
-    // 安全性：链接脚本将内核、全部用户镜像槽位和静态栈放在恒等映射地址；范围按页对齐。
+    // 安全性：链接脚本将内核、全部用户镜像物理槽位和静态栈放在恒等映射地址；范围按页对齐。
     let kernel_end = core::ptr::addr_of!(__bss_end) as usize;
     if let Err(error) = super::memory::initialize(
         kernel_end,
         &user_stack_ranges[..program_indices.len()],
-        &user_image_ranges[..program_indices.len()],
+        &user_image_mappings[..program_indices.len()],
     ) {
         crate::klog_error!("Sv39 初始化失败：{}", error.description());
         stop_forever();

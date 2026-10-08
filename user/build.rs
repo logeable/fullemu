@@ -3,7 +3,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const USER_IMAGE_BASE: usize = 0x8040_0000;
-const USER_IMAGE_SLOT_SIZE: usize = 64 * 1024;
 const MAX_USER_PROGRAMS: usize = 8;
 const LAYOUT_FILE_ENV: &str = "FULLEMU_USER_LAYOUT_FILE";
 const BOOT_MODE_ENV: &str = "FULLEMU_BOOT_MODE";
@@ -47,24 +46,17 @@ fn main() {
     }
 
     let mut layout = String::new();
-    for (index, source_path) in binary_sources.iter().enumerate() {
+    for source_path in &binary_sources {
         let program_name = source_path
             .file_stem()
             .and_then(|name| name.to_str())
             .expect("用户程序文件名必须是有效 UTF-8");
-        let slot_offset = index
-            .checked_mul(USER_IMAGE_SLOT_SIZE)
-            .expect("用户程序槽位偏移溢出");
-        let link_address = USER_IMAGE_BASE
-            .checked_add(slot_offset)
-            .expect("用户程序链接地址溢出");
-
-        // 每个 bin 都链接到它在运行时将被内核装入的固定槽位。
+        // 所有 bin 使用相同的用户虚拟入口；内核通过各自页表映射不同物理镜像槽位。
         println!(
-            "cargo:rustc-link-arg-bin={program_name}=--defsym=__user_image_base={link_address:#x}"
+            "cargo:rustc-link-arg-bin={program_name}=--defsym=__user_image_base={USER_IMAGE_BASE:#x}"
         );
         println!("cargo:rustc-link-arg-bin={program_name}=-Tlinker.ld");
-        layout.push_str(&format!("{program_name} {link_address:#x} 0x0\n"));
+        layout.push_str(&format!("{program_name} {USER_IMAGE_BASE:#x}\n"));
         println!("cargo:rerun-if-changed={}", source_path.display());
     }
 
