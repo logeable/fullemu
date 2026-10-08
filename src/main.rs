@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 
-//! 从 OpenSBI 进入 Rust，通过 QEMU 串口报告启动信息并运行用户态 shell。
+//! 从 OpenSBI 进入 Rust，通过 QEMU 串口报告启动信息并按配置运行用户程序。
 
 mod arch;
 
@@ -88,7 +88,11 @@ pub extern "C" fn kernel_main(hart_id: usize, device_tree: usize) -> ! {
         }
     }
 
-    kernel::user_mode::run_boot_program();
+    match env!("FULLEMU_BOOT_MODE") {
+        "shell" => kernel::user_mode::run_boot_program(),
+        "batch" => kernel::user_mode::run_batch_programs(),
+        _ => unreachable!("build.rs 已验证启动模式"),
+    }
 }
 
 fn report_fdt_structure_error(error: fullemu::boot::fdt::FdtStructureError) -> ! {

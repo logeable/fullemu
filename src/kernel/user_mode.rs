@@ -1,4 +1,4 @@
-//! 在单 hart 上以协作和定时器抢占方式调度多个同时驻留的 U-mode 程序。
+//! 在单 hart 上启动并调度多个同时驻留的 U-mode 程序。
 
 use crate::arch::riscv64::trap::{ExceptionCause, InterruptCause, TrapCause, TrapFrame};
 
@@ -44,56 +44,114 @@ pub fn run_boot_program() -> ! {
         stop_forever();
     };
 
-    // 安全性：初始化只在单 hart 启动路径执行，唯一任务位于静态槽位零。
-    unsafe {
-        core::ptr::write_volatile(core::ptr::addr_of_mut!(TASK_COUNT), 1);
-        core::ptr::write_volatile(core::ptr::addr_of_mut!(CURRENT_TASK_INDEX), 0);
-        core::ptr::write_volatile(
-            core::ptr::addr_of_mut!(TASK_PROGRAM_INDICES).cast::<usize>(),
-            program_index,
-        );
+    start_programs(&[program_index]);
+}
+
+/// 同时装入并调度构建清单中的批处理程序。
+///
+/// 交互式 shell 会在 `read` 系统调用中等待输入，因此不属于批处理任务集合。
+pub fn run_batch_programs() -> ! {
+    let shell_index = super::user_program::find_index("fullemu_user_shell");
+    let mut program_indices = [0; MAX_USER_TASKS];
+    let mut program_count = 0;
+
+    for program_index in 0..super::user_program::count() {
+        if Some(program_index) == shell_index {
+            continue;
+        }
+
+        if program_count == MAX_USER_TASKS {
+            crate::klog_error!("批处理程序数量超过任务上限：{MAX_USER_TASKS}");
+            stop_forever();
+        }
+        program_indices[program_count] = program_index;
+        program_count += 1;
     }
 
-    let program = match super::user_program::load(program_index) {
-        Ok(Some(program)) => program,
-        Ok(None) => {
-            crate::klog_error!("入口用户程序在清单中缺失：{BOOT_PROGRAM_NAME}");
-            stop_forever();
-        }
-        Err(error) => {
-            report_load_error(error);
-            stop_forever();
-        }
-    };
-
-    let user_stack_top = reset_user_stack(0);
-    let Some(user_stack_range) = user_stack_range(0) else {
-        crate::klog_error!("无法计算首个用户任务的栈范围");
+    if program_count == 0 {
+        crate::klog_error!("用户程序清单中没有可批处理运行的程序");
         stop_forever();
-    };
-    let kernel_stack_top = task_kernel_stack_top(0);
-    let initial_frame_address = kernel_stack_top - core::mem::size_of::<TrapFrame>();
-    let initial_frame = TrapFrame::for_user_entry(program.entry, user_stack_top);
+    }
 
-    // 安全性：陷入帧放在首个静态任务专属内核栈的顶部，任务索引固定为零。
+    start_programs(&program_indices[..program_count]);
+}
+
+fn start_programs(program_indices: &[usize]) -> ! {
+    if program_indices.is_empty() || program_indices.len() > MAX_USER_TASKS {
+        crate::klog_error!("用户任务数量无效：{}", program_indices.len());
+        stop_forever();
+    }
+
+    // 安全性：初始化只在单 hart 启动路径执行；传入的任务数量已限制在静态数组容量内。
     unsafe {
-        core::ptr::write(initial_frame_address as *mut TrapFrame, initial_frame);
-        core::ptr::write_volatile(
-            core::ptr::addr_of_mut!(SAVED_FRAMES).cast::<usize>(),
-            initial_frame_address,
-        );
-        core::ptr::write_volatile(
-            core::ptr::addr_of_mut!(TASK_STATES).cast::<TaskState>(),
-            TaskState::Ready,
+        core::ptr::write_volatile(core::ptr::addr_of_mut!(TASK_COUNT), program_indices.len());
+        core::ptr::write_volatile(core::ptr::addr_of_mut!(CURRENT_TASK_INDEX), 0);
+    }
+
+    let mut user_stack_ranges = [(0, 0); MAX_USER_TASKS];
+    let mut user_image_ranges = [(0, 0); MAX_USER_TASKS];
+
+    for (task_index, program_index) in program_indices.iter().copied().enumerate() {
+        // 安全性：任务索引来自已检查长度的切片，程序索引由启动策略从构建清单生成。
+        unsafe {
+            core::ptr::write_volatile(
+                core::ptr::addr_of_mut!(TASK_PROGRAM_INDICES)
+                    .cast::<usize>()
+                    .add(task_index),
+                program_index,
+            );
+        }
+
+        let program = match super::user_program::load(program_index) {
+            Ok(Some(program)) => program,
+            Ok(None) => {
+                crate::klog_error!("用户程序索引不存在：{program_index}");
+                stop_forever();
+            }
+            Err(error) => {
+                report_load_error(error);
+                stop_forever();
+            }
+        };
+
+        let user_stack_top = reset_user_stack(task_index);
+        let Some(user_stack_range) = user_stack_range(task_index) else {
+            crate::klog_error!("无法计算任务 {} 的用户栈范围", task_index);
+            stop_forever();
+        };
+        user_stack_ranges[task_index] = user_stack_range;
+        user_image_ranges[task_index] = (program.slot_start, program.slot_end);
+
+        let kernel_stack_top = task_kernel_stack_top(task_index);
+        let initial_frame_address = kernel_stack_top - core::mem::size_of::<TrapFrame>();
+        let initial_frame = TrapFrame::for_user_entry(program.entry, user_stack_top);
+
+        // 安全性：陷入帧位于当前任务专属内核栈顶部，保存现场的数组索引已验证有效。
+        unsafe {
+            core::ptr::write(initial_frame_address as *mut TrapFrame, initial_frame);
+            core::ptr::write_volatile(
+                core::ptr::addr_of_mut!(SAVED_FRAMES)
+                    .cast::<usize>()
+                    .add(task_index),
+                initial_frame_address,
+            );
+            core::ptr::write_volatile(
+                core::ptr::addr_of_mut!(TASK_STATES)
+                    .cast::<TaskState>()
+                    .add(task_index),
+                TaskState::Ready,
+            );
+        }
+
+        crate::klog_info!(
+            "用户任务已装入：任务={}，程序={}，入口 {:#018x}，镜像 {} 字节",
+            task_index,
+            program.name,
+            program.entry,
+            program.image_size
         );
     }
 
-    crate::klog_info!(
-        "入口用户程序已装入：{}，入口 {:#018x}，镜像 {} 字节",
-        program.name,
-        program.entry,
-        program.image_size
-    );
     // 安全性：页表初始化前确保仍处于恒等寻址模式，并关闭中断避免启动状态被抢占。
     unsafe {
         core::arch::asm!(
@@ -108,19 +166,22 @@ pub fn run_boot_program() -> ! {
         );
     }
 
-    // 安全性：链接脚本将内核、用户镜像槽位和静态栈放在恒等映射地址；栈已按页对齐。
+    // 安全性：链接脚本将内核、全部用户镜像槽位和静态栈放在恒等映射地址；范围按页对齐。
     let kernel_end = core::ptr::addr_of!(__bss_end) as usize;
     if let Err(error) = super::memory::initialize(
         kernel_end,
-        user_stack_range,
-        (program.slot_start, program.slot_end),
+        &user_stack_ranges[..program_indices.len()],
+        &user_image_ranges[..program_indices.len()],
     ) {
         crate::klog_error!("Sv39 初始化失败：{}", error.description());
         stop_forever();
     }
 
     crate::klog_info!("已启用 Sv39 用户/内核页权限边界");
-    crate::klog_info!("启动用户程序；定时器中断保持调度响应");
+    crate::klog_info!(
+        "启动 {} 个用户任务；定时器中断保持调度响应",
+        program_indices.len()
+    );
 
     arm_next_timer_or_stop();
     crate::arch::riscv64::interrupt::enable_supervisor_timer();
@@ -221,6 +282,15 @@ fn schedule_next(previous_index: usize) -> *mut TrapFrame {
     // 安全性：只有单 hart 的陷入处理器修改当前任务索引。
     unsafe {
         core::ptr::write_volatile(core::ptr::addr_of_mut!(CURRENT_TASK_INDEX), next_index);
+    }
+
+    if let Err(error) = super::memory::activate_address_space(next_index) {
+        crate::klog_error!(
+            "切换到任务 {} 的地址空间失败：{}",
+            next_index,
+            error.description()
+        );
+        stop_forever();
     }
 
     if next_index != previous_index {

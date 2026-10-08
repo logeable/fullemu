@@ -1,12 +1,14 @@
-//! 为当前单个用户任务建立最小 Sv39 恒等映射和 U/S 权限边界。
+//! 为每个用户任务建立独立的 Sv39 恒等映射和 U/S 权限边界。
 //!
-//! 页表和页表页池均静态分配。本模块只映射启动后仍会访问的内核、用户程序、用户栈
-//! 和 QEMU `virt` UART；尚不提供物理页分配器或多个独立地址空间。
+//! 页表和页表页池均静态分配。每个任务有独立根页表，只映射共享内核、自己的用户程序
+//! 和用户栈，以及 QEMU `virt` UART；尚不提供物理页分配器。
 
 const PAGE_SIZE: usize = 4096;
 const PAGE_MASK: usize = PAGE_SIZE - 1;
 const PAGE_TABLE_ENTRIES: usize = 512;
-const MAX_PAGE_TABLES: usize = 8;
+const MAX_USER_ADDRESS_SPACES: usize = 8;
+const PAGE_TABLES_PER_ADDRESS_SPACE: usize = 8;
+const TOTAL_PAGE_TABLES: usize = MAX_USER_ADDRESS_SPACES * PAGE_TABLES_PER_ADDRESS_SPACE;
 const SATP_SV39_MODE: usize = 8;
 const SATP_MODE_SHIFT: usize = 60;
 const UART_BASE: usize = 0x1000_0000;
@@ -24,94 +26,161 @@ const SSTATUS_SUM: usize = 1 << 18;
 #[repr(C, align(4096))]
 struct PageTable([usize; PAGE_TABLE_ENTRIES]);
 
-static mut PAGE_TABLES: [PageTable; MAX_PAGE_TABLES] =
-    [const { PageTable([0; PAGE_TABLE_ENTRIES]) }; MAX_PAGE_TABLES];
+static mut PAGE_TABLES: [PageTable; TOTAL_PAGE_TABLES] =
+    [const { PageTable([0; PAGE_TABLE_ENTRIES]) }; TOTAL_PAGE_TABLES];
+static mut ADDRESS_SPACE_COUNT: usize = 0;
 
-/// 建立恒等映射并切换到 Sv39。
+/// 为每个任务建立独立页表，并激活第一个任务的地址空间。
 ///
-/// `kernel_end` 是内核映像及 BSS 的结束地址，`user_stack` 是当前任务专用栈区间，
-/// `user_image` 是已清零并装入用户程序的完整固定槽位。调用后当前指令、内核栈和
-/// 后续使用的内核数据仍由恒等映射覆盖。
+/// `kernel_end` 是内核映像及 BSS 的结束地址；两个切片按任务索引对应，分别描述该任务
+/// 的用户栈和已装入程序的完整固定槽位。所有页表都映射相同的 S-mode 内核区域，
+/// 但每张表只映射对应任务自己的 U-mode 区域。
 pub fn initialize(
     kernel_end: usize,
-    user_stack: (usize, usize),
-    user_image: (usize, usize),
+    user_stacks: &[(usize, usize)],
+    user_images: &[(usize, usize)],
 ) -> Result<(), PageTableError> {
     let kernel_start = core::ptr::addr_of!(__kernel_start) as usize;
     let kernel_end = align_up(kernel_end)?;
-    let stack_start = user_stack.0;
-    let stack_end = user_stack.1;
-    let image_start = user_image.0;
-    let image_end = user_image.1;
 
     if kernel_start & PAGE_MASK != 0
-        || stack_start & PAGE_MASK != 0
-        || stack_end & PAGE_MASK != 0
-        || image_start & PAGE_MASK != 0
-        || image_end & PAGE_MASK != 0
         || kernel_end <= kernel_start
-        || stack_end <= stack_start
-        || image_end <= image_start
-        || stack_start < kernel_start
-        || stack_end > kernel_end
-        || image_start < kernel_end
+        || user_stacks.is_empty()
+        || user_stacks.len() > MAX_USER_ADDRESS_SPACES
+        || user_stacks.len() != user_images.len()
     {
         return Err(PageTableError::InvalidRange);
     }
 
-    // 安全性：页表池是本模块独占的静态存储；初始化只在单 hart 启动路径执行一次。
-    let page_tables = core::ptr::addr_of_mut!(PAGE_TABLES).cast::<PageTable>();
-    // 安全性：页表池有固定长度，清零范围由对应静态数组长度确定。
-    unsafe { core::ptr::write_bytes(page_tables, 0, MAX_PAGE_TABLES) };
+    for (index, &(stack_start, stack_end)) in user_stacks.iter().enumerate() {
+        if stack_start & PAGE_MASK != 0
+            || stack_end & PAGE_MASK != 0
+            || stack_start < kernel_start
+            || stack_end > kernel_end
+            || stack_end <= stack_start
+            || user_stacks[..index]
+                .iter()
+                .any(|&(other_start, other_end)| {
+                    ranges_overlap(stack_start, stack_end, other_start, other_end)
+                })
+        {
+            return Err(PageTableError::InvalidRange);
+        }
+    }
 
-    let mut next_table = 1;
-    let root_table = page_tables;
-    let mut kernel_page = kernel_start;
-    while kernel_page < kernel_end {
+    if user_images.is_empty() {
+        return Err(PageTableError::InvalidRange);
+    }
+    for (index, &(image_start, image_end)) in user_images.iter().enumerate() {
+        if image_start & PAGE_MASK != 0
+            || image_end & PAGE_MASK != 0
+            || image_start < kernel_end
+            || image_end <= image_start
+            || user_images[..index]
+                .iter()
+                .any(|&(other_start, other_end)| {
+                    ranges_overlap(image_start, image_end, other_start, other_end)
+                })
+        {
+            return Err(PageTableError::InvalidRange);
+        }
+    }
+
+    // 安全性：页表池由本模块独占，初始化仅在单 hart 启动路径执行一次。
+    let all_page_tables = core::ptr::addr_of_mut!(PAGE_TABLES).cast::<PageTable>();
+    // 安全性：清零范围由静态页表池的固定长度确定。
+    unsafe { core::ptr::write_bytes(all_page_tables, 0, TOTAL_PAGE_TABLES) };
+
+    for (address_space_index, (&(stack_start, stack_end), &(image_start, image_end))) in
+        user_stacks.iter().zip(user_images).enumerate()
+    {
+        // 安全性：索引来自已经限制在静态地址空间数量内的输入切片。
+        let page_tables =
+            unsafe { all_page_tables.add(address_space_index * PAGE_TABLES_PER_ADDRESS_SPACE) };
+        let root_table = page_tables;
+        let mut next_table = 1;
+
+        let mut kernel_page = kernel_start;
+        while kernel_page < kernel_end {
+            map_page(
+                page_tables,
+                root_table,
+                &mut next_table,
+                kernel_page,
+                PTE_READ | PTE_WRITE | PTE_EXECUTE,
+            )?;
+            kernel_page += PAGE_SIZE;
+        }
+
+        let mut image_page = image_start;
+        while image_page < image_end {
+            map_page(
+                page_tables,
+                root_table,
+                &mut next_table,
+                image_page,
+                PTE_READ | PTE_WRITE | PTE_EXECUTE | PTE_USER,
+            )?;
+            image_page += PAGE_SIZE;
+        }
+
+        let mut stack_page = stack_start;
+        while stack_page < stack_end {
+            map_page(
+                page_tables,
+                root_table,
+                &mut next_table,
+                stack_page,
+                PTE_READ | PTE_WRITE | PTE_USER,
+            )?;
+            stack_page += PAGE_SIZE;
+        }
+
         map_page(
             page_tables,
             root_table,
             &mut next_table,
-            kernel_page,
-            PTE_READ | PTE_WRITE | PTE_EXECUTE,
+            UART_BASE,
+            PTE_READ | PTE_WRITE,
         )?;
-        kernel_page += PAGE_SIZE;
     }
 
-    let mut image_page = image_start;
-    while image_page < image_end {
-        map_page(
-            page_tables,
-            root_table,
-            &mut next_table,
-            image_page,
-            PTE_READ | PTE_WRITE | PTE_EXECUTE | PTE_USER,
-        )?;
-        image_page += PAGE_SIZE;
+    // 安全性：地址空间数量不超过根表数组容量，后续调度只激活这些已完整构造的页表。
+    unsafe {
+        core::ptr::write_volatile(
+            core::ptr::addr_of_mut!(ADDRESS_SPACE_COUNT),
+            user_stacks.len(),
+        );
     }
-
-    let mut stack_page = stack_start;
-    while stack_page < stack_end {
-        map_page(
-            page_tables,
-            root_table,
-            &mut next_table,
-            stack_page,
-            PTE_READ | PTE_WRITE | PTE_USER,
-        )?;
-        stack_page += PAGE_SIZE;
-    }
-
-    map_page(
-        page_tables,
-        root_table,
-        &mut next_table,
-        UART_BASE,
-        PTE_READ | PTE_WRITE,
-    )?;
-
-    activate(root_table as usize)?;
+    activate_address_space(0)?;
     Ok(())
+}
+
+/// 切换到指定任务的 Sv39 根页表。
+pub fn activate_address_space(address_space_index: usize) -> Result<(), PageTableError> {
+    // 安全性：地址空间数量仅在全部根页表初始化完成后写入，调度器传入任务索引。
+    let address_space_count =
+        unsafe { core::ptr::read_volatile(core::ptr::addr_of!(ADDRESS_SPACE_COUNT)) };
+    if address_space_index >= address_space_count {
+        return Err(PageTableError::UnknownAddressSpace);
+    }
+
+    // 安全性：该根页表是静态池中按任务索引分配、已完成初始化且页对齐的一页。
+    let root_table = unsafe {
+        core::ptr::addr_of!(PAGE_TABLES)
+            .cast::<PageTable>()
+            .add(address_space_index * PAGE_TABLES_PER_ADDRESS_SPACE)
+    };
+    activate(root_table as usize)
+}
+
+fn ranges_overlap(
+    first_start: usize,
+    first_end: usize,
+    second_start: usize,
+    second_end: usize,
+) -> bool {
+    first_start < second_end && second_start < first_end
 }
 
 /// 在短暂允许 S-mode 访问 U 页面期间读取一个已验证的用户字节。
@@ -163,7 +232,7 @@ fn map_page(
         // 安全性：当前表指针来自静态页表池，且索引经过 9 位掩码限制。
         let entry_value = unsafe { core::ptr::read(entry) };
         if entry_value & PTE_VALID == 0 {
-            if *next_table >= MAX_PAGE_TABLES {
+            if *next_table >= PAGE_TABLES_PER_ADDRESS_SPACE {
                 return Err(PageTableError::PageTablePoolExhausted);
             }
             // 安全性：新页表索引受静态池长度检查约束；每张表恰好一页且按页对齐。
@@ -272,6 +341,8 @@ pub enum PageTableError {
     InvalidRange,
     /// 静态页表池容量不足。
     PageTablePoolExhausted,
+    /// 调度器请求了尚未初始化的地址空间。
+    UnknownAddressSpace,
     /// 本实验只建立 4 KiB 叶子映射，却遇到大页叶子项。
     UnexpectedSuperpage,
     /// 根页表没有按 4 KiB 对齐。
@@ -286,6 +357,7 @@ impl PageTableError {
         match self {
             Self::InvalidRange => "页表映射范围无效或未按 4 KiB 对齐",
             Self::PageTablePoolExhausted => "静态页表池容量不足",
+            Self::UnknownAddressSpace => "任务地址空间尚未初始化",
             Self::UnexpectedSuperpage => "页表中出现本阶段未支持的大页映射",
             Self::InvalidRootTable => "根页表地址未按 4 KiB 对齐",
             Self::Sv39Unavailable => "硬件没有接受 Sv39 satp 模式",

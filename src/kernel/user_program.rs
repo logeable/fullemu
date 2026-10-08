@@ -55,6 +55,11 @@ pub fn find_index(name: &str) -> Option<usize> {
         .position(|program| program.name == name)
 }
 
+/// 返回构建清单中的用户程序数量。
+pub fn count() -> usize {
+    USER_PROGRAMS.len()
+}
+
 /// 将指定程序装入独立槽位；索引超出清单时表示没有该程序。
 pub fn load(index: usize) -> Result<Option<LoadedUserProgram>, UserProgramLoadError> {
     let Some(program) = USER_PROGRAMS.get(index) else {

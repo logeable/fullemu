@@ -66,7 +66,13 @@ fn binary_sources(directory: &Path) -> Vec<PathBuf> {
                 .path()
         })
         .filter(|path| {
-            path.is_file() && path.extension().is_some_and(|extension| extension == "rs")
+            let is_rust_bin =
+                path.is_file() && path.extension().is_some_and(|extension| extension == "rs");
+            let is_disabled = path
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("disabled-"));
+            is_rust_bin && !is_disabled
         })
         .collect()
 }
