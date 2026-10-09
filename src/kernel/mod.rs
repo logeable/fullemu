@@ -3,6 +3,7 @@
 //! 子模块按稳定的操作系统概念组织；阶段编号与教学顺序记录在 `docs/`，不作为源码包名。
 
 pub(crate) mod clock;
+pub(crate) mod frame_allocator;
 pub(crate) mod heap;
 pub mod logging;
 pub(crate) mod memory;

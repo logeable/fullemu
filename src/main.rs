@@ -45,6 +45,14 @@ pub extern "C" fn kernel_main(hart_id: usize, device_tree: usize) -> ! {
         crate::klog_error!("内核容器分配实验失败：{}", error.description());
         panic!("内核容器分配实验失败");
     }
+    if let Err(error) = kernel::frame_allocator::initialize() {
+        crate::klog_error!("物理页帧分配器初始化失败：{}", error.description());
+        panic!("物理页帧分配器初始化失败");
+    }
+    if let Err(error) = kernel::frame_allocator::run_experiment() {
+        crate::klog_error!("物理页帧实验失败：{}", error.description());
+        panic!("物理页帧实验失败");
+    }
     log_kernel_sections();
     crate::klog_info!("fullemu 已在 QEMU virt (RISC-V) 启动");
     crate::klog_info!("启动 hart：{hart_id:#018x}");
