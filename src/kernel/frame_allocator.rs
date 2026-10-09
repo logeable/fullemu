@@ -1,7 +1,7 @@
 //! 从固定的物理页池中分配和回收 4 KiB 页帧。
 //!
 //! 当前页池静态保留在内核 BSS 中，位图记录每一页的占用状态。它与按字节分配内核对象的
-//! `heap` 分离；本阶段只演示页帧所有权，不替换 Sv39 页表和用户栈的静态存储。
+//! `heap` 分离；Sv39 页表页已使用此分配器，用户栈仍静态保留。
 
 const PAGE_SIZE: usize = 4096;
 const FRAME_COUNT: usize = 128;
@@ -24,6 +24,11 @@ pub struct PhysicalFrame {
 impl PhysicalFrame {
     /// 返回页帧的物理起始地址。
     pub const fn start_address(&self) -> usize {
+        self.start_address
+    }
+
+    /// 将页帧所有权交给记录其物理地址的调用方。
+    pub fn into_address(self) -> usize {
         self.start_address
     }
 }
@@ -110,6 +115,24 @@ impl FrameAllocator {
                 .sum::<usize>())
     }
 
+    fn is_allocated_frame_address(&self, address: usize) -> bool {
+        if !self.initialized {
+            return false;
+        }
+
+        let Some(offset) = address.checked_sub(self.start_address) else {
+            return false;
+        };
+        if offset >= FRAME_POOL_SIZE || offset & (PAGE_SIZE - 1) != 0 {
+            return false;
+        }
+
+        let frame_index = offset / PAGE_SIZE;
+        let word_index = frame_index / BITMAP_WORD_BITS;
+        let bit_index = frame_index % BITMAP_WORD_BITS;
+        self.allocated[word_index] & (1usize << bit_index) != 0
+    }
+
     fn ensure_initialized(&self) -> Result<(), FrameError> {
         if self.initialized {
             Ok(())
@@ -129,10 +152,22 @@ pub fn initialize() -> Result<(), FrameError> {
 }
 
 /// 分配一个物理页帧。
+///
+/// 返回的页内容未初始化；读取前必须先写入有效内容。
 pub fn allocate_frame() -> Result<PhysicalFrame, FrameError> {
     let _interrupt_guard = crate::arch::riscv64::interrupt::disable_supervisor_interrupts();
     // 安全性：单 hart 中断已关闭，位图更新不会与其他任务并发执行。
     unsafe { (*core::ptr::addr_of_mut!(FRAME_ALLOCATOR)).allocate() }
+}
+
+/// 分配一个物理页帧，并将整页内容清零。
+pub fn allocate_zeroed_frame() -> Result<PhysicalFrame, FrameError> {
+    let frame = allocate_frame()?;
+    // 安全性：frame 是当前调用独占持有的已分配页，且页池在 S-mode 下可写并保持恒等映射。
+    unsafe {
+        core::ptr::write_bytes(frame.start_address as *mut u8, 0, PAGE_SIZE);
+    }
+    Ok(frame)
 }
 
 /// 释放此前由该分配器分配的页帧。
@@ -147,6 +182,13 @@ pub fn free_frame_count() -> Result<usize, FrameError> {
     let _interrupt_guard = crate::arch::riscv64::interrupt::disable_supervisor_interrupts();
     // 安全性：单 hart 中断已关闭，读取位图期间分配状态不会变化。
     unsafe { (*core::ptr::addr_of!(FRAME_ALLOCATOR)).free_count() }
+}
+
+/// 检查物理地址是否对应页池中当前已分配的页帧。
+pub(crate) fn is_allocated_frame_address(address: usize) -> bool {
+    let _interrupt_guard = crate::arch::riscv64::interrupt::disable_supervisor_interrupts();
+    // 安全性：单 hart 中断已关闭，检查位图期间分配状态不会变化。
+    unsafe { (*core::ptr::addr_of!(FRAME_ALLOCATOR)).is_allocated_frame_address(address) }
 }
 
 /// 检查页帧分配、对齐、释放复用和完整归还。
@@ -169,10 +211,15 @@ pub(crate) fn check_allocation() -> Result<(), FrameError> {
     }
 
     let second_address = second.start_address();
+    // 安全性：自检独占持有 second，且该令牌代表页池内一整张可写页。
+    unsafe { core::ptr::write_bytes(second.start_address as *mut u8, 0xa5, PAGE_SIZE) };
     deallocate_frame(second)?;
-    let reused = allocate_frame()?;
+    let reused = allocate_zeroed_frame()?;
     if reused.start_address() != second_address {
         return Err(FrameError::FrameWasNotReused);
+    }
+    if !frame_is_zeroed(&reused) {
+        return Err(FrameError::FrameNotZeroed);
     }
 
     deallocate_frame(first)?;
@@ -183,12 +230,18 @@ pub(crate) fn check_allocation() -> Result<(), FrameError> {
     }
 
     crate::klog_info!(
-        "物理页帧分配器自检通过：页池起始={:#018x}，页数={}，页大小={} 字节；对齐、独立分配、释放复用和完整归还均符合预期",
+        "物理页帧分配器自检通过：页池起始={:#018x}，页数={}，页大小={} 字节；对齐、独立分配、脏页清零、释放复用和完整归还均符合预期",
         core::ptr::addr_of!(FRAME_STORAGE) as usize,
         FRAME_COUNT,
         PAGE_SIZE
     );
     Ok(())
+}
+
+fn frame_is_zeroed(frame: &PhysicalFrame) -> bool {
+    // 安全性：调用方持有该页帧的唯一令牌，地址和长度都落在固定可读页池内。
+    let bytes = unsafe { core::slice::from_raw_parts(frame.start_address as *const u8, PAGE_SIZE) };
+    bytes.iter().all(|byte| *byte == 0)
 }
 
 /// 描述固定物理页池的初始化和页帧操作错误。
@@ -206,12 +259,14 @@ pub enum FrameError {
     FrameOutsidePool,
     /// 页帧已经处于空闲状态。
     FrameAlreadyFree,
-    /// 启动演示中分配结果违反唯一性或对齐要求。
+    /// 启动自检中分配结果违反唯一性或对齐要求。
     InvalidAllocation,
     /// 释放后的空闲页数与预期不符。
     UnexpectedFreeCount,
     /// 已释放的页帧没有被下一次分配复用。
     FrameWasNotReused,
+    /// 已分配的清零页帧仍包含非零内容。
+    FrameNotZeroed,
 }
 
 impl FrameError {
@@ -225,8 +280,9 @@ impl FrameError {
             Self::FrameOutsidePool => "待释放页帧不属于物理页池",
             Self::FrameAlreadyFree => "物理页帧已被释放",
             Self::InvalidAllocation => "页帧分配未满足对齐或唯一性要求",
-            Self::UnexpectedFreeCount => "物理页帧实验后的空闲页数不符",
+            Self::UnexpectedFreeCount => "物理页帧自检后的空闲页数不符",
             Self::FrameWasNotReused => "已释放的物理页帧未被复用",
+            Self::FrameNotZeroed => "重新分配的页帧未被完整清零",
         }
     }
 }

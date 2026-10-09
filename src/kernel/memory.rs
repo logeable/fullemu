@@ -1,14 +1,12 @@
 //! 为每个用户任务建立独立 Sv39 地址空间和 U/S 权限边界。
 //!
-//! 页表和页表页池均静态分配。每个任务有独立根页表，内核、用户栈和 QEMU `virt` UART
-//! 使用恒等映射；共同的用户程序虚拟区域映射到任务自己的物理镜像槽位。尚不提供物理页分配器。
+//! 页表页按需从固定物理页帧池取得；根页表地址按任务索引记录。内核、用户栈和 QEMU `virt`
+//! UART 使用恒等映射；共同的用户程序虚拟区域映射到任务自己的物理镜像槽位。用户栈和镜像仍静态分配。
 
 const PAGE_SIZE: usize = 4096;
 const PAGE_MASK: usize = PAGE_SIZE - 1;
 const PAGE_TABLE_ENTRIES: usize = 512;
 const MAX_USER_ADDRESS_SPACES: usize = 8;
-const PAGE_TABLES_PER_ADDRESS_SPACE: usize = 8;
-const TOTAL_PAGE_TABLES: usize = MAX_USER_ADDRESS_SPACES * PAGE_TABLES_PER_ADDRESS_SPACE;
 const SATP_SV39_MODE: usize = 8;
 const SATP_MODE_SHIFT: usize = 60;
 const UART_BASE: usize = 0x1000_0000;
@@ -27,8 +25,7 @@ const SV39_VIRTUAL_ADDRESS_MASK: usize = (1 << 39) - 1;
 #[repr(C, align(4096))]
 struct PageTable([usize; PAGE_TABLE_ENTRIES]);
 
-static mut PAGE_TABLES: [PageTable; TOTAL_PAGE_TABLES] =
-    [const { PageTable([0; PAGE_TABLE_ENTRIES]) }; TOTAL_PAGE_TABLES];
+static mut ROOT_TABLE_ADDRESSES: [usize; MAX_USER_ADDRESS_SPACES] = [0; MAX_USER_ADDRESS_SPACES];
 static mut ADDRESS_SPACE_COUNT: usize = 0;
 
 /// 描述某个任务中用户程序虚拟区域到其独立物理镜像槽位的映射。
@@ -105,26 +102,27 @@ pub fn initialize(
         }
     }
 
-    // 安全性：页表池由本模块独占，初始化仅在单 hart 启动路径执行一次。
-    let all_page_tables = core::ptr::addr_of_mut!(PAGE_TABLES).cast::<PageTable>();
-    // 安全性：清零范围由静态页表池的固定长度确定。
-    unsafe { core::ptr::write_bytes(all_page_tables, 0, TOTAL_PAGE_TABLES) };
+    // 安全性：根页表地址数组由本模块独占，初始化仅在单 hart 启动路径执行一次。
+    let root_addresses = core::ptr::addr_of_mut!(ROOT_TABLE_ADDRESSES).cast::<usize>();
+    // 安全性：清零范围由根页表地址数组的固定长度确定。
+    unsafe { core::ptr::write_bytes(root_addresses, 0, MAX_USER_ADDRESS_SPACES) };
 
     for (address_space_index, (&(stack_start, stack_end), image)) in
         user_stacks.iter().zip(user_images).enumerate()
     {
-        // 安全性：索引来自已经限制在静态地址空间数量内的输入切片。
-        let page_tables =
-            unsafe { all_page_tables.add(address_space_index * PAGE_TABLES_PER_ADDRESS_SPACE) };
-        let root_table = page_tables;
-        let mut next_table = 1;
+        let root_frame = crate::kernel::frame_allocator::allocate_zeroed_frame()
+            .map_err(PageTableError::FrameAllocation)?;
+        let root_address = root_frame.into_address();
+        // 安全性：地址空间索引已限制在根地址数组容量内；页帧已分配并清零。
+        unsafe {
+            core::ptr::write_volatile(root_addresses.add(address_space_index), root_address);
+        }
+        let root_table = root_address as *mut PageTable;
 
         let mut kernel_page = kernel_start;
         while kernel_page < kernel_end {
             map_page(
-                page_tables,
                 root_table,
-                &mut next_table,
                 kernel_page,
                 kernel_page,
                 PTE_READ | PTE_WRITE | PTE_EXECUTE,
@@ -135,9 +133,7 @@ pub fn initialize(
         let mut image_offset = 0;
         while image_offset < image.size {
             map_page(
-                page_tables,
                 root_table,
-                &mut next_table,
                 image.virtual_start + image_offset,
                 image.physical_start + image_offset,
                 PTE_READ | PTE_WRITE | PTE_EXECUTE | PTE_USER,
@@ -148,9 +144,7 @@ pub fn initialize(
         let mut stack_page = stack_start;
         while stack_page < stack_end {
             map_page(
-                page_tables,
                 root_table,
-                &mut next_table,
                 stack_page,
                 stack_page,
                 PTE_READ | PTE_WRITE | PTE_USER,
@@ -158,14 +152,7 @@ pub fn initialize(
             stack_page += PAGE_SIZE;
         }
 
-        map_page(
-            page_tables,
-            root_table,
-            &mut next_table,
-            UART_BASE,
-            UART_BASE,
-            PTE_READ | PTE_WRITE,
-        )?;
+        map_page(root_table, UART_BASE, UART_BASE, PTE_READ | PTE_WRITE)?;
     }
 
     // 安全性：地址空间数量不超过根表数组容量，后续调度只激活这些已完整构造的页表。
@@ -188,13 +175,15 @@ pub fn activate_address_space(address_space_index: usize) -> Result<(), PageTabl
         return Err(PageTableError::UnknownAddressSpace);
     }
 
-    // 安全性：该根页表是静态池中按任务索引分配、已完成初始化且页对齐的一页。
-    let root_table = unsafe {
-        core::ptr::addr_of!(PAGE_TABLES)
-            .cast::<PageTable>()
-            .add(address_space_index * PAGE_TABLES_PER_ADDRESS_SPACE)
+    // 安全性：索引小于已验证的地址空间数量，根地址在初始化完成后写入固定数组。
+    let root_address = unsafe {
+        core::ptr::read_volatile(
+            core::ptr::addr_of!(ROOT_TABLE_ADDRESSES)
+                .cast::<usize>()
+                .add(address_space_index),
+        )
     };
-    activate(root_table as usize)
+    activate(root_address)
 }
 
 /// 以调试日志输出每个任务页表中的有效映射。
@@ -209,27 +198,32 @@ pub fn log_address_spaces() {
     let address_space_count =
         unsafe { core::ptr::read_volatile(core::ptr::addr_of!(ADDRESS_SPACE_COUNT)) };
     for address_space_index in 0..address_space_count {
-        // 安全性：索引小于已验证的地址空间数量，根表位于静态页表池内且恒等映射可见。
-        let root_table = unsafe {
-            core::ptr::addr_of!(PAGE_TABLES)
-                .cast::<PageTable>()
-                .add(address_space_index * PAGE_TABLES_PER_ADDRESS_SPACE)
+        // 安全性：索引小于已验证的地址空间数量，根页帧由分配器保留且内核恒等映射可见。
+        let root_address = unsafe {
+            core::ptr::read_volatile(
+                core::ptr::addr_of!(ROOT_TABLE_ADDRESSES)
+                    .cast::<usize>()
+                    .add(address_space_index),
+            )
         };
+        if !crate::kernel::frame_allocator::is_allocated_frame_address(root_address) {
+            crate::klog_error!(
+                "Sv39 页表无效：任务={}，根页表地址 {root_address:#018x} 不是已分配页帧",
+                address_space_index
+            );
+            continue;
+        }
         crate::klog_debug!(
             "Sv39 页表：任务={}，根页表物理地址={:#018x}",
             address_space_index,
-            root_table as usize
+            root_address
         );
 
         let mut mapping_run = None;
-        let table_pool_start = root_table as usize;
-        let table_pool_end = table_pool_start + PAGE_TABLES_PER_ADDRESS_SPACE * PAGE_SIZE;
         walk_page_table(
-            root_table,
+            root_address as *const PageTable,
             2,
             0,
-            table_pool_start,
-            table_pool_end,
             address_space_index,
             &mut mapping_run,
         );
@@ -249,13 +243,11 @@ fn walk_page_table(
     table: *const PageTable,
     level: usize,
     virtual_page_number: usize,
-    table_pool_start: usize,
-    table_pool_end: usize,
     address_space_index: usize,
     mapping_run: &mut Option<MappingRun>,
 ) {
     for index in 0..PAGE_TABLE_ENTRIES {
-        // 安全性：当前表来自静态页表池，索引由固定的 512 项表长度限制。
+        // 安全性：当前表是根页帧或已验证的已分配子页帧，索引由 512 项表长度限制。
         let entry = unsafe { core::ptr::read_volatile(core::ptr::addr_of!((*table).0[index])) };
         if entry & PTE_VALID == 0 {
             continue;
@@ -290,12 +282,11 @@ fn walk_page_table(
         }
 
         let child_table_address = ((entry >> 10) << 12) as usize;
-        if child_table_address < table_pool_start
-            || child_table_address + PAGE_SIZE > table_pool_end
-            || child_table_address & PAGE_MASK != 0
+        if child_table_address & PAGE_MASK != 0
+            || !crate::kernel::frame_allocator::is_allocated_frame_address(child_table_address)
         {
             crate::klog_error!(
-                "Sv39 页表无效：任务={}，子页表地址 {child_table_address:#018x} 不在本任务页表池中",
+                "Sv39 页表无效：任务={}，子页表地址 {child_table_address:#018x} 不是已分配页帧",
                 address_space_index
             );
             continue;
@@ -305,8 +296,6 @@ fn walk_page_table(
             child_table_address as *const PageTable,
             level - 1,
             next_virtual_page_number,
-            table_pool_start,
-            table_pool_end,
             address_space_index,
             mapping_run,
         );
@@ -416,9 +405,7 @@ pub(super) unsafe fn write_user_value<T: Copy>(address: usize, value: T) {
 }
 
 fn map_page(
-    page_tables: *mut PageTable,
     root_table: *mut PageTable,
-    next_table: &mut usize,
     virtual_address: usize,
     physical_address: usize,
     permissions: usize,
@@ -433,18 +420,14 @@ fn map_page(
     for index in indices[..2].iter().copied() {
         // 安全性：每一级索引都从 Sv39 虚拟地址的 9 位 VPN 字段计算，范围固定为 0..512。
         let entry = unsafe { core::ptr::addr_of_mut!((*table).0[index]) };
-        // 安全性：当前表指针来自静态页表池，且索引经过 9 位掩码限制。
+        // 安全性：当前表指针来自已分配根页帧或已验证的子页帧，索引经过 9 位掩码限制。
         let entry_value = unsafe { core::ptr::read(entry) };
         if entry_value & PTE_VALID == 0 {
-            if *next_table >= PAGE_TABLES_PER_ADDRESS_SPACE {
-                return Err(PageTableError::PageTablePoolExhausted);
-            }
-            // 安全性：新页表索引受静态池长度检查约束；每张表恰好一页且按页对齐。
-            let child = unsafe { page_tables.add(*next_table) };
-            *next_table += 1;
-            // 安全性：子页表地址来自内核静态页表池，低 12 位为零且物理地址可由 S-mode 访问。
-            unsafe { core::ptr::write_bytes(child, 0, 1) };
-            let child_physical_page = child as usize >> 12;
+            let child_frame = crate::kernel::frame_allocator::allocate_zeroed_frame()
+                .map_err(PageTableError::FrameAllocation)?;
+            let child_address = child_frame.into_address();
+            let child = child_address as *mut PageTable;
+            let child_physical_page = child_address >> 12;
             // 安全性：当前 PTE 指针属于有效父页表；新子表地址满足 Sv39 PPN 编码布局。
             unsafe { core::ptr::write(entry, (child_physical_page << 10) | PTE_VALID) };
             table = child;
@@ -452,8 +435,11 @@ fn map_page(
             if entry_value & (PTE_READ | PTE_WRITE | PTE_EXECUTE) != 0 {
                 return Err(PageTableError::UnexpectedSuperpage);
             }
-            let child_address = ((entry_value >> 10) << 12) as *mut PageTable;
-            table = child_address;
+            let child_address = ((entry_value >> 10) << 12) as usize;
+            if !crate::kernel::frame_allocator::is_allocated_frame_address(child_address) {
+                return Err(PageTableError::InvalidChildTable);
+            }
+            table = child_address as *mut PageTable;
         }
     }
 
@@ -478,12 +464,15 @@ fn map_page(
 }
 
 fn activate(root_physical_address: usize) -> Result<(), PageTableError> {
-    if root_physical_address & PAGE_MASK != 0 {
+    if root_physical_address == 0
+        || root_physical_address & PAGE_MASK != 0
+        || !crate::kernel::frame_allocator::is_allocated_frame_address(root_physical_address)
+    {
         return Err(PageTableError::InvalidRootTable);
     }
 
     let satp_value = (SATP_SV39_MODE << SATP_MODE_SHIFT) | (root_physical_address >> 12);
-    // 安全性：根页表来自本模块的静态页表池，恒等映射已覆盖当前内核代码、栈和数据。
+    // 安全性：根页表来自已分配页帧，恒等映射已覆盖当前内核代码、栈、数据和帧池。
     unsafe {
         core::arch::asm!(
             "csrw satp, {value}",
@@ -538,13 +527,15 @@ fn align_up(address: usize) -> Result<usize, PageTableError> {
         .ok_or(PageTableError::InvalidRange)
 }
 
-/// 描述静态页表初始化失败的原因。
+/// 描述 Sv39 页表初始化失败的原因。
 #[derive(Clone, Copy)]
 pub enum PageTableError {
     /// 映射范围为空、反向或没有按页对齐。
     InvalidRange,
-    /// 静态页表池容量不足。
-    PageTablePoolExhausted,
+    /// 物理页帧分配器无法提供页表页。
+    FrameAllocation(crate::kernel::frame_allocator::FrameError),
+    /// 页表树中的子页表地址不属于已分配页帧。
+    InvalidChildTable,
     /// 调度器请求了尚未初始化的地址空间。
     UnknownAddressSpace,
     /// 本实验只建立 4 KiB 叶子映射，却遇到大页叶子项。
@@ -560,10 +551,11 @@ impl PageTableError {
     pub fn description(self) -> &'static str {
         match self {
             Self::InvalidRange => "页表映射范围无效或未按 4 KiB 对齐",
-            Self::PageTablePoolExhausted => "静态页表池容量不足",
+            Self::FrameAllocation(error) => error.description(),
+            Self::InvalidChildTable => "页表子表地址不属于已分配物理页帧",
             Self::UnknownAddressSpace => "任务地址空间尚未初始化",
             Self::UnexpectedSuperpage => "页表中出现本阶段未支持的大页映射",
-            Self::InvalidRootTable => "根页表地址未按 4 KiB 对齐",
+            Self::InvalidRootTable => "根页表地址为零、未按 4 KiB 对齐或不属于已分配页帧",
             Self::Sv39Unavailable => "硬件没有接受 Sv39 satp 模式",
         }
     }
