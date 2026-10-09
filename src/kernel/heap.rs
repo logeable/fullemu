@@ -1,7 +1,7 @@
 //! 在内核静态区域中管理一个有界、可释放的堆。
 //!
-//! 本阶段只在启动时演示分配器，不接入 Rust 全局分配器。堆区位于内核 BSS，
-//! 页表将它作为 S-mode 内核内存映射；物理页和用户地址空间仍由现有静态区域管理。
+//! 堆访问通过单 hart 中断守卫串行化，但本阶段仍只在启动时演示分配器，不接入 Rust 全局分配器。
+//! 堆区位于内核 BSS，页表将它作为 S-mode 内核内存映射；物理页和用户地址空间仍由现有静态区域管理。
 
 use core::alloc::Layout;
 use core::ptr::NonNull;
@@ -267,6 +267,35 @@ impl Heap {
     }
 }
 
+fn initialize_kernel_heap(start: usize, size: usize) -> Result<(), HeapError> {
+    let _interrupt_guard = crate::arch::riscv64::interrupt::disable_supervisor_interrupts();
+    // 安全性：单 hart 中断已关闭，静态堆状态不会被定时器切换到的任务并发访问。
+    unsafe { (*core::ptr::addr_of_mut!(KERNEL_HEAP)).initialize(start, size) }
+}
+
+fn allocate(layout: Layout) -> Option<NonNull<u8>> {
+    let _interrupt_guard = crate::arch::riscv64::interrupt::disable_supervisor_interrupts();
+    // 安全性：单 hart 中断已关闭，对静态堆状态的可变访问不会与其他任务重叠。
+    unsafe { (*core::ptr::addr_of_mut!(KERNEL_HEAP)).allocate(layout) }
+}
+
+/// 释放由内核堆返回且尚未释放的指针。
+///
+/// # Safety
+///
+/// `pointer` 必须来自本内核堆，且不能已经释放或被偏移。
+unsafe fn deallocate(pointer: NonNull<u8>) -> Result<(), HeapError> {
+    let _interrupt_guard = crate::arch::riscv64::interrupt::disable_supervisor_interrupts();
+    // 安全性：单 hart 中断已关闭，调用方保证指针属于堆且尚未释放。
+    unsafe { (*core::ptr::addr_of_mut!(KERNEL_HEAP)).deallocate(pointer) }
+}
+
+fn free_space() -> (usize, usize) {
+    let _interrupt_guard = crate::arch::riscv64::interrupt::disable_supervisor_interrupts();
+    // 安全性：单 hart 中断已关闭，遍历空闲链表期间堆状态不会变化。
+    unsafe { (*core::ptr::addr_of_mut!(KERNEL_HEAP)).free_space() }
+}
+
 fn replace_free_block(
     previous: *mut FreeBlock,
     old_block: *mut FreeBlock,
@@ -332,21 +361,16 @@ impl HeapError {
 
 /// 初始化固定内核堆并演示对齐、释放、复用和相邻空闲块合并。
 pub fn run_boot_experiment() -> Result<(), HeapError> {
-    let mut heap = Heap::empty();
     // 安全性：HEAP_STORAGE 是独占的静态可写 BSS 区域，生命周期覆盖整个内核运行期。
     let heap_start = unsafe { core::ptr::addr_of_mut!(HEAP_STORAGE.0).cast::<u8>() as usize };
     // 安全性：起始地址指向完整静态数组，固定容量与该数组长度一致。
-    unsafe { heap.initialize(heap_start, KERNEL_HEAP_SIZE)? };
+    initialize_kernel_heap(heap_start, KERNEL_HEAP_SIZE)?;
 
     let first_layout = Layout::from_size_align(37, 16).map_err(|_| HeapError::InvalidDemoLayout)?;
     let second_layout =
         Layout::from_size_align(113, 64).map_err(|_| HeapError::InvalidDemoLayout)?;
-    let first = heap
-        .allocate(first_layout)
-        .ok_or(HeapError::DemoOutOfMemory)?;
-    let second = heap
-        .allocate(second_layout)
-        .ok_or(HeapError::DemoOutOfMemory)?;
+    let first = allocate(first_layout).ok_or(HeapError::DemoOutOfMemory)?;
+    let second = allocate(second_layout).ok_or(HeapError::DemoOutOfMemory)?;
     if first.as_ptr() == second.as_ptr()
         || first.as_ptr() as usize & (first_layout.align() - 1) != 0
         || second.as_ptr() as usize & (second_layout.align() - 1) != 0
@@ -354,29 +378,24 @@ pub fn run_boot_experiment() -> Result<(), HeapError> {
         return Err(HeapError::InvalidAllocation);
     }
 
-    // 安全性：first 和 second 均由当前堆分配，且此前尚未释放。
-    unsafe { heap.deallocate(first)? };
-    let reused = heap
-        .allocate(first_layout)
-        .ok_or(HeapError::DemoOutOfMemory)?;
+    // 安全性：first 由当前堆分配，且此前尚未释放。
+    unsafe { deallocate(first)? };
+    let reused = allocate(first_layout).ok_or(HeapError::DemoOutOfMemory)?;
     if reused != first {
         return Err(HeapError::InvalidAllocation);
     }
 
     // 安全性：second 和 reused 均由当前堆分配，且此前尚未释放。
     unsafe {
-        heap.deallocate(second)?;
-        heap.deallocate(reused)?;
+        deallocate(second)?;
+        deallocate(reused)?;
     }
-    if heap.free_space() != (KERNEL_HEAP_SIZE, 1) {
+    if free_space() != (KERNEL_HEAP_SIZE, 1) {
         return Err(HeapError::DemoDidNotCoalesce);
     }
 
-    // 安全性：启动演示已完成且没有其他堆访问者；将已验证状态保存供后续内核阶段接入。
-    unsafe { core::ptr::write(core::ptr::addr_of_mut!(KERNEL_HEAP), heap) };
-
     crate::klog_info!(
-        "内核堆实验完成：区域起始={heap_start:#018x}，容量={} 字节；对齐、释放、复用和空闲块合并均通过",
+        "内核堆实验完成：区域起始={heap_start:#018x}，容量={} 字节；堆操作经过单 hart 中断守卫，对齐、释放、复用和空闲块合并均通过",
         KERNEL_HEAP_SIZE
     );
     Ok(())
