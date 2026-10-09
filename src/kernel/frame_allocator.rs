@@ -149,8 +149,8 @@ pub fn free_frame_count() -> Result<usize, FrameError> {
     unsafe { (*core::ptr::addr_of!(FRAME_ALLOCATOR)).free_count() }
 }
 
-/// 演示页帧分配、对齐、释放复用和完整归还。
-pub fn run_experiment() -> Result<(), FrameError> {
+/// 检查页帧分配、对齐、释放复用和完整归还。
+pub(crate) fn check_allocation() -> Result<(), FrameError> {
     if free_frame_count()? != FRAME_COUNT {
         return Err(FrameError::UnexpectedFreeCount);
     }
@@ -183,7 +183,7 @@ pub fn run_experiment() -> Result<(), FrameError> {
     }
 
     crate::klog_info!(
-        "物理页帧实验完成：页池起始={:#018x}，页数={}，页大小={} 字节；对齐、独立分配、释放复用和完整归还均通过",
+        "物理页帧分配器自检通过：页池起始={:#018x}，页数={}，页大小={} 字节；对齐、独立分配、释放复用和完整归还均符合预期",
         core::ptr::addr_of!(FRAME_STORAGE) as usize,
         FRAME_COUNT,
         PAGE_SIZE

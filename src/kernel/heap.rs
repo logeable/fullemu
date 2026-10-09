@@ -400,8 +400,8 @@ pub fn initialize() -> Result<(), HeapError> {
     initialize_kernel_heap(heap_start, KERNEL_HEAP_SIZE)
 }
 
-/// 演示对齐、释放、地址复用和相邻空闲块合并。
-pub fn run_allocator_experiment() -> Result<(), HeapError> {
+/// 检查对齐、释放、地址复用和相邻空闲块合并。
+pub(crate) fn check_allocator() -> Result<(), HeapError> {
     let heap_start = unsafe { core::ptr::addr_of!(HEAP_STORAGE.0).cast::<u8>() as usize };
 
     let first_layout = Layout::from_size_align(37, 16).map_err(|_| HeapError::InvalidDemoLayout)?;
@@ -433,14 +433,14 @@ pub fn run_allocator_experiment() -> Result<(), HeapError> {
     }
 
     crate::klog_info!(
-        "内核堆实验完成：区域起始={heap_start:#018x}，容量={} 字节；堆操作经过单 hart 中断守卫，对齐、释放、复用和空闲块合并均通过",
+        "内核堆自检通过：区域起始={heap_start:#018x}，容量={} 字节；堆操作经过单 hart 中断守卫，对齐、释放、复用和空闲块合并均符合预期",
         KERNEL_HEAP_SIZE
     );
     Ok(())
 }
 
-/// 使用 `Vec` 演示全局分配器的扩容与释放。
-pub fn run_vec_experiment() -> Result<(), HeapError> {
+/// 检查 `Vec` 经全局分配器扩容后释放内存的行为。
+pub(crate) fn check_global_allocator() -> Result<(), HeapError> {
     let initial_free = free_space();
     if initial_free != (KERNEL_HEAP_SIZE, 1) {
         return Err(HeapError::DemoDidNotCoalesce);
@@ -474,7 +474,7 @@ pub fn run_vec_experiment() -> Result<(), HeapError> {
     }
 
     crate::klog_info!(
-        "Vec 全局分配实验完成：元素={}，容量={}，扩容次数={}，空闲字节={} -> {} -> {}；扩容和释放均通过",
+        "全局分配器自检通过：Vec 元素={}，容量={}，扩容次数={}，空闲字节={} -> {} -> {}",
         final_length,
         final_capacity,
         growth_count,

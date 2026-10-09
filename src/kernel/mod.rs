@@ -7,6 +7,7 @@ pub(crate) mod frame_allocator;
 pub(crate) mod heap;
 pub mod logging;
 pub(crate) mod memory;
+pub(crate) mod self_check;
 mod syscall;
 pub mod user_mode;
 mod user_program;
