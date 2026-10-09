@@ -3,6 +3,8 @@
 
 //! 从 OpenSBI 进入 Rust，通过 QEMU 串口报告启动信息并按配置运行用户程序。
 
+extern crate alloc;
+
 mod arch;
 
 mod kernel;
@@ -31,9 +33,17 @@ extern "C" {
 #[no_mangle]
 pub extern "C" fn kernel_main(hart_id: usize, device_tree: usize) -> ! {
     kernel::clock::initialize();
-    if let Err(error) = kernel::heap::run_boot_experiment() {
+    if let Err(error) = kernel::heap::initialize() {
+        crate::klog_error!("内核堆初始化失败：{}", error.description());
+        panic!("内核堆初始化失败");
+    }
+    if let Err(error) = kernel::heap::run_allocator_experiment() {
         crate::klog_error!("内核堆实验失败：{}", error.description());
         panic!("内核堆实验失败");
+    }
+    if let Err(error) = kernel::heap::run_vec_experiment() {
+        crate::klog_error!("内核容器分配实验失败：{}", error.description());
+        panic!("内核容器分配实验失败");
     }
     log_kernel_sections();
     crate::klog_info!("fullemu 已在 QEMU virt (RISC-V) 启动");

@@ -1,9 +1,10 @@
 //! 在内核静态区域中管理一个有界、可释放的堆。
 //!
-//! 堆访问通过单 hart 中断守卫串行化，但本阶段仍只在启动时演示分配器，不接入 Rust 全局分配器。
+//! 堆访问通过单 hart 中断守卫串行化，并作为 Rust 全局分配器管理内核对象字节块。
+//! 当前只在启动阶段演示分配器，不将动态分配扩展到运行期任务路径。
 //! 堆区位于内核 BSS，页表将它作为 S-mode 内核内存映射；物理页和用户地址空间仍由现有静态区域管理。
 
-use core::alloc::Layout;
+use core::alloc::{GlobalAlloc, Layout};
 use core::ptr::NonNull;
 
 const KERNEL_HEAP_SIZE: usize = 256 * 1024;
@@ -14,6 +15,27 @@ struct HeapStorage([u8; KERNEL_HEAP_SIZE]);
 
 static mut HEAP_STORAGE: HeapStorage = HeapStorage([0; KERNEL_HEAP_SIZE]);
 static mut KERNEL_HEAP: Heap = Heap::empty();
+
+struct KernelHeapAllocator;
+
+#[global_allocator]
+static KERNEL_HEAP_ALLOCATOR: KernelHeapAllocator = KernelHeapAllocator;
+
+// 安全性：分配与释放都由屏蔽当前 hart S-mode 中断的入口串行化；项目当前只启用一个 hart。
+unsafe impl GlobalAlloc for KernelHeapAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        allocate(layout).map_or(core::ptr::null_mut(), NonNull::as_ptr)
+    }
+
+    unsafe fn dealloc(&self, pointer: *mut u8, _layout: Layout) {
+        // 安全性：GlobalAlloc 调用方保证指针来自此分配器且尚未释放。
+        let pointer = unsafe { NonNull::new_unchecked(pointer) };
+        // 安全性：GlobalAlloc 契约保证传入指针是此堆返回的原始分配地址。
+        if let Err(error) = unsafe { deallocate(pointer) } {
+            panic!("内核全局分配器释放失败：{}", error.description());
+        }
+    }
+}
 
 #[repr(C)]
 struct FreeBlock {
@@ -344,6 +366,12 @@ pub enum HeapError {
     DemoOutOfMemory,
     /// 启动演示没有恢复为一个完整空闲块。
     DemoDidNotCoalesce,
+    /// Vec 没有发生预期的容量增长。
+    ContainerDidNotGrow,
+    /// Vec 分配期间没有占用内核堆空间。
+    ContainerDidNotUseHeap,
+    /// Vec 释放后没有恢复完整空闲块。
+    ContainerDidNotRelease,
 }
 
 impl HeapError {
@@ -355,16 +383,26 @@ impl HeapError {
             Self::InvalidDemoLayout => "内核堆演示布局无效",
             Self::DemoOutOfMemory => "内核堆演示分配失败",
             Self::DemoDidNotCoalesce => "内核堆释放后没有合并为空闲区域",
+            Self::ContainerDidNotGrow => "Vec 容量没有按预期增长",
+            Self::ContainerDidNotUseHeap => "Vec 没有使用内核堆空间",
+            Self::ContainerDidNotRelease => "Vec 释放后内核堆没有恢复",
         }
     }
 }
 
-/// 初始化固定内核堆并演示对齐、释放、复用和相邻空闲块合并。
-pub fn run_boot_experiment() -> Result<(), HeapError> {
+/// 初始化固定内核堆。
+///
+/// 必须在任何堆分配之前调用，并且只调用一次。
+pub fn initialize() -> Result<(), HeapError> {
     // 安全性：HEAP_STORAGE 是独占的静态可写 BSS 区域，生命周期覆盖整个内核运行期。
     let heap_start = unsafe { core::ptr::addr_of_mut!(HEAP_STORAGE.0).cast::<u8>() as usize };
     // 安全性：起始地址指向完整静态数组，固定容量与该数组长度一致。
-    initialize_kernel_heap(heap_start, KERNEL_HEAP_SIZE)?;
+    initialize_kernel_heap(heap_start, KERNEL_HEAP_SIZE)
+}
+
+/// 演示对齐、释放、地址复用和相邻空闲块合并。
+pub fn run_allocator_experiment() -> Result<(), HeapError> {
+    let heap_start = unsafe { core::ptr::addr_of!(HEAP_STORAGE.0).cast::<u8>() as usize };
 
     let first_layout = Layout::from_size_align(37, 16).map_err(|_| HeapError::InvalidDemoLayout)?;
     let second_layout =
@@ -397,6 +435,52 @@ pub fn run_boot_experiment() -> Result<(), HeapError> {
     crate::klog_info!(
         "内核堆实验完成：区域起始={heap_start:#018x}，容量={} 字节；堆操作经过单 hart 中断守卫，对齐、释放、复用和空闲块合并均通过",
         KERNEL_HEAP_SIZE
+    );
+    Ok(())
+}
+
+/// 使用 `Vec` 演示全局分配器的扩容与释放。
+pub fn run_vec_experiment() -> Result<(), HeapError> {
+    let initial_free = free_space();
+    if initial_free != (KERNEL_HEAP_SIZE, 1) {
+        return Err(HeapError::DemoDidNotCoalesce);
+    }
+
+    let mut values = alloc::vec::Vec::new();
+    let mut previous_capacity = values.capacity();
+    let mut growth_count = 0;
+    for value in 0..128_u64 {
+        values.push(value);
+        if values.capacity() != previous_capacity {
+            growth_count += 1;
+            previous_capacity = values.capacity();
+        }
+    }
+
+    let final_length = values.len();
+    let final_capacity = values.capacity();
+    let during_allocation = free_space();
+    drop(values);
+    let after_release = free_space();
+
+    if growth_count == 0 || final_capacity < final_length {
+        return Err(HeapError::ContainerDidNotGrow);
+    }
+    if during_allocation.0 >= initial_free.0 {
+        return Err(HeapError::ContainerDidNotUseHeap);
+    }
+    if after_release != initial_free {
+        return Err(HeapError::ContainerDidNotRelease);
+    }
+
+    crate::klog_info!(
+        "Vec 全局分配实验完成：元素={}，容量={}，扩容次数={}，空闲字节={} -> {} -> {}；扩容和释放均通过",
+        final_length,
+        final_capacity,
+        growth_count,
+        initial_free.0,
+        during_allocation.0,
+        after_release.0
     );
     Ok(())
 }
