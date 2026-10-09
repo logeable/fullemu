@@ -1,6 +1,7 @@
 //! 在单 hart 上启动并调度多个同时驻留的 U-mode 程序。
 
 use crate::arch::riscv64::trap::{ExceptionCause, InterruptCause, TrapCause, TrapFrame};
+use alloc::vec::Vec;
 
 const MAX_USER_TASKS: usize = 8;
 const BOOT_PROGRAM_NAME: &str = match option_env!("FULLEMU_BOOT_PROGRAM") {
@@ -20,20 +21,23 @@ struct TaskStack([u8; USER_STACK_SIZE]);
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TaskState {
-    Empty,
     Ready,
     Running,
     Exited,
+}
+
+#[derive(Clone, Copy)]
+struct Task {
+    state: TaskState,
+    saved_frame_address: usize,
+    program_index: usize,
 }
 
 static mut USER_STACKS: [TaskStack; MAX_USER_TASKS] =
     [TaskStack([0; USER_STACK_SIZE]); MAX_USER_TASKS];
 static mut KERNEL_TRAP_STACKS: [TaskStack; MAX_USER_TASKS] =
     [TaskStack([0; USER_STACK_SIZE]); MAX_USER_TASKS];
-static mut TASK_STATES: [TaskState; MAX_USER_TASKS] = [TaskState::Empty; MAX_USER_TASKS];
-static mut SAVED_FRAMES: [usize; MAX_USER_TASKS] = [0; MAX_USER_TASKS];
-static mut TASK_PROGRAM_INDICES: [usize; MAX_USER_TASKS] = [0; MAX_USER_TASKS];
-static mut TASK_COUNT: usize = 0;
+static mut TASKS: Vec<Task> = Vec::new();
 static mut CURRENT_TASK_INDEX: usize = 0;
 
 /// 装入构建配置指定的入口用户程序并开始运行。
@@ -68,10 +72,22 @@ fn start_programs(program_indices: &[usize]) -> ! {
         stop_forever();
     }
 
-    // 安全性：初始化只在单 hart 启动路径执行；传入的任务数量已限制在静态数组容量内。
+    // 安全性：初始化只在单 hart 启动路径执行；任务数量不超过静态栈容量，且此时尚未开启中断。
     unsafe {
-        core::ptr::write_volatile(core::ptr::addr_of_mut!(TASK_COUNT), program_indices.len());
         core::ptr::write_volatile(core::ptr::addr_of_mut!(CURRENT_TASK_INDEX), 0);
+    }
+
+    {
+        // 安全性：任务容器只在启动阶段初始化；此时堆已初始化且 S-mode 中断尚未开启。
+        let tasks = unsafe { &mut *core::ptr::addr_of_mut!(TASKS) };
+        if !tasks.is_empty() {
+            crate::klog_error!("用户任务容器已经初始化");
+            stop_forever();
+        }
+        if tasks.try_reserve_exact(program_indices.len()).is_err() {
+            crate::klog_error!("无法为 {} 个任务分配内核元数据", program_indices.len());
+            stop_forever();
+        }
     }
 
     let mut user_stack_ranges = [(0, 0); MAX_USER_TASKS];
@@ -82,16 +98,6 @@ fn start_programs(program_indices: &[usize]) -> ! {
     }; MAX_USER_TASKS];
 
     for (task_index, program_index) in program_indices.iter().copied().enumerate() {
-        // 安全性：任务索引来自已检查长度的切片，程序索引由启动策略从构建清单生成。
-        unsafe {
-            core::ptr::write_volatile(
-                core::ptr::addr_of_mut!(TASK_PROGRAM_INDICES)
-                    .cast::<usize>()
-                    .add(task_index),
-                program_index,
-            );
-        }
-
         let program = match super::user_program::load(program_index) {
             Ok(Some(program)) => program,
             Ok(None) => {
@@ -120,21 +126,17 @@ fn start_programs(program_indices: &[usize]) -> ! {
         let initial_frame_address = kernel_stack_top - core::mem::size_of::<TrapFrame>();
         let initial_frame = TrapFrame::for_user_entry(program.entry, user_stack_top);
 
-        // 安全性：陷入帧位于当前任务专属内核栈顶部，保存现场的数组索引已验证有效。
+        // 安全性：陷入帧位于当前任务专属的静态内核栈顶部，任务索引已受静态栈容量限制。
         unsafe {
             core::ptr::write(initial_frame_address as *mut TrapFrame, initial_frame);
-            core::ptr::write_volatile(
-                core::ptr::addr_of_mut!(SAVED_FRAMES)
-                    .cast::<usize>()
-                    .add(task_index),
-                initial_frame_address,
-            );
-            core::ptr::write_volatile(
-                core::ptr::addr_of_mut!(TASK_STATES)
-                    .cast::<TaskState>()
-                    .add(task_index),
-                TaskState::Ready,
-            );
+        }
+        // 安全性：启动阶段独占修改任务容器，容量已预留，不会因扩容改变任务索引。
+        unsafe {
+            (&mut *core::ptr::addr_of_mut!(TASKS)).push(Task {
+                state: TaskState::Ready,
+                saved_frame_address: initial_frame_address,
+                program_index,
+            });
         }
 
         crate::klog_info!(
@@ -146,7 +148,7 @@ fn start_programs(program_indices: &[usize]) -> ! {
         );
     }
 
-    // 安全性：页表初始化前确保仍处于恒等寻址模式，并关闭中断避免启动状态被抢占。
+    // 安全性：页表初始化前仍处于恒等寻址模式；启动时全局 S-mode 中断尚未开启。
     unsafe {
         core::arch::asm!(
             "csrw sie, zero",
@@ -154,11 +156,8 @@ fn start_programs(program_indices: &[usize]) -> ! {
             "sfence.vma zero, zero",
             options(nostack)
         );
-        core::ptr::write_volatile(
-            core::ptr::addr_of_mut!(TASK_STATES).cast::<TaskState>(),
-            TaskState::Running,
-        );
     }
+    set_task_state(0, TaskState::Running);
 
     // 安全性：链接脚本将内核、全部用户镜像物理槽位和静态栈放在恒等映射地址；范围按页对齐。
     let kernel_end = core::ptr::addr_of!(__bss_end) as usize;
@@ -378,23 +377,16 @@ fn restore_user_frame(frame: &mut TrapFrame) -> *mut TrapFrame {
 }
 
 fn saved_frame_pointer(index: usize) -> *mut TrapFrame {
-    // 安全性：索引已限制在任务数组范围内，陷入帧在该任务栈生命周期内保持有效。
-    unsafe {
-        core::ptr::read_volatile(core::ptr::addr_of!(SAVED_FRAMES).cast::<usize>().add(index))
-            as *mut TrapFrame
-    }
+    task_record_or_stop(index).saved_frame_address as *mut TrapFrame
 }
 
 fn save_current_frame(index: usize, frame: &mut TrapFrame) {
-    // 安全性：当前陷入帧由本 hart 独占，索引是当前正在运行的有效任务。
-    unsafe {
-        core::ptr::write_volatile(
-            core::ptr::addr_of_mut!(SAVED_FRAMES)
-                .cast::<usize>()
-                .add(index),
-            frame as *mut TrapFrame as usize,
-        );
-    }
+    let Some(task) = (unsafe { &mut *core::ptr::addr_of_mut!(TASKS) }).get_mut(index) else {
+        crate::klog_error!("无法保存不存在的任务 {} 的陷入帧", index);
+        stop_forever();
+    };
+    // 安全性：当前陷入帧由本 hart 独占，索引是正在运行的有效任务，且陷入处理不会嵌套调度。
+    task.saved_frame_address = frame as *mut TrapFrame as usize;
 }
 
 fn current_task_index() -> usize {
@@ -403,42 +395,37 @@ fn current_task_index() -> usize {
 }
 
 fn task_program_index(index: usize) -> usize {
-    // 安全性：当前任务索引由调度器限制在已创建任务范围内。
-    unsafe {
-        core::ptr::read_volatile(
-            core::ptr::addr_of!(TASK_PROGRAM_INDICES)
-                .cast::<usize>()
-                .add(index),
-        )
-    }
+    task_record_or_stop(index).program_index
 }
 
 fn task_count() -> usize {
-    // 安全性：任务数量在首次进入 U-mode 前初始化，此后保持不变。
-    unsafe { core::ptr::read_volatile(core::ptr::addr_of!(TASK_COUNT)) }
+    // 安全性：任务容器在首次进入 U-mode 前完成初始化，此后长度保持不变。
+    unsafe { (&*core::ptr::addr_of!(TASKS)).len() }
 }
 
 fn task_state(index: usize) -> TaskState {
-    // 安全性：调用方只传入已创建任务索引，单 hart 保证状态读写不会并发。
-    unsafe {
-        core::ptr::read_volatile(
-            core::ptr::addr_of!(TASK_STATES)
-                .cast::<TaskState>()
-                .add(index),
-        )
-    }
+    task_record_or_stop(index).state
 }
 
 fn set_task_state(index: usize, state: TaskState) {
-    // 安全性：调用方只传入已创建任务索引，单 hart 保证状态读写不会并发。
-    unsafe {
-        core::ptr::write_volatile(
-            core::ptr::addr_of_mut!(TASK_STATES)
-                .cast::<TaskState>()
-                .add(index),
-            state,
-        );
-    }
+    let Some(task) = (unsafe { &mut *core::ptr::addr_of_mut!(TASKS) }).get_mut(index) else {
+        crate::klog_error!("无法更新不存在的任务 {} 的状态", index);
+        stop_forever();
+    };
+    // 安全性：状态只在单 hart 启动或陷入路径更新；S-mode 陷入期间不会发生定时器重入。
+    task.state = state;
+}
+
+fn task_record_or_stop(index: usize) -> Task {
+    // 安全性：任务容器进入 U-mode 前构造完成，此后只修改记录字段、不改变 Vec 长度。
+    let Some(task) = (unsafe { &*core::ptr::addr_of!(TASKS) })
+        .get(index)
+        .copied()
+    else {
+        crate::klog_error!("任务索引越界：{}，任务数量={}", index, task_count());
+        stop_forever();
+    };
+    task
 }
 
 /// 判断缓冲区是否完整位于指定任务的 U-mode 栈中。
