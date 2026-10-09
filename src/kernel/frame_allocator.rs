@@ -1,7 +1,8 @@
 //! 从固定的物理页池中分配和回收 4 KiB 页帧。
 //!
 //! 当前页池静态保留在内核 BSS 中，位图记录每一页的占用状态。它与按字节分配内核对象的
-//! `heap` 分离；Sv39 页表页已使用此分配器，用户栈仍静态保留。
+//! `heap` 分离；Sv39 页表页已使用此分配器，用户栈仍静态保留。当前单 hart 的调用发生在启动期
+//! 或 S-mode 陷入处理路径；两种路径都不会被可调度的 S-mode 定时器中断重入。
 
 const PAGE_SIZE: usize = 4096;
 const FRAME_COUNT: usize = 128;
@@ -38,8 +39,7 @@ impl PhysicalFrame {
     ///
     /// 调用方必须保证自己独占该页帧，且没有其他资源继续持有或引用它。
     pub(crate) unsafe fn from_address(address: usize) -> Result<Self, FrameError> {
-        let _interrupt_guard = crate::arch::riscv64::interrupt::disable_supervisor_interrupts();
-        // 安全性：调用方保证独占所有权；此处验证地址属于页池且位图仍标记为已分配。
+        // 安全性：调用方保证独占所有权；单 hart 分配器不会在当前启动或陷入路径并发修改位图。
         unsafe { (*core::ptr::addr_of!(FRAME_ALLOCATOR)).frame_from_address(address) }
     }
 }
@@ -175,8 +175,7 @@ impl FrameAllocator {
 pub fn initialize() -> Result<(), FrameError> {
     // 安全性：FrameStorage 是页对齐的静态可写区域，大小恰为 FRAME_POOL_SIZE。
     let pool_start = unsafe { core::ptr::addr_of_mut!(FRAME_STORAGE.0).cast::<u8>() as usize };
-    let _interrupt_guard = crate::arch::riscv64::interrupt::disable_supervisor_interrupts();
-    // 安全性：单 hart 中断已关闭，初始化期间不会有其他内核路径访问分配器状态。
+    // 安全性：初始化只在启动期单 hart 路径执行，定时器和全局 S-mode 中断尚未开启。
     unsafe { (*core::ptr::addr_of_mut!(FRAME_ALLOCATOR)).initialize(pool_start) }
 }
 
@@ -184,8 +183,7 @@ pub fn initialize() -> Result<(), FrameError> {
 ///
 /// 返回的页内容未初始化；读取前必须先写入有效内容。
 pub fn allocate_frame() -> Result<PhysicalFrame, FrameError> {
-    let _interrupt_guard = crate::arch::riscv64::interrupt::disable_supervisor_interrupts();
-    // 安全性：单 hart 中断已关闭，位图更新不会与其他任务并发执行。
+    // 安全性：当前分配只发生在启动期或 S-mode 陷入处理路径，不会被定时器重入；项目仅启用单 hart。
     unsafe { (*core::ptr::addr_of_mut!(FRAME_ALLOCATOR)).allocate() }
 }
 
@@ -201,22 +199,19 @@ pub fn allocate_zeroed_frame() -> Result<PhysicalFrame, FrameError> {
 
 /// 释放此前由该分配器分配的页帧。
 pub fn deallocate_frame(frame: PhysicalFrame) -> Result<(), FrameError> {
-    let _interrupt_guard = crate::arch::riscv64::interrupt::disable_supervisor_interrupts();
-    // 安全性：单 hart 中断已关闭，位图更新不会与其他任务并发执行。
+    // 安全性：当前释放只发生在启动期或 S-mode 陷入处理路径，不会被定时器重入；项目仅启用单 hart。
     unsafe { (*core::ptr::addr_of_mut!(FRAME_ALLOCATOR)).deallocate(frame) }
 }
 
 /// 返回页池中当前空闲页帧的数量。
 pub fn free_frame_count() -> Result<usize, FrameError> {
-    let _interrupt_guard = crate::arch::riscv64::interrupt::disable_supervisor_interrupts();
-    // 安全性：单 hart 中断已关闭，读取位图期间分配状态不会变化。
+    // 安全性：当前读取只发生在启动期或 S-mode 陷入处理路径，不会被定时器重入；项目仅启用单 hart。
     unsafe { (*core::ptr::addr_of!(FRAME_ALLOCATOR)).free_count() }
 }
 
 /// 检查物理地址是否对应页池中当前已分配的页帧。
 pub(crate) fn is_allocated_frame_address(address: usize) -> bool {
-    let _interrupt_guard = crate::arch::riscv64::interrupt::disable_supervisor_interrupts();
-    // 安全性：单 hart 中断已关闭，检查位图期间分配状态不会变化。
+    // 安全性：当前检查只发生在启动期或 S-mode 陷入处理路径，不会被定时器重入；项目仅启用单 hart。
     unsafe { (*core::ptr::addr_of!(FRAME_ALLOCATOR)).is_allocated_frame_address(address) }
 }
 

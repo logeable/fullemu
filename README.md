@@ -47,4 +47,5 @@ make run
 - [第 24 阶段：有界内核堆分配器](docs/phase-24-kernel-heap.md) 记录固定 BSS 堆区域、可释放 first-fit 空闲链表、中断守卫和 `Vec` 全局分配自检。
 - [第 25 阶段：固定物理页帧池](docs/phase-25-physical-frame-allocator.md) 记录 BSS 中固定页池、位图分配器和分配/释放复用自检。
 - [第 26 阶段：地址空间页表回收](docs/phase-26-address-space-reclamation.md) 记录非活动地址空间的页表树销毁和页帧归还。
+- [第 27 阶段：用容器管理地址空间记录](docs/phase-27-address-space-container.md) 记录内核 `Vec` 对根页表记录的管理，以及它与物理页帧分配器的职责边界。
 - [项目原则与代码规范](docs/development-principles.md) 是设计和协作规范。

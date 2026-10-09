@@ -1,7 +1,7 @@
 //! 在内核静态区域中管理一个有界、可释放的堆。
 //!
-//! 堆访问通过单 hart 中断守卫串行化，并作为 Rust 全局分配器管理内核对象字节块。
-//! 当前只在启动阶段演示分配器，不将动态分配扩展到运行期任务路径。
+//! 堆作为 Rust 全局分配器管理内核对象字节块。当前堆分配只发生在启动期，此时尚未开启中断；
+//! 若以后在系统调用路径中分配，陷入硬件也会先清除 SIE，避免单 hart 上的定时器重入。
 //! 堆区位于内核 BSS，页表将它作为 S-mode 内核内存映射；物理页和用户地址空间仍由现有静态区域管理。
 
 use core::alloc::{GlobalAlloc, Layout};
@@ -21,7 +21,7 @@ struct KernelHeapAllocator;
 #[global_allocator]
 static KERNEL_HEAP_ALLOCATOR: KernelHeapAllocator = KernelHeapAllocator;
 
-// 安全性：分配与释放都由屏蔽当前 hart S-mode 中断的入口串行化；项目当前只启用一个 hart。
+// 安全性：当前堆调用位于启动期，且单 hart 尚未开启 S-mode 中断，不会发生并发访问或重入。
 unsafe impl GlobalAlloc for KernelHeapAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         allocate(layout).map_or(core::ptr::null_mut(), NonNull::as_ptr)
@@ -290,14 +290,12 @@ impl Heap {
 }
 
 fn initialize_kernel_heap(start: usize, size: usize) -> Result<(), HeapError> {
-    let _interrupt_guard = crate::arch::riscv64::interrupt::disable_supervisor_interrupts();
-    // 安全性：单 hart 中断已关闭，静态堆状态不会被定时器切换到的任务并发访问。
+    // 安全性：堆只在启动阶段初始化，此时尚未开启 S-mode 定时器中断。
     unsafe { (*core::ptr::addr_of_mut!(KERNEL_HEAP)).initialize(start, size) }
 }
 
 fn allocate(layout: Layout) -> Option<NonNull<u8>> {
-    let _interrupt_guard = crate::arch::riscv64::interrupt::disable_supervisor_interrupts();
-    // 安全性：单 hart 中断已关闭，对静态堆状态的可变访问不会与其他任务重叠。
+    // 安全性：当前分配调用位于启动期，单 hart 尚未开启 S-mode 中断，不会被定时器重入。
     unsafe { (*core::ptr::addr_of_mut!(KERNEL_HEAP)).allocate(layout) }
 }
 
@@ -307,14 +305,12 @@ fn allocate(layout: Layout) -> Option<NonNull<u8>> {
 ///
 /// `pointer` 必须来自本内核堆，且不能已经释放或被偏移。
 unsafe fn deallocate(pointer: NonNull<u8>) -> Result<(), HeapError> {
-    let _interrupt_guard = crate::arch::riscv64::interrupt::disable_supervisor_interrupts();
-    // 安全性：单 hart 中断已关闭，调用方保证指针属于堆且尚未释放。
+    // 安全性：调用方保证指针属于堆且尚未释放；当前释放调用位于启动期且不会被中断重入。
     unsafe { (*core::ptr::addr_of_mut!(KERNEL_HEAP)).deallocate(pointer) }
 }
 
 fn free_space() -> (usize, usize) {
-    let _interrupt_guard = crate::arch::riscv64::interrupt::disable_supervisor_interrupts();
-    // 安全性：单 hart 中断已关闭，遍历空闲链表期间堆状态不会变化。
+    // 安全性：当前读取位于启动期，单 hart 尚未开启 S-mode 中断，不会被定时器中断重入。
     unsafe { (*core::ptr::addr_of_mut!(KERNEL_HEAP)).free_space() }
 }
 
@@ -433,7 +429,7 @@ pub(crate) fn check_allocator() -> Result<(), HeapError> {
     }
 
     crate::klog_info!(
-        "内核堆自检通过：区域起始={heap_start:#018x}，容量={} 字节；堆操作经过单 hart 中断守卫，对齐、释放、复用和空闲块合并均符合预期",
+        "内核堆自检通过：区域起始={heap_start:#018x}，容量={} 字节；对齐、释放、复用和空闲块合并均符合预期",
         KERNEL_HEAP_SIZE
     );
     Ok(())
