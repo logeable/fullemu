@@ -31,6 +31,17 @@ impl PhysicalFrame {
     pub fn into_address(self) -> usize {
         self.start_address
     }
+
+    /// 从页帧地址恢复所有权令牌。
+    ///
+    /// # Safety
+    ///
+    /// 调用方必须保证自己独占该页帧，且没有其他资源继续持有或引用它。
+    pub(crate) unsafe fn from_address(address: usize) -> Result<Self, FrameError> {
+        let _interrupt_guard = crate::arch::riscv64::interrupt::disable_supervisor_interrupts();
+        // 安全性：调用方保证独占所有权；此处验证地址属于页池且位图仍标记为已分配。
+        unsafe { (*core::ptr::addr_of!(FRAME_ALLOCATOR)).frame_from_address(address) }
+    }
 }
 
 struct FrameAllocator {
@@ -86,14 +97,7 @@ impl FrameAllocator {
     fn deallocate(&mut self, frame: PhysicalFrame) -> Result<(), FrameError> {
         self.ensure_initialized()?;
 
-        let Some(offset) = frame.start_address.checked_sub(self.start_address) else {
-            return Err(FrameError::FrameOutsidePool);
-        };
-        if offset >= FRAME_POOL_SIZE || offset & (PAGE_SIZE - 1) != 0 {
-            return Err(FrameError::FrameOutsidePool);
-        }
-
-        let frame_index = offset / PAGE_SIZE;
+        let frame_index = self.frame_index(frame.start_address)?;
         let word_index = frame_index / BITMAP_WORD_BITS;
         let bit_index = frame_index % BITMAP_WORD_BITS;
         let bit_mask = 1usize << bit_index;
@@ -103,6 +107,31 @@ impl FrameAllocator {
 
         self.allocated[word_index] &= !bit_mask;
         Ok(())
+    }
+
+    fn frame_index(&self, address: usize) -> Result<usize, FrameError> {
+        let Some(offset) = address.checked_sub(self.start_address) else {
+            return Err(FrameError::FrameOutsidePool);
+        };
+        if offset >= FRAME_POOL_SIZE || offset & (PAGE_SIZE - 1) != 0 {
+            return Err(FrameError::FrameOutsidePool);
+        }
+
+        Ok(offset / PAGE_SIZE)
+    }
+
+    fn frame_from_address(&self, address: usize) -> Result<PhysicalFrame, FrameError> {
+        self.ensure_initialized()?;
+        let frame_index = self.frame_index(address)?;
+        let word_index = frame_index / BITMAP_WORD_BITS;
+        let bit_index = frame_index % BITMAP_WORD_BITS;
+        if self.allocated[word_index] & (1usize << bit_index) == 0 {
+            return Err(FrameError::FrameAlreadyFree);
+        }
+
+        Ok(PhysicalFrame {
+            start_address: address,
+        })
     }
 
     fn free_count(&self) -> Result<usize, FrameError> {

@@ -24,7 +24,6 @@ enum TaskState {
     Ready,
     Running,
     Exited,
-    Faulted,
 }
 
 static mut USER_STACKS: [TaskStack; MAX_USER_TASKS] =
@@ -257,7 +256,7 @@ pub extern "C" fn supervisor_trap_handler(frame: *mut TrapFrame) -> *mut TrapFra
 
     if frame.status & SSTATUS_SPP == 0 {
         save_current_frame(current_index, frame);
-        set_task_state(current_index, TaskState::Faulted);
+        set_task_state(current_index, TaskState::Exited);
         crate::klog_warn!("用户任务 {} 因异常终止", current_index);
         return schedule_next(current_index);
     }
@@ -267,10 +266,7 @@ pub extern "C" fn supervisor_trap_handler(frame: *mut TrapFrame) -> *mut TrapFra
 
 fn schedule_next(previous_index: usize) -> *mut TrapFrame {
     let Some(next_index) = find_next_ready_task(previous_index) else {
-        crate::klog_info!(
-            "所有用户任务均已结束或异常终止，共运行 {} 个任务",
-            task_count()
-        );
+        crate::klog_info!("所有用户任务均已退出，共运行 {} 个任务", task_count());
         stop_forever();
     };
 
@@ -287,6 +283,24 @@ fn schedule_next(previous_index: usize) -> *mut TrapFrame {
             error.description()
         );
         stop_forever();
+    }
+
+    if previous_index != next_index && task_state(previous_index) == TaskState::Exited {
+        match super::memory::destroy_address_space(previous_index) {
+            Ok(released_page_count) => crate::klog_info!(
+                "已回收任务 {} 的页表：释放 {} 个页帧",
+                previous_index,
+                released_page_count
+            ),
+            Err(error) => {
+                crate::klog_error!(
+                    "回收任务 {} 的页表失败：{}",
+                    previous_index,
+                    error.description()
+                );
+                stop_forever();
+            }
+        }
     }
 
     if next_index != previous_index {

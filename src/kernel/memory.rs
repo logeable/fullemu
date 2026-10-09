@@ -9,6 +9,7 @@ const PAGE_TABLE_ENTRIES: usize = 512;
 const MAX_USER_ADDRESS_SPACES: usize = 8;
 const SATP_SV39_MODE: usize = 8;
 const SATP_MODE_SHIFT: usize = 60;
+const SATP_PPN_MASK: usize = (1 << 44) - 1;
 const UART_BASE: usize = 0x1000_0000;
 
 const PTE_VALID: usize = 1 << 0;
@@ -183,7 +184,112 @@ pub fn activate_address_space(address_space_index: usize) -> Result<(), PageTabl
                 .add(address_space_index),
         )
     };
+    if root_address == 0 {
+        return Err(PageTableError::UnknownAddressSpace);
+    }
     activate(root_address)
+}
+
+/// 销毁一个非当前地址空间，并归还它拥有的根页表和中间页表页。
+///
+/// 返回归还的页表页数。叶子映射指向的内核、用户栈和程序镜像页不会释放。
+pub fn destroy_address_space(address_space_index: usize) -> Result<usize, PageTableError> {
+    let address_space_count =
+        unsafe { core::ptr::read_volatile(core::ptr::addr_of!(ADDRESS_SPACE_COUNT)) };
+    if address_space_index >= address_space_count {
+        return Err(PageTableError::UnknownAddressSpace);
+    }
+
+    let root_addresses = core::ptr::addr_of_mut!(ROOT_TABLE_ADDRESSES).cast::<usize>();
+    // 安全性：地址空间索引小于已初始化的地址空间数量，根地址数组固定且由本模块独占。
+    let root_address = unsafe { core::ptr::read_volatile(root_addresses.add(address_space_index)) };
+    if root_address == 0 {
+        return Err(PageTableError::UnknownAddressSpace);
+    }
+    if root_address == active_root_address() {
+        return Err(PageTableError::ActiveAddressSpace);
+    }
+
+    // 先完整验证树中所有页表页，再开始释放，避免发现坏链接后留下半棵已拆除的树。
+    let page_table_count = validate_page_table_tree(root_address, 2)?;
+    let released_page_count = release_page_table_tree(root_address, 2)?;
+    if released_page_count != page_table_count {
+        return Err(PageTableError::PageTableCountMismatch);
+    }
+
+    // 安全性：根页表树已完整释放；清零槽位避免后续误激活已归还的根页帧。
+    unsafe { core::ptr::write_volatile(root_addresses.add(address_space_index), 0) };
+    Ok(released_page_count)
+}
+
+fn validate_page_table_tree(table_address: usize, level: usize) -> Result<usize, PageTableError> {
+    if !crate::kernel::frame_allocator::is_allocated_frame_address(table_address) {
+        return Err(PageTableError::InvalidChildTable);
+    }
+
+    let table = table_address as *const PageTable;
+    let mut page_table_count = 1usize;
+    for index in 0..PAGE_TABLE_ENTRIES {
+        // 安全性：当前表地址已验证为页池中的已分配页帧，索引限制在表的 512 项内。
+        let entry = unsafe { core::ptr::read_volatile(core::ptr::addr_of!((*table).0[index])) };
+        if entry & PTE_VALID == 0 || entry & (PTE_READ | PTE_WRITE | PTE_EXECUTE) != 0 {
+            continue;
+        }
+        if level == 0 || entry & (PTE_USER | PTE_ACCESSED | PTE_DIRTY) != 0 {
+            return Err(PageTableError::InvalidChildTable);
+        }
+
+        let child_address = ((entry >> 10) << 12) as usize;
+        let child_count = validate_page_table_tree(child_address, level - 1)?;
+        page_table_count = page_table_count
+            .checked_add(child_count)
+            .ok_or(PageTableError::PageTableCountMismatch)?;
+    }
+
+    Ok(page_table_count)
+}
+
+fn release_page_table_tree(table_address: usize, level: usize) -> Result<usize, PageTableError> {
+    let table = table_address as *mut PageTable;
+    let mut released_page_count = 1usize;
+    for index in 0..PAGE_TABLE_ENTRIES {
+        // 安全性：调用前已验证整棵页表树，当前表仍由未释放的父表或根索引持有。
+        let entry_pointer = unsafe { core::ptr::addr_of_mut!((*table).0[index]) };
+        // 安全性：索引在 512 项页表范围内，当前表页尚未归还给分配器。
+        let entry = unsafe { core::ptr::read_volatile(entry_pointer) };
+        if entry & PTE_VALID == 0 || entry & (PTE_READ | PTE_WRITE | PTE_EXECUTE) != 0 {
+            continue;
+        }
+
+        let child_address = ((entry >> 10) << 12) as usize;
+        // 安全性：整棵树已预先验证，且当前地址空间未活动，子页表没有硬件或其他所有者引用。
+        unsafe { core::ptr::write_volatile(entry_pointer, 0) };
+        released_page_count += release_page_table_tree(child_address, level - 1)?;
+    }
+
+    // 安全性：该页只由已验证的非活动页表树拥有，所有子链接已清除，不再有活动页表引用。
+    let frame =
+        unsafe { crate::kernel::frame_allocator::PhysicalFrame::from_address(table_address) }
+            .map_err(PageTableError::FrameDeallocation)?;
+    crate::kernel::frame_allocator::deallocate_frame(frame)
+        .map_err(PageTableError::FrameDeallocation)?;
+    Ok(released_page_count)
+}
+
+fn active_root_address() -> usize {
+    let satp_value: usize;
+    // 安全性：读取 satp 仅用于拒绝销毁当前 hart 正在使用的页表，不访问外部内存。
+    unsafe {
+        core::arch::asm!(
+            "csrr {value}, satp",
+            value = out(reg) satp_value,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+    if satp_value >> SATP_MODE_SHIFT != SATP_SV39_MODE {
+        return 0;
+    }
+    (satp_value & SATP_PPN_MASK) << 12
 }
 
 /// 以调试日志输出每个任务页表中的有效映射。
@@ -536,6 +642,12 @@ pub enum PageTableError {
     FrameAllocation(crate::kernel::frame_allocator::FrameError),
     /// 页表树中的子页表地址不属于已分配页帧。
     InvalidChildTable,
+    /// 不能销毁当前 hart 正在使用的地址空间。
+    ActiveAddressSpace,
+    /// 归还的页表页数量与销毁前验证的数量不一致。
+    PageTableCountMismatch,
+    /// 页表页归还给物理页帧分配器时失败。
+    FrameDeallocation(crate::kernel::frame_allocator::FrameError),
     /// 调度器请求了尚未初始化的地址空间。
     UnknownAddressSpace,
     /// 本实验只建立 4 KiB 叶子映射，却遇到大页叶子项。
@@ -553,6 +665,9 @@ impl PageTableError {
             Self::InvalidRange => "页表映射范围无效或未按 4 KiB 对齐",
             Self::FrameAllocation(error) => error.description(),
             Self::InvalidChildTable => "页表子表地址不属于已分配物理页帧",
+            Self::ActiveAddressSpace => "不能销毁当前活动地址空间",
+            Self::PageTableCountMismatch => "地址空间销毁前后页表页数量不一致",
+            Self::FrameDeallocation(error) => error.description(),
             Self::UnknownAddressSpace => "任务地址空间尚未初始化",
             Self::UnexpectedSuperpage => "页表中出现本阶段未支持的大页映射",
             Self::InvalidRootTable => "根页表地址为零、未按 4 KiB 对齐或不属于已分配页帧",
