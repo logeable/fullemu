@@ -135,22 +135,3 @@ pub fn load(index: usize) -> Result<Option<LoadedUserProgram>, UserProgramLoadEr
         image_size: program.bytes.len(),
     }))
 }
-
-/// 判断缓冲区是否完全落在指定用户程序的镜像槽位中。
-pub fn contains_buffer_range(program_index: usize, address: usize, length: usize) -> bool {
-    if length == 0 {
-        return true;
-    }
-
-    let Some(program) = USER_PROGRAMS.get(program_index) else {
-        return false;
-    };
-    let Some(image_end) = program.linked_base.checked_add(program.bytes.len()) else {
-        return false;
-    };
-    let Some(buffer_end) = address.checked_add(length) else {
-        return false;
-    };
-
-    address >= program.linked_base && buffer_end <= image_end
-}

@@ -20,6 +20,7 @@ make run
 
 ## 代码与阶段说明
 
+- [模块职责与依赖](docs/architecture.md) 说明当前内核模块边界、依赖方向和后续架构重构工作。
 - [第 0 阶段：QEMU RISC-V 启动与串口](docs/phase-0-qemu-riscv-boot.md) 记录启动契约、内存布局、运行命令、验证方式和当前限制。
 - [第 1 阶段：致命异常报告](docs/phase-1-fatal-traps.md) 说明 S-mode 异常入口和当前验证限制。
 - [第 2 阶段：FDT 头部校验](docs/phase-2-fdt-header.md) 记录头部格式和边界检查。

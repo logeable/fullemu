@@ -28,7 +28,7 @@ impl LinuxErrno {
 }
 
 /// 表示系统调用返回用户态，或结束当前用户任务。
-pub enum SyscallOutcome {
+pub(super) enum SyscallOutcome {
     /// 将结果写入 `a0` 后恢复用户上下文。
     Return(isize),
     /// 当前任务调用 `exit`；Linux 对外可观察的正常退出码只有低 8 位。
@@ -37,26 +37,54 @@ pub enum SyscallOutcome {
     Yield,
 }
 
-/// 按 Linux RISC-V syscall ABI 分发调用，并描述返回或任务退出结果。
-pub fn dispatch(
+/// 记录一次系统调用允许访问的用户程序和用户栈范围。
+///
+/// 调度器在分发前从当前任务构造该值；syscall 层据此检查用户指针，不反向查询任务表。
+#[derive(Clone, Copy)]
+pub(super) struct SyscallContext {
     task_index: usize,
-    program_index: usize,
+    program_range: (usize, usize),
+    stack_range: (usize, usize),
+}
+
+impl SyscallContext {
+    pub(super) const fn new(
+        task_index: usize,
+        program_range: (usize, usize),
+        stack_range: (usize, usize),
+    ) -> Self {
+        Self {
+            task_index,
+            program_range,
+            stack_range,
+        }
+    }
+
+    fn contains_stack_buffer(self, address: usize, length: usize) -> bool {
+        contains_range(self.stack_range, address, length)
+    }
+
+    fn contains_program_or_stack_buffer(self, address: usize, length: usize) -> bool {
+        contains_range(self.program_range, address, length)
+            || contains_range(self.stack_range, address, length)
+    }
+}
+
+/// 按 Linux RISC-V syscall ABI 分发调用，并描述返回或任务退出结果。
+pub(super) fn dispatch(
+    context: SyscallContext,
     number: usize,
     arguments: [usize; 3],
 ) -> SyscallOutcome {
     match number {
         LINUX_READ_SYSCALL => {
-            SyscallOutcome::Return(read(task_index, arguments[0], arguments[1], arguments[2]))
+            SyscallOutcome::Return(read(context, arguments[0], arguments[1], arguments[2]))
         }
-        LINUX_WRITE_SYSCALL => SyscallOutcome::Return(write(
-            task_index,
-            program_index,
-            arguments[0],
-            arguments[1],
-            arguments[2],
-        )),
+        LINUX_WRITE_SYSCALL => {
+            SyscallOutcome::Return(write(context, arguments[0], arguments[1], arguments[2]))
+        }
         LINUX_CLOCK_GETTIME_SYSCALL => {
-            SyscallOutcome::Return(clock_gettime(task_index, arguments[0], arguments[1]))
+            SyscallOutcome::Return(clock_gettime(context, arguments[0], arguments[1]))
         }
         LINUX_EXIT_SYSCALL => SyscallOutcome::Exit(arguments[0] as i32 as u8),
         LINUX_SCHED_YIELD_SYSCALL => SyscallOutcome::Yield,
@@ -64,14 +92,19 @@ pub fn dispatch(
     }
 }
 
-fn read(task_index: usize, file_descriptor: usize, buffer_address: usize, count: usize) -> isize {
+fn read(
+    context: SyscallContext,
+    file_descriptor: usize,
+    buffer_address: usize,
+    count: usize,
+) -> isize {
     if file_descriptor != STDIN_FILE_DESCRIPTOR {
         return LinuxErrno::BadFileDescriptor.return_value();
     }
     if count == 0 {
         return 0;
     }
-    if !super::user_mode::contains_user_stack_range(task_index, buffer_address, count) {
+    if !context.contains_stack_buffer(buffer_address, count) {
         return LinuxErrno::Fault.return_value();
     }
 
@@ -98,8 +131,7 @@ fn read(task_index: usize, file_descriptor: usize, buffer_address: usize, count:
 }
 
 fn write(
-    task_index: usize,
-    program_index: usize,
+    context: SyscallContext,
     file_descriptor: usize,
     buffer_address: usize,
     count: usize,
@@ -112,14 +144,10 @@ fn write(
         return 0;
     }
 
-    let buffer_is_in_program =
-        super::user_program::contains_buffer_range(program_index, buffer_address, count);
-    let buffer_is_in_stack =
-        super::user_mode::contains_user_stack_range(task_index, buffer_address, count);
-    if !buffer_is_in_program && !buffer_is_in_stack {
+    if !context.contains_program_or_stack_buffer(buffer_address, count) {
         crate::klog_trace!(
             "拒绝任务 {} 的 write 缓冲区：地址={:#018x}，长度={}",
-            task_index,
+            context.task_index,
             buffer_address,
             count
         );
@@ -137,14 +165,14 @@ fn write(
     count as isize
 }
 
-fn clock_gettime(task_index: usize, clock_id: usize, timespec_address: usize) -> isize {
+fn clock_gettime(context: SyscallContext, clock_id: usize, timespec_address: usize) -> isize {
     if clock_id != CLOCK_MONOTONIC {
         return LinuxErrno::InvalidArgument.return_value();
     }
 
     let timespec_size = core::mem::size_of::<super::clock::Timespec>();
     if timespec_address % core::mem::align_of::<super::clock::Timespec>() != 0
-        || !super::user_mode::contains_user_stack_range(task_index, timespec_address, timespec_size)
+        || !context.contains_stack_buffer(timespec_address, timespec_size)
     {
         return LinuxErrno::Fault.return_value();
     }
@@ -156,4 +184,14 @@ fn clock_gettime(task_index: usize, clock_id: usize, timespec_address: usize) ->
     }
 
     0
+}
+
+fn contains_range(range: (usize, usize), address: usize, length: usize) -> bool {
+    if length == 0 {
+        return true;
+    }
+    let Some(end) = address.checked_add(length) else {
+        return false;
+    };
+    address >= range.0 && end <= range.1
 }

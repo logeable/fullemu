@@ -1,100 +1,20 @@
-//! 在单 hart 上启动并调度多个同时驻留的 U-mode 程序。
+//! 管理任务启动、陷入处理和单 hart 调度。
 
 use crate::arch::riscv64::trap::{ExceptionCause, InterruptCause, TrapCause, TrapFrame};
 use alloc::vec::Vec;
+
+mod stack;
+
+use stack::{KernelStack, UserStack};
 
 const MAX_USER_TASKS: usize = 8;
 const BOOT_PROGRAM_NAME: &str = match option_env!("FULLEMU_BOOT_PROGRAM") {
     Some(name) => name,
     None => "shell",
 };
-const USER_STACK_SIZE: usize = 16 * 1024;
-const KERNEL_TRAP_STACK_SIZE: usize = 16 * 1024;
-const PAGE_SIZE: usize = 4096;
-const USER_STACK_TOP: usize = (1usize << 38) - PAGE_SIZE;
-const STACK_PAGE_COUNT: usize = USER_STACK_SIZE / PAGE_SIZE;
 const SSTATUS_SPP: usize = 1 << 8;
 // 按 QEMU virt 的时间基准将时间片固定为 10 ms。
 const TIME_SLICE_TICKS: u64 = crate::arch::riscv64::sbi::QEMU_VIRT_TIMEBASE_FREQUENCY_HZ / 100;
-
-struct StackBacking {
-    frames: Vec<crate::kernel::frame_allocator::PhysicalFrame>,
-}
-
-impl StackBacking {
-    fn allocate_contiguous(
-        page_count: usize,
-    ) -> Result<Self, crate::kernel::frame_allocator::FrameError> {
-        let frames = crate::kernel::frame_allocator::allocate_contiguous_zeroed_frames(page_count)?;
-        Ok(Self { frames })
-    }
-
-    fn allocate_scattered(
-        page_count: usize,
-    ) -> Result<Self, crate::kernel::frame_allocator::FrameError> {
-        let frames = crate::kernel::frame_allocator::allocate_zeroed_frames(page_count)?;
-        Ok(Self { frames })
-    }
-
-    fn first_address(&self) -> usize {
-        self.frames[0].start_address()
-    }
-
-    fn size(&self) -> usize {
-        self.frames.len() * PAGE_SIZE
-    }
-}
-
-impl Drop for StackBacking {
-    fn drop(&mut self) {
-        while let Some(frame) = self.frames.pop() {
-            if let Err(error) = crate::kernel::frame_allocator::deallocate_frame(frame) {
-                crate::klog_error!("释放任务栈页帧失败：{}", error.description());
-                stop_forever();
-            }
-        }
-    }
-}
-
-struct KernelStack {
-    backing: StackBacking,
-}
-
-impl KernelStack {
-    fn allocate() -> Result<Self, crate::kernel::frame_allocator::FrameError> {
-        Ok(Self {
-            backing: StackBacking::allocate_contiguous(KERNEL_TRAP_STACK_SIZE / PAGE_SIZE)?,
-        })
-    }
-
-    fn top(&self) -> usize {
-        self.backing.first_address() + self.backing.size()
-    }
-}
-
-struct UserStack {
-    backing: StackBacking,
-}
-
-impl UserStack {
-    fn allocate() -> Result<Self, crate::kernel::frame_allocator::FrameError> {
-        Ok(Self {
-            backing: StackBacking::allocate_scattered(STACK_PAGE_COUNT)?,
-        })
-    }
-
-    fn start(&self) -> usize {
-        USER_STACK_TOP - self.backing.size()
-    }
-
-    fn top(&self) -> usize {
-        USER_STACK_TOP
-    }
-
-    fn range(&self) -> (usize, usize) {
-        (self.start(), self.top())
-    }
-}
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -107,7 +27,7 @@ enum TaskState {
 struct Task {
     state: TaskState,
     saved_frame_address: usize,
-    program_index: usize,
+    program_range: (usize, usize),
     user_stack: Option<UserStack>,
     kernel_stack: Option<KernelStack>,
 }
@@ -208,10 +128,11 @@ fn start_programs(program_indices: &[usize]) -> ! {
             }
         };
         let user_stack_range = user_stack.range();
-        let kernel_stack_range = (
-            kernel_stack.top() - KERNEL_TRAP_STACK_SIZE,
-            kernel_stack.top(),
-        );
+        let kernel_stack_range = kernel_stack.range();
+        let Some(program_end) = program.virtual_start.checked_add(program.image_size) else {
+            crate::klog_error!("用户程序 {} 的地址范围溢出", program.name);
+            stop_forever();
+        };
         user_image_mappings[task_index] = super::memory::UserImageMapping {
             virtual_start: program.virtual_start,
             physical_start: program.slot_start,
@@ -230,7 +151,7 @@ fn start_programs(program_indices: &[usize]) -> ! {
             (&mut *core::ptr::addr_of_mut!(TASKS)).push(Task {
                 state: TaskState::Ready,
                 saved_frame_address: initial_frame_address,
-                program_index,
+                program_range: (program.virtual_start, program_end),
                 user_stack: Some(user_stack),
                 kernel_stack: Some(kernel_stack),
             });
@@ -277,7 +198,7 @@ fn start_programs(program_indices: &[usize]) -> ! {
         };
         user_stack_mappings.push(super::memory::UserStackMapping {
             virtual_start: user_stack.start(),
-            frames: &user_stack.backing.frames,
+            frames: user_stack.frames(),
         });
     }
 
@@ -342,12 +263,14 @@ pub extern "C" fn supervisor_trap_handler(frame: *mut TrapFrame) -> *mut TrapFra
             frame.registers[11],
             frame.registers[12],
         ];
-        match super::syscall::dispatch(
-            current_index,
-            task_program_index(current_index),
-            syscall_number,
-            arguments,
-        ) {
+        let task = task_record_or_stop(current_index);
+        let Some(stack_range) = user_stack_range(current_index) else {
+            crate::klog_error!("任务 {} 的用户栈不存在", current_index);
+            stop_forever();
+        };
+        let syscall_context =
+            super::syscall::SyscallContext::new(current_index, task.program_range, stack_range);
+        match super::syscall::dispatch(syscall_context, syscall_number, arguments) {
             super::syscall::SyscallOutcome::Return(result) => {
                 frame.registers[10] = result as usize;
                 frame.exception_pc += 4;
@@ -501,10 +424,6 @@ fn current_task_index() -> usize {
     unsafe { core::ptr::read_volatile(core::ptr::addr_of!(CURRENT_TASK_INDEX)) }
 }
 
-fn task_program_index(index: usize) -> usize {
-    task_record_or_stop(index).program_index
-}
-
 fn task_count() -> usize {
     // 安全性：任务容器在首次进入 U-mode 前完成初始化，此后长度保持不变。
     unsafe { (&*core::ptr::addr_of!(TASKS)).len() }
@@ -527,7 +446,7 @@ fn set_task_state(index: usize, state: TaskState) {
 struct TaskSnapshot {
     state: TaskState,
     saved_frame_address: usize,
-    program_index: usize,
+    program_range: (usize, usize),
 }
 
 fn task_record_or_stop(index: usize) -> TaskSnapshot {
@@ -539,7 +458,7 @@ fn task_record_or_stop(index: usize) -> TaskSnapshot {
     TaskSnapshot {
         state: task.state,
         saved_frame_address: task.saved_frame_address,
-        program_index: task.program_index,
+        program_range: task.program_range,
     }
 }
 
@@ -601,25 +520,6 @@ fn release_deferred_kernel_stack(current_index: usize) {
     unsafe {
         core::ptr::write_volatile(core::ptr::addr_of_mut!(PENDING_KERNEL_STACK_RELEASE), None);
     }
-}
-
-/// 判断缓冲区是否完整位于指定任务的 U-mode 栈中。
-pub(super) fn contains_user_stack_range(index: usize, address: usize, length: usize) -> bool {
-    if length == 0 {
-        return true;
-    }
-    if index >= task_count() {
-        return false;
-    }
-
-    let Some((stack_start, stack_end)) = user_stack_range(index) else {
-        return false;
-    };
-    let Some(buffer_end) = address.checked_add(length) else {
-        return false;
-    };
-
-    address >= stack_start && buffer_end <= stack_end
 }
 
 fn report_load_error(error: super::user_program::UserProgramLoadError) {
