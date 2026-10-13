@@ -1,6 +1,6 @@
 # fullemu
 
-fullemu 是一个以可读性和教学为优先的 Rust 操作系统项目。当前实现从 QEMU RISC-V `virt` 平台启动，将独立构建的 no_std 用户程序作为原始镜像加载后进入 U-mode。内核默认启动用户态 shell，并通过静态 Sv39 页表建立用户任务与内核之间的页面权限边界；也可选择多道程序批处理入口，让构建清单中的非 shell 程序同时驻留并由定时器调度。shell 支持输入、通过 `help` 查看内置命令，以及通过 `uptime` 显示单调运行时间。内核实现 Linux RISC-V `read`、`write`、`clock_gettime`、`exit` 和 `sched_yield` 的有限子集。每个批处理任务有独立页表，用户程序从共同虚拟入口运行，但仍使用静态物理镜像槽位、页表和任务栈。源码按内核职责和稳定概念组织，阶段编号只用于文档中的教学脉络。
+fullemu 是一个以可读性和教学为优先的 Rust 操作系统项目。当前实现从 QEMU RISC-V `virt` 平台启动，将独立构建的 no_std 用户程序作为原始镜像加载后进入 U-mode。内核默认启动用户态 shell，并通过 Sv39 建立用户任务与内核之间的页面权限边界；也可选择多道程序批处理入口，让构建清单中的非 shell 程序同时驻留并由定时器调度。shell 支持输入、通过 `help` 查看内置命令，以及通过 `uptime` 显示单调运行时间。内核实现 Linux RISC-V `read`、`write`、`clock_gettime`、`exit` 和 `sched_yield` 的有限子集。每个批处理任务有独立页表和由任务持有的内核/用户栈；用户程序从共同虚拟入口运行，但仍使用固定物理镜像槽位。源码按内核职责和稳定概念组织，阶段编号只用于文档中的教学脉络。
 
 ## 快速开始
 
@@ -49,4 +49,5 @@ make run
 - [第 26 阶段：地址空间页表回收](docs/phase-26-address-space-reclamation.md) 记录非活动地址空间的页表树销毁和页帧归还。
 - [第 27 阶段：用容器管理地址空间记录](docs/phase-27-address-space-container.md) 记录内核 `Vec` 对根页表记录的管理，以及它与物理页帧分配器的职责边界。
 - [第 28 阶段：用容器管理任务记录](docs/phase-28-task-record-container.md) 记录任务调度元数据如何从平行数组收拢到 `Vec<Task>`，并说明静态栈与任务上限仍保留。
+- [第 29 阶段：任务拥有独立栈](docs/phase-29-task-owned-stacks.md) 记录内核栈和用户栈的稳定页帧 backing、Sv39 权限映射，以及安全回收顺序。
 - [项目原则与代码规范](docs/development-principles.md) 是设计和协作规范。

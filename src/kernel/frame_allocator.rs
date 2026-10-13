@@ -1,8 +1,10 @@
 //! 从固定的物理页池中分配和回收 4 KiB 页帧。
 //!
 //! 当前页池静态保留在内核 BSS 中，位图记录每一页的占用状态。它与按字节分配内核对象的
-//! `heap` 分离；Sv39 页表页已使用此分配器，用户栈仍静态保留。当前单 hart 的调用发生在启动期
+//! `heap` 分离；Sv39 页表页已使用此分配器，任务栈也由页帧提供。当前单 hart 的调用发生在启动期
 //! 或 S-mode 陷入处理路径；两种路径都不会被可调度的 S-mode 定时器中断重入。
+
+use alloc::vec::Vec;
 
 const PAGE_SIZE: usize = 4096;
 const FRAME_COUNT: usize = 128;
@@ -88,6 +90,51 @@ impl FrameAllocator {
                 return Ok(PhysicalFrame {
                     start_address: self.start_address + frame_index * PAGE_SIZE,
                 });
+            }
+        }
+
+        Err(FrameError::OutOfFrames)
+    }
+
+    fn allocate_contiguous(
+        &mut self,
+        frame_count: usize,
+    ) -> Result<Vec<PhysicalFrame>, FrameError> {
+        self.ensure_initialized()?;
+        if frame_count == 0 || frame_count > FRAME_COUNT {
+            return Err(FrameError::OutOfFrames);
+        }
+
+        let mut frames = Vec::new();
+        frames
+            .try_reserve_exact(frame_count)
+            .map_err(|_| FrameError::MetadataAllocation)?;
+
+        let mut run_start = None;
+        let mut run_length = 0;
+        for frame_index in 0..FRAME_COUNT {
+            let word_index = frame_index / BITMAP_WORD_BITS;
+            let bit_index = frame_index % BITMAP_WORD_BITS;
+            if self.allocated[word_index] & (1usize << bit_index) == 0 {
+                run_start.get_or_insert(frame_index);
+                run_length += 1;
+                if run_length == frame_count {
+                    let Some(start) = run_start else {
+                        return Err(FrameError::InvalidAllocation);
+                    };
+                    for allocated_index in start..start + frame_count {
+                        let word_index = allocated_index / BITMAP_WORD_BITS;
+                        let bit_index = allocated_index % BITMAP_WORD_BITS;
+                        self.allocated[word_index] |= 1usize << bit_index;
+                        frames.push(PhysicalFrame {
+                            start_address: self.start_address + allocated_index * PAGE_SIZE,
+                        });
+                    }
+                    return Ok(frames);
+                }
+            } else {
+                run_start = None;
+                run_length = 0;
             }
         }
 
@@ -197,6 +244,50 @@ pub fn allocate_zeroed_frame() -> Result<PhysicalFrame, FrameError> {
     Ok(frame)
 }
 
+/// 连续分配指定数量的页帧并清零，适用于需要连续虚拟栈区的内核栈。
+pub fn allocate_contiguous_zeroed_frames(
+    frame_count: usize,
+) -> Result<Vec<PhysicalFrame>, FrameError> {
+    // 安全性：当前分配只发生在启动期或 S-mode 陷入处理路径，不会被定时器重入；项目仅启用单 hart。
+    let frames =
+        unsafe { (*core::ptr::addr_of_mut!(FRAME_ALLOCATOR)).allocate_contiguous(frame_count)? };
+    for frame in &frames {
+        // 安全性：frames 中每个令牌独占一张已分配页，页池在 S-mode 下保持恒等映射且可写。
+        unsafe { core::ptr::write_bytes(frame.start_address as *mut u8, 0, PAGE_SIZE) };
+    }
+    Ok(frames)
+}
+
+/// 分配并清零指定数量的任意页帧，失败时归还本次已取得的全部页帧。
+pub fn allocate_zeroed_frames(frame_count: usize) -> Result<Vec<PhysicalFrame>, FrameError> {
+    if frame_count == 0 {
+        return Err(FrameError::OutOfFrames);
+    }
+
+    let mut frames = Vec::new();
+    frames
+        .try_reserve_exact(frame_count)
+        .map_err(|_| FrameError::MetadataAllocation)?;
+    for _ in 0..frame_count {
+        match allocate_zeroed_frame() {
+            Ok(frame) => frames.push(frame),
+            Err(error) => {
+                let mut release_failed = false;
+                while let Some(frame) = frames.pop() {
+                    if deallocate_frame(frame).is_err() {
+                        release_failed = true;
+                    }
+                }
+                if release_failed {
+                    return Err(FrameError::RollbackFailed);
+                }
+                return Err(error);
+            }
+        }
+    }
+    Ok(frames)
+}
+
 /// 释放此前由该分配器分配的页帧。
 pub fn deallocate_frame(frame: PhysicalFrame) -> Result<(), FrameError> {
     // 安全性：当前释放只发生在启动期或 S-mode 陷入处理路径，不会被定时器重入；项目仅启用单 hart。
@@ -279,6 +370,10 @@ pub enum FrameError {
     AlreadyInitialized,
     /// 页池中的所有页帧均已分配。
     OutOfFrames,
+    /// 无法为页帧所有权记录分配内核堆内存。
+    MetadataAllocation,
+    /// 分配失败后无法完整归还本次已经取得的页帧。
+    RollbackFailed,
     /// 要释放的页帧不属于当前页池或地址未按页对齐。
     FrameOutsidePool,
     /// 页帧已经处于空闲状态。
@@ -301,6 +396,8 @@ impl FrameError {
             Self::NotInitialized => "物理页帧分配器尚未初始化",
             Self::AlreadyInitialized => "物理页帧分配器重复初始化",
             Self::OutOfFrames => "物理页帧池已耗尽",
+            Self::MetadataAllocation => "无法为页帧所有权记录分配内核堆内存",
+            Self::RollbackFailed => "页帧分配失败后无法完整回滚",
             Self::FrameOutsidePool => "待释放页帧不属于物理页池",
             Self::FrameAlreadyFree => "物理页帧已被释放",
             Self::InvalidAllocation => "页帧分配未满足对齐或唯一性要求",

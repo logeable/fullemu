@@ -1,7 +1,7 @@
 //! 为每个用户任务建立独立 Sv39 地址空间和 U/S 权限边界。
 //!
-//! 页表页按需从固定物理页帧池取得；根页表地址按任务索引记录。内核、用户栈和 QEMU `virt`
-//! UART 使用恒等映射；共同的用户程序虚拟区域映射到任务自己的物理镜像槽位。用户栈和镜像仍静态分配。
+//! 页表页和任务栈从固定物理页帧池取得；根页表地址按任务索引记录。内核和 QEMU `virt`
+//! UART 使用恒等映射；用户栈及共同的用户程序虚拟区域映射到各自任务的物理页。
 //! 当前单 hart 的容器访问发生在启动期或 S-mode 陷入处理路径，不会被可调度的 S-mode 定时器中断重入。
 
 use alloc::vec::Vec;
@@ -38,14 +38,20 @@ pub(crate) struct UserImageMapping {
     pub size: usize,
 }
 
+/// 描述一个任务的用户栈虚拟起点及其拥有的物理页帧。
+pub(crate) struct UserStackMapping<'a> {
+    pub virtual_start: usize,
+    pub frames: &'a [crate::kernel::frame_allocator::PhysicalFrame],
+}
+
 /// 为每个任务建立独立页表，并激活第一个任务的地址空间。
 ///
 /// `kernel_end` 是内核映像及 BSS 的结束地址；两个切片按任务索引对应，分别描述该任务
-/// 的用户栈和用户程序映射。所有程序使用相同虚拟起始地址，但映射到各自物理镜像槽位。
+/// 的用户栈页帧和用户程序映射。所有程序和用户栈使用共同虚拟区域，但映射到各自物理页。
 /// 所有页表都映射相同的 S-mode 内核区域，每张表只映射对应任务自己的 U-mode 区域。
 pub fn initialize(
     kernel_end: usize,
-    user_stacks: &[(usize, usize)],
+    user_stacks: &[UserStackMapping<'_>],
     user_images: &[UserImageMapping],
 ) -> Result<(), PageTableError> {
     let kernel_start = core::ptr::addr_of!(__kernel_start) as usize;
@@ -59,19 +65,46 @@ pub fn initialize(
         return Err(PageTableError::InvalidRange);
     }
 
-    for (index, &(stack_start, stack_end)) in user_stacks.iter().enumerate() {
-        if stack_start & PAGE_MASK != 0
-            || stack_end & PAGE_MASK != 0
-            || stack_start < kernel_start
-            || stack_end > kernel_end
-            || stack_end <= stack_start
-            || user_stacks[..index]
-                .iter()
-                .any(|&(other_start, other_end)| {
-                    ranges_overlap(stack_start, stack_end, other_start, other_end)
-                })
+    for stack in user_stacks {
+        let Some(stack_size) = stack.frames.len().checked_mul(PAGE_SIZE) else {
+            return Err(PageTableError::InvalidRange);
+        };
+        let Some(stack_end) = stack.virtual_start.checked_add(stack_size) else {
+            return Err(PageTableError::InvalidRange);
+        };
+        if stack.virtual_start & PAGE_MASK != 0
+            || stack.frames.is_empty()
+            || stack_end > (1usize << 38)
         {
             return Err(PageTableError::InvalidRange);
+        }
+        for (page_index, frame) in stack.frames.iter().enumerate() {
+            let physical_address = frame.start_address();
+            if physical_address & PAGE_MASK != 0
+                || physical_address < kernel_start
+                || physical_address
+                    .checked_add(PAGE_SIZE)
+                    .is_none_or(|end| end > kernel_end)
+                || !crate::kernel::frame_allocator::is_allocated_frame_address(physical_address)
+            {
+                return Err(PageTableError::InvalidRange);
+            }
+            let page_virtual_start = stack.virtual_start + page_index * PAGE_SIZE;
+            if user_images.iter().any(|image| {
+                image
+                    .virtual_start
+                    .checked_add(image.size)
+                    .is_none_or(|image_end| {
+                        ranges_overlap(
+                            page_virtual_start,
+                            page_virtual_start + PAGE_SIZE,
+                            image.virtual_start,
+                            image_end,
+                        )
+                    })
+            }) {
+                return Err(PageTableError::InvalidRange);
+            }
         }
     }
 
@@ -113,9 +146,7 @@ pub fn initialize(
         .map_err(|_| PageTableError::AddressSpaceMetadataAllocation)?;
     address_spaces.resize(user_stacks.len(), None);
 
-    for (address_space_index, (&(stack_start, stack_end), image)) in
-        user_stacks.iter().zip(user_images).enumerate()
-    {
+    for (address_space_index, (stack, image)) in user_stacks.iter().zip(user_images).enumerate() {
         let root_frame = crate::kernel::frame_allocator::allocate_zeroed_frame()
             .map_err(PageTableError::FrameAllocation)?;
         let root_address = root_frame.into_address();
@@ -144,15 +175,13 @@ pub fn initialize(
             image_offset += PAGE_SIZE;
         }
 
-        let mut stack_page = stack_start;
-        while stack_page < stack_end {
+        for (page_index, frame) in stack.frames.iter().enumerate() {
             map_page(
                 root_table,
-                stack_page,
-                stack_page,
+                stack.virtual_start + page_index * PAGE_SIZE,
+                frame.start_address(),
                 PTE_READ | PTE_WRITE | PTE_USER,
             )?;
-            stack_page += PAGE_SIZE;
         }
 
         map_page(root_table, UART_BASE, UART_BASE, PTE_READ | PTE_WRITE)?;
