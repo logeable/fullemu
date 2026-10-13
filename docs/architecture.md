@@ -7,11 +7,11 @@
 | 模块 | 职责 | 主要依赖 |
 | --- | --- | --- |
 | `src/main.rs` | 导出汇编使用的 `kernel_main` 入口并定义 panic handler | `kernel::startup`、RISC-V 架构入口 |
-| `src/device_tree` | 校验和遍历 FDT，并在无堆阶段提取内核内存初始化所需的平台数据 | Rust 核心库 |
-| `src/device` | 定义内核使用的设备接口，并提供当前 QEMU `virt` UART 控制台驱动 | QEMU `virt` 的 MMIO 设备约定 |
+| `src/device_tree` | 校验和遍历 FDT，并在无堆阶段提取内存及早期控制台初始化所需的平台数据 | Rust 核心库 |
+| `src/device` | 定义内核使用的设备接口，并提供由启动数据配置的 NS16550 UART 控制台驱动 | QEMU `virt` 的设备 binding 与寄存器约定 |
 | `src/arch/riscv64` | 提供启动汇编、陷入帧、SBI 和定时器等 RISC-V 机制 | RISC-V 寄存器与固件调用约定 |
 | `src/kernel` | 提供分配器、Sv39 地址空间、任务调度、系统调用、日志和用户程序加载策略 | `arch::riscv64` 机制、`device` 接口及 `device_tree` 数据 |
-| `kernel::startup` | 解析 FDT 启动信息，先初始化页帧分配器，再由它提供堆后备页，运行启动自检并选择启动模式 | `device_tree`、分配器、任务和架构初始化接口 |
+| `kernel::startup` | 解析 FDT 启动信息并配置 UART，先初始化页帧分配器，再由它提供堆后备页，运行启动自检并选择启动模式 | `device_tree`、`device`、分配器、任务和架构初始化接口 |
 | `user/` | 独立构建的用户态运行库和示例程序 | Linux RISC-V syscall 约定及用户程序自身逻辑 |
 
 ## 内核子模块
@@ -32,7 +32,7 @@
 | `kernel::clock` | 提供内核启动后的单调时间值 | 读取架构计时源并转换成内核时间值，不定义用户 ABI 布局 |
 | `kernel::logging` | 过滤并格式化内核诊断记录 | 通过 `device::console` 输出，并读取平台计时源 |
 | `device::console` | 为日志和 syscall 提供字节输入输出及格式化写入接口 | 通过 `ConsoleDevice` 契约调用当前 UART 实现 |
-| `device::uart16550` | 轮询访问 QEMU `virt` 的 NS16550 兼容 UART | 固定 UART0 MMIO 地址和寄存器布局 |
+| `device::uart16550` | 轮询访问 FDT 选出的 NS16550 兼容 UART | 启动时提供的 MMIO 范围和 NS16550 寄存器布局 |
 
 ## 关键数据类型的归属
 
@@ -95,6 +95,7 @@ flowchart TD
 - 当两个子系统需要互相调用时，应优先把共享契约放进窄的数据接口，避免继续扩大双向依赖。
 - `main` 只负责启动编排；FDT 解析、页表细节和任务状态转换分别留在各自子系统。
 - `device_tree::fdt` 只依赖核心库并返回借用式原始视图；`device_tree::memory_info` 在无堆阶段把初始化信息复制到固定容量值中。页帧分配器消费 `FdtMemoryInfo` 中的物理范围，不反向依赖内核分配器或日志。
+- `device_tree::console_info` 在无堆阶段从 `/soc` 下提取 NS16550 UART 的寄存器范围；`kernel::startup` 在首次日志输出前把范围交给 `device::console`，解析器不依赖设备驱动，设备驱动也不解析 FDT。
 - Linux ABI 的数据布局由 `kernel::syscall` 持有；`kernel::clock` 只返回内部时间值，避免内核机制层依赖 syscall ABI。
 - 启动顺序必须先解析并校验 DTB、提取 RAM/固件保留范围和 DTB 自身范围，再初始化页帧分配器，最后从页帧分配器取得堆后备页；页帧分配器的元数据不能通过堆分配。
 
@@ -106,7 +107,7 @@ flowchart TD
 
 本轮继续将 `memory` 按机制边界拆为 `address_space`、`page_table` 和 `user_access`：前者拥有地址空间根表记录并编排创建、切换及销毁；`page_table` 集中处理 Sv39 PTE 和 `satp`；`user_access` 仅封装 SUM 开关与单次用户内存读写。`memory/mod.rs` 保留任务和 syscall 使用的接口、映射输入类型及统一错误说明，页表诊断仍由 `page_table_log` 只读遍历。
 
-本轮将原先过于宽泛的 `boot` 顶层模块重命名为 `device_tree`，并把 `info.rs` 明确命名为 `memory_info.rs`；它只负责 FDT 格式解析和内核内存初始化数据提取，启动编排仍属于 `kernel::startup`。同时把 QEMU UART 从 `arch::riscv64` 移至独立的 `device` 模块：`ConsoleDevice` 表达内核所需的最小字节收发契约，日志和 syscall 通过 `device::console` 使用该接口，具体 NS16550 寄存器访问集中在 `device::uart16550`。设备选择目前固定为 QEMU `virt` UART0，尚未引入通用设备发现或注册框架。另继续明确数据与机制/ABI 的归属：`PhysicalMemoryRegion` 留在 `device_tree::memory_info`，时钟返回内核自己的 `MonotonicTime`，Linux `timespec` 布局留在 syscall 边界。没有为了文件大小进行机械拆分，页表映射契约仍由 `kernel::memory` 统一维护，任务仍拥有自己的栈和镜像资源。
+此前将原先过于宽泛的 `boot` 顶层模块重命名为 `device_tree`，并把 `info.rs` 明确命名为 `memory_info.rs`；启动编排仍属于 `kernel::startup`。QEMU UART 已从 `arch::riscv64` 移至独立的 `device` 模块：`ConsoleDevice` 表达内核所需的最小字节收发契约，日志和 syscall 通过 `device::console` 使用该接口，具体 NS16550 寄存器访问集中在 `device::uart16550`。本轮再由 `device_tree::console_info` 读取 QEMU `virt` FDT 中 `/soc` 子设备的 UART `reg` 范围，启动阶段先完成这项解析和控制台初始化，再输出日志；UART 物理地址不再写死在驱动中。当前仍只支持空 `ranges` 的 `/soc` 和 NS16550 兼容设备，尚未解析 `/chosen/stdout-path`、总线地址转换或建立通用设备发现/注册框架。另继续明确数据与机制/ABI 的归属：`PhysicalMemoryRegion` 留在 `device_tree::memory_info`，时钟返回内核自己的 `MonotonicTime`，Linux `timespec` 布局留在 syscall 边界。没有为了文件大小进行机械拆分，页表映射契约仍由 `kernel::memory` 统一维护，任务仍拥有自己的栈和镜像资源。
 
 当前仍有明确的重构工作：
 

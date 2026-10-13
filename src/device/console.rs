@@ -4,7 +4,12 @@ use core::fmt;
 
 use super::{uart16550::Uart16550, ConsoleDevice, MmioRegion};
 
-static CONSOLE_DEVICE: Uart16550 = Uart16550;
+static CONSOLE_DEVICE: Uart16550 = Uart16550::new();
+
+/// 根据启动阶段从 FDT 提取的寄存器范围初始化控制台。
+pub(crate) fn initialize(region: MmioRegion) {
+    CONSOLE_DEVICE.initialize(region);
+}
 
 fn active_device() -> &'static dyn ConsoleDevice {
     &CONSOLE_DEVICE

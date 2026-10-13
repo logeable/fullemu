@@ -33,4 +33,4 @@ printf 'abc\n' | make run
 - 输入采用忙等待轮询，会持续占用当前 hart；尚未启用 UART 接收中断或调度器。
 - 每次只读取并回显字节；没有行缓冲、退格处理、输入编辑或命令解析。
 - 尚未处理 UART 接收错误状态，也没有为多个并发调用提供串口锁。
-- UART 地址仍固定为 QEMU `virt` 的 UART0，尚未通过 FDT 发现控制台设备。
+- 本阶段最初将 UART 地址固定为 QEMU `virt` 的 `0x10000000`；该限制已由[第 31 阶段](phase-31-fdt-uart-discovery.md)移除。

@@ -51,4 +51,6 @@ make run
 - [第 27 阶段：用容器管理地址空间记录](docs/phase-27-address-space-container.md) 记录内核 `Vec` 对根页表记录的管理，以及它与物理页帧分配器的职责边界。
 - [第 28 阶段：用容器管理任务记录](docs/phase-28-task-record-container.md) 记录任务调度元数据如何从平行数组收拢到 `Vec<Task>`，并说明静态栈与任务上限仍保留。
 - [第 29 阶段：任务拥有独立栈](docs/phase-29-task-owned-stacks.md) 记录内核栈和用户栈的稳定页帧 backing、Sv39 权限映射，以及安全回收顺序。
+- [第 30 阶段：FDT 驱动的物理页帧与堆后备区](docs/phase-30-fdt-backed-physical-memory.md) 记录按 FDT RAM 范围构造可用页帧区间，并由页帧分配器为内核堆提供后备页。
+- [第 31 阶段：从 FDT 发现 UART 控制台](docs/phase-31-fdt-uart-discovery.md) 记录启动时读取 UART 寄存器范围并配置控制台驱动。
 - [项目原则与代码规范](docs/development-principles.md) 是设计和协作规范。

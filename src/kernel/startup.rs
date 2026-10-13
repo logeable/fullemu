@@ -5,8 +5,6 @@ use core::fmt;
 use fullemu::device_tree::fdt::{FdtBlob, FdtHeader, FdtStructureEvent};
 use fullemu::device_tree::memory_info::FdtMemoryInfo;
 
-use crate::kernel;
-
 use super::frame_allocator::FrameError;
 use super::heap::HeapError;
 
@@ -45,10 +43,6 @@ extern "C" {
 /// 按固定顺序初始化内核，并根据构建配置启动用户任务。
 pub(crate) fn run(hart_id: usize, device_tree: usize) -> ! {
     crate::kernel::clock::initialize();
-    log_kernel_sections();
-    crate::klog_info!("fullemu 已在 QEMU virt (RISC-V) 启动");
-    crate::klog_info!("启动 hart：{hart_id:#018x}");
-    crate::klog_info!("设备树地址：{device_tree:#018x}");
 
     // 安全性：OpenSBI 启动约定保证 a1 指向可读的 FDT；解析器只读取固定的 40 字节头部。
     let fdt_header = match unsafe { FdtHeader::read_from_ptr(device_tree as *const u8) } {
@@ -59,6 +53,41 @@ pub(crate) fn run(hart_id: usize, device_tree: usize) -> ! {
         }
     };
 
+    // 安全性：OpenSBI 提供完整且可读的 FDT；头部已验证总长度至少覆盖所有声明区块。
+    let fdt_blob = unsafe {
+        core::slice::from_raw_parts(device_tree as *const u8, fdt_header.total_size as usize)
+    };
+    let fdt = match FdtBlob::parse(fdt_blob) {
+        Ok(fdt) => fdt,
+        Err(error) => report_fdt_blob_error(error),
+    };
+    let console_info = match fullemu::device_tree::console_info::FdtConsoleInfo::parse(&fdt) {
+        Ok(console_info) => console_info,
+        Err(error) => report_console_info_error(error),
+    };
+    let uart_region = console_info.register_region();
+    let uart_start = match usize::try_from(uart_region.start) {
+        Ok(start) => start,
+        Err(_) => panic!("FDT UART 地址超出当前平台可寻址范围"),
+    };
+    let uart_size = match usize::try_from(uart_region.size) {
+        Ok(size) => size,
+        Err(_) => panic!("FDT UART 寄存器范围超出当前平台可寻址范围"),
+    };
+    crate::device::console::initialize(crate::device::MmioRegion {
+        start: uart_start,
+        size: uart_size,
+    });
+
+    log_kernel_sections();
+    crate::klog_info!("fullemu 已在 QEMU virt (RISC-V) 启动");
+    crate::klog_info!("启动 hart：{hart_id:#018x}");
+    crate::klog_info!("设备树地址：{device_tree:#018x}");
+    crate::klog_info!(
+        "FDT UART：寄存器范围={:#018x}..{:#018x}",
+        uart_region.start,
+        uart_region.start + uart_region.size
+    );
     crate::klog_debug!(
         "FDT 头部：版本={}，总长度={} 字节，结构区=偏移 {:#010x}/{} 字节，字符串区=偏移 {:#010x}/{} 字节",
         fdt_header.version,
@@ -69,14 +98,6 @@ pub(crate) fn run(hart_id: usize, device_tree: usize) -> ! {
         fdt_header.strings_size
     );
 
-    // 安全性：OpenSBI 提供完整且可读的 FDT；头部已验证总长度至少覆盖所有声明区块。
-    let fdt_blob = unsafe {
-        core::slice::from_raw_parts(device_tree as *const u8, fdt_header.total_size as usize)
-    };
-    let fdt = match FdtBlob::parse(fdt_blob) {
-        Ok(fdt) => fdt,
-        Err(error) => report_fdt_blob_error(error),
-    };
     let memory_info = match FdtMemoryInfo::parse(&fdt, device_tree as u64) {
         Ok(memory_info) => memory_info,
         Err(error) => report_memory_info_error(error),
@@ -226,4 +247,9 @@ fn report_fdt_blob_error(error: fullemu::device_tree::fdt::FdtBlobError) -> ! {
 fn report_memory_info_error(error: fullemu::device_tree::memory_info::FdtMemoryInfoError) -> ! {
     crate::klog_error!("启动信息无效：{}", error.description());
     panic!("启动信息无效");
+}
+
+fn report_console_info_error(error: fullemu::device_tree::console_info::FdtConsoleInfoError) -> ! {
+    crate::klog_error!("FDT 控制台信息无效：{}", error.description());
+    panic!("FDT 控制台信息无效");
 }

@@ -23,12 +23,12 @@ DTB:  0x0000000087e00000
 | 内核特权级 | S-mode，由 OpenSBI 移交 |
 | 加载方式 | `-kernel` 加载 ELF；链接入口和内核基址为 `0x80200000` |
 | 固件入口参数 | `a0` 为 hart ID，`a1` 为 FDT/DTB 地址 |
-| 调试输出 | QEMU `virt` 的第一个 NS16550 兼容 UART，暂时固定地址 `0x10000000` |
-| 设备发现 | 本阶段尚未解析 FDT；后续设备驱动必须从 FDT 发现地址和中断信息 |
+| 调试输出 | 从 QEMU `virt` FDT 的 `/soc` 节点发现的第一个 NS16550 兼容 UART |
+| 设备发现 | 启动阶段解析 UART `reg` 地址；当前只支持空 `ranges` 的 `/soc` 总线 |
 
 本次验证环境：QEMU 10.2.2、Rust/Cargo 1.98.1，OpenSBI 1.7（由当前 QEMU 默认固件提供）。版本用于记录已验证组合，不代表其他版本不支持；遇到启动差异时先记录实际版本和命令行。
 
-QEMU 官方资料将 `virt` 描述为通用虚拟平台，并说明它支持通过默认 OpenSBI 固件加载内核。QEMU 自动生成并传递设备树；平台设备的长期发现机制应基于该设备树，而不是把本阶段的串口常量扩散到其他模块。参见 [QEMU RISC-V `virt` 文档](https://www.qemu.org/docs/master/system/riscv/virt.html)、[QEMU RISC-V 系统仿真文档](https://www.qemu.org/docs/master/system/target-riscv.html) 和 [QEMU `virt` 机器映射源码](https://github.com/qemu/qemu/blob/master/hw/riscv/virt.c)。
+QEMU 官方资料将 `virt` 描述为通用虚拟平台，并说明它支持通过默认 OpenSBI 固件加载内核。QEMU 自动生成并传递设备树；当前控制台驱动使用该设备树中的 UART 地址，不再依赖固定物理地址。设备树地址转换等更广泛的发现能力仍未实现。参见 [QEMU RISC-V `virt` 文档](https://www.qemu.org/docs/master/system/riscv/virt.html)、[QEMU RISC-V 系统仿真文档](https://www.qemu.org/docs/master/system/target-riscv.html) 和 [QEMU `virt` 机器映射源码](https://github.com/qemu/qemu/blob/master/hw/riscv/virt.c)。
 
 RISC-V `unknown-none-elf` target 提供无操作系统运行时的 ELF 构建目标。内核不依赖第三方 crate；链接脚本、入口、串口 MMIO 和最小 panic 输出均由本项目直接实现。参见 [Rust `riscv64gc-unknown-none-elf` target](https://doc.rust-lang.org/stable/nightly-rustc/rustc_target/spec/targets/riscv64gc_unknown_none_elf/index.html)。
 
@@ -85,12 +85,12 @@ make run QEMU=/path/to/qemu-system-riscv64
 2. `_start` 暂时只接受 hart 0；其他 hart 进入 `wfi` 停机循环。runner 固定 `-smp 1`，因此正常路径不会触发该分支。
 3. 入口设置引导栈和 `gp`，然后将 `.bss` 按 8 字节清零。清零在进入 Rust 前完成，避免依赖 ELF 加载器处理 `NOLOAD` 区域的行为。
 4. 汇编入口保留 `a0`/`a1`，尾调用 `kernel_main(hart_id, device_tree)`。
-5. Rust 代码向 UART 输出状态，然后通过 `wfi` 保持内核运行。没有启用中断、调度器或关机服务。
+5. Rust 代码先解析 FDT 并初始化其中描述的 UART，再输出状态。没有启用中断、调度器或关机服务。
 
 ## 第 0 阶段未覆盖的功能
 
 - 多 hart 初始化、同步和调度。
-- FDT 解析及设备自动发现；UART 地址只对当前 `virt` 平台成立。
+- 通用设备发现和总线地址转换；当前只处理 QEMU `virt` 的 `/soc` 空 `ranges` 与 NS16550 UART。
 - 一般异常恢复、异常返回、中断处理、内存管理、堆分配、任务、系统调用、文件系统和 shell。致命异常报告见[第 1 阶段](phase-1-fatal-traps.md)。
 - 从真实开发板启动，或任何 Linux ABI 行为。
 - 基于 UART 接收输入；当前只有输出路径。
