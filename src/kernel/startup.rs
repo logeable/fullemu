@@ -1,7 +1,11 @@
 //! 串接平台启动信息读取、内核子系统初始化和用户任务入口选择。
 
-use fullemu::boot::fdt::{FdtBlob, FdtHeader, FdtStructureEvent};
-use fullemu::boot::info::BootInfo;
+use core::fmt;
+
+use fullemu::device_tree::fdt::{FdtBlob, FdtHeader, FdtStructureEvent};
+use fullemu::device_tree::memory_info::FdtMemoryInfo;
+
+use crate::kernel;
 
 use super::frame_allocator::FrameError;
 use super::heap::HeapError;
@@ -41,18 +45,6 @@ extern "C" {
 /// 按固定顺序初始化内核，并根据构建配置启动用户任务。
 pub(crate) fn run(hart_id: usize, device_tree: usize) -> ! {
     crate::kernel::clock::initialize();
-    if let Err(error) = crate::kernel::heap::initialize() {
-        crate::klog_error!("内核堆初始化失败：{}", error.description());
-        panic!("内核堆初始化失败");
-    }
-    if let Err(error) = crate::kernel::frame_allocator::initialize() {
-        crate::klog_error!("物理页帧分配器初始化失败：{}", error.description());
-        panic!("物理页帧分配器初始化失败");
-    }
-    if let Err(error) = run_startup_checks() {
-        crate::klog_error!("内核启动自检失败：{}", error.description());
-        panic!("内核启动自检失败");
-    }
     log_kernel_sections();
     crate::klog_info!("fullemu 已在 QEMU virt (RISC-V) 启动");
     crate::klog_info!("启动 hart：{hart_id:#018x}");
@@ -85,12 +77,12 @@ pub(crate) fn run(hart_id: usize, device_tree: usize) -> ! {
         Ok(fdt) => fdt,
         Err(error) => report_fdt_blob_error(error),
     };
-    let boot_info = match BootInfo::parse(&fdt) {
-        Ok(boot_info) => boot_info,
-        Err(error) => report_boot_info_error(error),
+    let memory_info = match FdtMemoryInfo::parse(&fdt, device_tree as u64) {
+        Ok(memory_info) => memory_info,
+        Err(error) => report_memory_info_error(error),
     };
 
-    for region in boot_info.memory_regions() {
+    for region in memory_info.memory_regions() {
         crate::klog_debug!(
             "FDT 物理内存区域：起始地址={:#018x}，长度={:#018x}",
             region.start,
@@ -98,31 +90,53 @@ pub(crate) fn run(hart_id: usize, device_tree: usize) -> ! {
         );
     }
 
-    for region in boot_info.reservations() {
+    for region in memory_info.memory_reservations() {
         crate::klog_debug!(
             "FDT 固件保留区域：起始地址={:#018x}，长度={:#018x}",
-            region.address,
+            region.start,
             region.size
         );
     }
+    let device_tree_region = memory_info.device_tree_region();
+    crate::klog_debug!(
+        "FDT 占用区域：起始地址={:#018x}，长度={:#018x}",
+        device_tree_region.start,
+        device_tree_region.size
+    );
 
-    let mut structure = fdt.structure();
+    if let Err(error) = crate::kernel::frame_allocator::initialize(&memory_info) {
+        crate::klog_error!("物理页帧分配器初始化失败：{}", error.description());
+        panic!("物理页帧分配器初始化失败");
+    }
+    if let Err(error) = crate::kernel::heap::initialize() {
+        crate::klog_error!("内核堆初始化失败：{}", error.description());
+        panic!("内核堆初始化失败");
+    }
+    if let Err(error) = run_startup_checks() {
+        crate::klog_error!("内核启动自检失败：{}", error.description());
+        panic!("内核启动自检失败");
+    }
 
-    loop {
-        match structure.next_event() {
-            Ok(Some(FdtStructureEvent::BeginNode { name, depth })) => {
-                crate::klog_trace!("FDT 节点：深度={depth}，名称={name}");
+    if crate::kernel::logging::is_enabled(crate::kernel::logging::Level::Trace) {
+        let mut structure = fdt.structure();
+
+        loop {
+            match structure.next_event() {
+                Ok(Some(FdtStructureEvent::BeginNode { name, depth })) => {
+                    crate::klog_trace!("FDT 节点：深度={depth}，名称={name}");
+                }
+                Ok(Some(FdtStructureEvent::Property { name, value, depth })) => {
+                    crate::klog_trace!(
+                        "FDT 属性：深度={depth}，名称={name}，长度={} 字节，原始值={}",
+                        value.len(),
+                        HexBytes(value)
+                    );
+                }
+                Ok(Some(FdtStructureEvent::End)) => break,
+                Ok(Some(_)) => {}
+                Ok(None) => break,
+                Err(error) => report_fdt_structure_error(error),
             }
-            Ok(Some(FdtStructureEvent::Property { name, value, depth })) => {
-                crate::klog_trace!(
-                    "FDT 属性：深度={depth}，名称={name}，长度={} 字节",
-                    value.len()
-                );
-            }
-            Ok(Some(FdtStructureEvent::End)) => break,
-            Ok(Some(_)) => {}
-            Ok(None) => break,
-            Err(error) => report_fdt_structure_error(error),
         }
     }
 
@@ -130,6 +144,19 @@ pub(crate) fn run(hart_id: usize, device_tree: usize) -> ! {
         "shell" => crate::kernel::task::run_boot_program(),
         "batch" => crate::kernel::task::run_batch_programs(),
         _ => unreachable!("build.rs 已验证启动模式"),
+    }
+}
+
+/// 以连续十六进制字节显示 FDT 属性值，不分配临时缓冲区。
+struct HexBytes<'a>(&'a [u8]);
+
+impl fmt::Display for HexBytes<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("0x")?;
+        for byte in self.0 {
+            write!(formatter, "{byte:02x}")?;
+        }
+        Ok(())
     }
 }
 
@@ -186,17 +213,17 @@ fn log_kernel_range(name: &str, start: usize, end: usize) {
     );
 }
 
-fn report_fdt_structure_error(error: fullemu::boot::fdt::FdtStructureError) -> ! {
+fn report_fdt_structure_error(error: fullemu::device_tree::fdt::FdtStructureError) -> ! {
     crate::klog_error!("FDT 结构块无效：{}", error.description());
     panic!("FDT 结构块无效");
 }
 
-fn report_fdt_blob_error(error: fullemu::boot::fdt::FdtBlobError) -> ! {
+fn report_fdt_blob_error(error: fullemu::device_tree::fdt::FdtBlobError) -> ! {
     crate::klog_error!("FDT 文件无效：{}", error.description());
     panic!("FDT 文件无效");
 }
 
-fn report_boot_info_error(error: fullemu::boot::info::BootInfoError) -> ! {
+fn report_memory_info_error(error: fullemu::device_tree::memory_info::FdtMemoryInfoError) -> ! {
     crate::klog_error!("启动信息无效：{}", error.description());
     panic!("启动信息无效");
 }

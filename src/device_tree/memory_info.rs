@@ -1,11 +1,12 @@
-//! 从通用 FDT 数据中提取内核早期启动所需的平台信息。
+//! 从 FDT 中提取内核早期内存初始化所需的平台信息。
 //!
-//! 本模块目前只解释根节点下的内存节点，并保留固件给出的内存保留范围。
+//! 本模块目前只解释根节点下的内存节点，并复制固件和 DTB 自身的保留范围。
 //! 它不负责分配物理页，也不解释 UART、中断控制器或其他设备 binding。
 
-use super::fdt::{FdtBlob, FdtMemoryReservations, FdtStructureError, FdtStructureEvent};
+use super::fdt::{FdtBlob, FdtStructureError, FdtStructureEvent};
 
 const MAX_MEMORY_REGIONS: usize = 32;
+const MAX_MEMORY_RESERVATIONS: usize = 32;
 const DEFAULT_ADDRESS_CELLS: u32 = 2;
 const DEFAULT_SIZE_CELLS: u32 = 1;
 
@@ -27,7 +28,7 @@ impl PhysicalMemoryRegion {
 
 /// FDT 中的内存描述无法转换为本内核支持的启动信息。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum BootInfoError {
+pub enum FdtMemoryInfoError {
     /// 结构块不符合 FDT 格式。
     InvalidStructure(FdtStructureError),
     /// FDT 中没有找到根节点下的内存节点。
@@ -46,9 +47,13 @@ pub enum BootInfoError {
     OverlappingMemoryRegions,
     /// 内存范围数超过固定容量。
     TooManyMemoryRegions,
+    /// 固件保留范围数超过固定容量。
+    TooManyMemoryReservations,
+    /// DTB 起始地址与声明长度发生溢出。
+    InvalidDeviceTreeRange,
 }
 
-impl BootInfoError {
+impl FdtMemoryInfoError {
     /// 返回适合启动诊断的错误说明。
     pub const fn description(self) -> &'static str {
         match self {
@@ -61,27 +66,53 @@ impl BootInfoError {
             Self::InvalidMemoryRange => "内存范围为空或地址溢出",
             Self::OverlappingMemoryRegions => "内存范围相互重叠",
             Self::TooManyMemoryRegions => "内存范围数量超过启动信息容量",
+            Self::TooManyMemoryReservations => "固件保留范围数量超过启动信息容量",
+            Self::InvalidDeviceTreeRange => "DTB 物理范围地址溢出",
         }
     }
 }
 
 /// 从 FDT 提取出的早期启动信息。
 ///
-/// 内存范围使用固定容量数组，保留范围继续借用 DTB 中的原始表，不需要堆分配。
-pub struct BootInfo<'a> {
+/// 内存范围、保留范围和 DTB 本身的物理范围均由固定容量数据拥有，不需要堆分配。
+pub struct FdtMemoryInfo {
     memory_regions: [PhysicalMemoryRegion; MAX_MEMORY_REGIONS],
     memory_region_count: usize,
-    reservations: FdtMemoryReservations<'a>,
+    memory_reservations: [PhysicalMemoryRegion; MAX_MEMORY_RESERVATIONS],
+    memory_reservation_count: usize,
+    device_tree_region: PhysicalMemoryRegion,
 }
 
-impl<'a> BootInfo<'a> {
-    /// 从已经完成区块布局校验的 DTB 中提取物理内存与保留范围。
-    pub fn parse(fdt: &FdtBlob<'a>) -> Result<Self, BootInfoError> {
-        let mut boot_info = Self {
+impl FdtMemoryInfo {
+    /// 从已校验 DTB 中提取初始化所需范围；所有结果独立于 DTB 生命周期且不分配堆内存。
+    pub fn parse(fdt: &FdtBlob<'_>, device_tree_start: u64) -> Result<Self, FdtMemoryInfoError> {
+        let device_tree_region = PhysicalMemoryRegion {
+            start: device_tree_start,
+            size: fdt.header().total_size as u64,
+        };
+        if device_tree_region.end_exclusive().is_none() {
+            return Err(FdtMemoryInfoError::InvalidDeviceTreeRange);
+        }
+
+        let mut memory_info = Self {
             memory_regions: [PhysicalMemoryRegion::default(); MAX_MEMORY_REGIONS],
             memory_region_count: 0,
-            reservations: fdt.memory_reservations(),
+            memory_reservations: [PhysicalMemoryRegion::default(); MAX_MEMORY_RESERVATIONS],
+            memory_reservation_count: 0,
+            device_tree_region,
         };
+        for reservation in fdt.memory_reservations() {
+            let slot = memory_info
+                .memory_reservations
+                .get_mut(memory_info.memory_reservation_count)
+                .ok_or(FdtMemoryInfoError::TooManyMemoryReservations)?;
+            *slot = PhysicalMemoryRegion {
+                start: reservation.address,
+                size: reservation.size,
+            };
+            memory_info.memory_reservation_count += 1;
+        }
+
         let mut address_cells = DEFAULT_ADDRESS_CELLS;
         let mut size_cells = DEFAULT_SIZE_CELLS;
         let mut current_root_child = None;
@@ -90,7 +121,7 @@ impl<'a> BootInfo<'a> {
         loop {
             let event = structure
                 .next_event()
-                .map_err(BootInfoError::InvalidStructure)?;
+                .map_err(FdtMemoryInfoError::InvalidStructure)?;
             match event {
                 Some(FdtStructureEvent::BeginNode { name, depth: 1 }) => {
                     current_root_child = Some(RootChild::new(name));
@@ -117,8 +148,8 @@ impl<'a> BootInfo<'a> {
                 Some(FdtStructureEvent::EndNode { depth: 1 }) => {
                     if let Some(child) = current_root_child.take() {
                         if child.is_memory_node() {
-                            let reg = child.reg.ok_or(BootInfoError::MissingMemoryReg)?;
-                            boot_info.append_memory_ranges(reg, address_cells, size_cells)?;
+                            let reg = child.reg.ok_or(FdtMemoryInfoError::MissingMemoryReg)?;
+                            memory_info.append_memory_ranges(reg, address_cells, size_cells)?;
                         }
                     }
                 }
@@ -128,11 +159,11 @@ impl<'a> BootInfo<'a> {
             }
         }
 
-        if boot_info.memory_region_count == 0 {
-            return Err(BootInfoError::MissingMemoryNode);
+        if memory_info.memory_region_count == 0 {
+            return Err(FdtMemoryInfoError::MissingMemoryNode);
         }
 
-        Ok(boot_info)
+        Ok(memory_info)
     }
 
     /// 返回 FDT 描述的物理内存范围。
@@ -140,9 +171,39 @@ impl<'a> BootInfo<'a> {
         &self.memory_regions[..self.memory_region_count]
     }
 
-    /// 返回固件内存保留表的独立迭代器。
-    pub fn reservations(&self) -> FdtMemoryReservations<'a> {
-        self.reservations.clone()
+    /// 返回固件保留范围的独立切片，不再借用原始 DTB。
+    pub fn memory_reservations(&self) -> &[PhysicalMemoryRegion] {
+        &self.memory_reservations[..self.memory_reservation_count]
+    }
+
+    /// 返回固件传入 DTB 所占据的物理范围。
+    pub const fn device_tree_region(&self) -> PhysicalMemoryRegion {
+        self.device_tree_region
+    }
+
+    /// 检查静态内核存储是否处于描述的 RAM 内，且未与 DTB 或固件保留范围重叠。
+    ///
+    /// 此检查只适用于验证已由链接布局确定的内核存储区域，不等同于通用物理内存分配策略。
+    pub fn contains_unreserved_ram_region(&self, region: PhysicalMemoryRegion) -> bool {
+        let Some(region_end) = region.end_exclusive() else {
+            return false;
+        };
+        if region.size == 0
+            || !self.memory_regions().iter().any(|memory| {
+                memory.end_exclusive().is_some_and(|memory_end| {
+                    memory.start <= region.start && region_end <= memory_end
+                })
+            })
+            || ranges_overlap(region, self.device_tree_region)
+        {
+            return false;
+        }
+
+        !self
+            .memory_reservations()
+            .iter()
+            .copied()
+            .any(|reservation| ranges_overlap(region, reservation))
     }
 
     fn append_memory_ranges(
@@ -150,14 +211,14 @@ impl<'a> BootInfo<'a> {
         reg: &[u8],
         address_cells: u32,
         size_cells: u32,
-    ) -> Result<(), BootInfoError> {
+    ) -> Result<(), FdtMemoryInfoError> {
         validate_cell_count(address_cells)?;
         validate_cell_count(size_cells)?;
 
         let tuple_cells = address_cells + size_cells;
         let tuple_size = tuple_cells as usize * 4;
         if reg.is_empty() || reg.len() % tuple_size != 0 {
-            return Err(BootInfoError::InvalidRegLength);
+            return Err(FdtMemoryInfoError::InvalidRegLength);
         }
 
         for tuple in reg.chunks_exact(tuple_size) {
@@ -165,7 +226,7 @@ impl<'a> BootInfo<'a> {
             let address = decode_cells(&tuple[..address_size], address_cells)?;
             let size = decode_cells(&tuple[address_size..], size_cells)?;
             if size == 0 || address.checked_add(size).is_none() {
-                return Err(BootInfoError::InvalidMemoryRange);
+                return Err(FdtMemoryInfoError::InvalidMemoryRange);
             }
             self.push_memory_region(PhysicalMemoryRegion {
                 start: address,
@@ -175,27 +236,38 @@ impl<'a> BootInfo<'a> {
         Ok(())
     }
 
-    fn push_memory_region(&mut self, region: PhysicalMemoryRegion) -> Result<(), BootInfoError> {
+    fn push_memory_region(
+        &mut self,
+        region: PhysicalMemoryRegion,
+    ) -> Result<(), FdtMemoryInfoError> {
         let region_end = region
             .end_exclusive()
-            .ok_or(BootInfoError::InvalidMemoryRange)?;
+            .ok_or(FdtMemoryInfoError::InvalidMemoryRange)?;
         for existing in self.memory_regions() {
             let existing_end = existing
                 .end_exclusive()
-                .ok_or(BootInfoError::InvalidMemoryRange)?;
+                .ok_or(FdtMemoryInfoError::InvalidMemoryRange)?;
             if region.start < existing_end && existing.start < region_end {
-                return Err(BootInfoError::OverlappingMemoryRegions);
+                return Err(FdtMemoryInfoError::OverlappingMemoryRegions);
             }
         }
 
         let slot = self
             .memory_regions
             .get_mut(self.memory_region_count)
-            .ok_or(BootInfoError::TooManyMemoryRegions)?;
+            .ok_or(FdtMemoryInfoError::TooManyMemoryRegions)?;
         *slot = region;
         self.memory_region_count += 1;
         Ok(())
     }
+}
+
+fn ranges_overlap(first: PhysicalMemoryRegion, second: PhysicalMemoryRegion) -> bool {
+    let (Some(first_end), Some(second_end)) = (first.end_exclusive(), second.end_exclusive())
+    else {
+        return true;
+    };
+    first.start < second_end && second.start < first_end
 }
 
 struct RootChild<'a> {
@@ -226,41 +298,41 @@ impl<'a> RootChild<'a> {
     }
 }
 
-fn read_cell_property(value: &[u8]) -> Result<u32, BootInfoError> {
+fn read_cell_property(value: &[u8]) -> Result<u32, FdtMemoryInfoError> {
     let bytes: [u8; 4] = value
         .try_into()
-        .map_err(|_| BootInfoError::InvalidCellProperty)?;
+        .map_err(|_| FdtMemoryInfoError::InvalidCellProperty)?;
     Ok(u32::from_be_bytes(bytes))
 }
 
-fn validate_cell_count(cells: u32) -> Result<(), BootInfoError> {
+fn validate_cell_count(cells: u32) -> Result<(), FdtMemoryInfoError> {
     if cells == 1 || cells == 2 {
         Ok(())
     } else {
-        Err(BootInfoError::UnsupportedCellCount)
+        Err(FdtMemoryInfoError::UnsupportedCellCount)
     }
 }
 
-fn decode_cells(bytes: &[u8], cell_count: u32) -> Result<u64, BootInfoError> {
+fn decode_cells(bytes: &[u8], cell_count: u32) -> Result<u64, FdtMemoryInfoError> {
     match cell_count {
         1 => Ok(u32::from_be_bytes(
             bytes
                 .try_into()
-                .map_err(|_| BootInfoError::InvalidRegLength)?,
+                .map_err(|_| FdtMemoryInfoError::InvalidRegLength)?,
         ) as u64),
         2 => Ok(u64::from_be_bytes(
             bytes
                 .try_into()
-                .map_err(|_| BootInfoError::InvalidRegLength)?,
+                .map_err(|_| FdtMemoryInfoError::InvalidRegLength)?,
         )),
-        _ => Err(BootInfoError::UnsupportedCellCount),
+        _ => Err(FdtMemoryInfoError::UnsupportedCellCount),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{BootInfo, BootInfoError, PhysicalMemoryRegion};
-    use crate::boot::fdt::FdtBlob;
+    use super::{FdtMemoryInfo, FdtMemoryInfoError, PhysicalMemoryRegion};
+    use crate::device_tree::fdt::FdtBlob;
     use std::vec::Vec;
 
     const HEADER_SIZE: usize = 40;
@@ -353,10 +425,10 @@ mod tests {
         append_cell_pair(&mut reg, 0x9000_0000, 0x0100_0000);
         let blob = make_fdt(&valid_structure(&reg));
         let fdt = FdtBlob::parse(&blob).unwrap();
-        let boot_info = BootInfo::parse(&fdt).unwrap();
+        let memory_info = FdtMemoryInfo::parse(&fdt, 0x1000).unwrap();
 
         assert_eq!(
-            boot_info.memory_regions(),
+            memory_info.memory_regions(),
             &[
                 PhysicalMemoryRegion {
                     start: 0x8000_0000,
@@ -368,7 +440,7 @@ mod tests {
                 },
             ]
         );
-        assert_eq!(boot_info.reservations().count(), 0);
+        assert!(memory_info.memory_reservations().is_empty());
     }
 
     #[test]
@@ -384,10 +456,10 @@ mod tests {
         append_token(&mut structure, 9);
         let blob = make_fdt(&structure);
         let fdt = FdtBlob::parse(&blob).unwrap();
-        let boot_info = BootInfo::parse(&fdt).unwrap();
+        let memory_info = FdtMemoryInfo::parse(&fdt, 0x1000).unwrap();
 
         assert_eq!(
-            boot_info.memory_regions(),
+            memory_info.memory_regions(),
             &[PhysicalMemoryRegion {
                 start: 0x8000_0000,
                 size: 0x1000,
@@ -409,8 +481,8 @@ mod tests {
         let fdt = FdtBlob::parse(&blob).unwrap();
 
         assert!(matches!(
-            BootInfo::parse(&fdt),
-            Err(BootInfoError::MissingMemoryReg)
+            FdtMemoryInfo::parse(&fdt, 0x1000),
+            Err(FdtMemoryInfoError::MissingMemoryReg)
         ));
     }
 
@@ -420,8 +492,8 @@ mod tests {
         let fdt = FdtBlob::parse(&blob).unwrap();
 
         assert!(matches!(
-            BootInfo::parse(&fdt),
-            Err(BootInfoError::InvalidRegLength)
+            FdtMemoryInfo::parse(&fdt, 0x1000),
+            Err(FdtMemoryInfoError::InvalidRegLength)
         ));
     }
 
@@ -434,8 +506,8 @@ mod tests {
         let fdt = FdtBlob::parse(&blob).unwrap();
 
         assert!(matches!(
-            BootInfo::parse(&fdt),
-            Err(BootInfoError::OverlappingMemoryRegions)
+            FdtMemoryInfo::parse(&fdt, 0x1000),
+            Err(FdtMemoryInfoError::OverlappingMemoryRegions)
         ));
     }
 
@@ -453,8 +525,8 @@ mod tests {
         let fdt = FdtBlob::parse(&blob).unwrap();
 
         assert!(matches!(
-            BootInfo::parse(&fdt),
-            Err(BootInfoError::UnsupportedCellCount)
+            FdtMemoryInfo::parse(&fdt, 0x1000),
+            Err(FdtMemoryInfoError::UnsupportedCellCount)
         ));
     }
 }

@@ -1,19 +1,18 @@
-//! 在内核静态区域中管理一个有界、可释放的堆。
+//! 从物理页帧中取得连续后备区，并管理内核对象使用的字节堆。
 //!
 //! 堆作为 Rust 全局分配器管理内核对象字节块。当前堆分配只发生在启动期，此时尚未开启中断；
 //! 若以后在系统调用路径中分配，陷入硬件也会先清除 SIE，避免单 hart 上的定时器重入。
-//! 堆区位于内核 BSS，页表将它作为 S-mode 内核内存映射；物理页和用户地址空间仍由现有静态区域管理。
+//! 堆元数据位于后备页中；Sv39 地址空间将这些页作为 S-mode 恒等映射，堆不管理页帧本身。
 
 use core::alloc::{GlobalAlloc, Layout};
 use core::ptr::NonNull;
 
-const KERNEL_HEAP_SIZE: usize = 256 * 1024;
+use crate::kernel::frame_allocator::{self, FrameError, PhysicalFrameRun};
+
+const KERNEL_HEAP_FRAME_COUNT: usize = 64;
+const KERNEL_HEAP_SIZE: usize = KERNEL_HEAP_FRAME_COUNT * frame_allocator::PAGE_SIZE;
 const ALLOCATION_MAGIC: u64 = 0x4655_4c4c_4845_4150;
 
-#[repr(C, align(4096))]
-struct HeapStorage([u8; KERNEL_HEAP_SIZE]);
-
-static mut HEAP_STORAGE: HeapStorage = HeapStorage([0; KERNEL_HEAP_SIZE]);
 static mut KERNEL_HEAP: Heap = Heap::empty();
 
 struct KernelHeapAllocator;
@@ -54,6 +53,7 @@ struct Heap {
     start: usize,
     end: usize,
     first_free_block: *mut FreeBlock,
+    backing: Option<PhysicalFrameRun>,
 }
 
 impl Heap {
@@ -62,6 +62,7 @@ impl Heap {
             start: 0,
             end: 0,
             first_free_block: core::ptr::null_mut(),
+            backing: None,
         }
     }
 
@@ -69,8 +70,10 @@ impl Heap {
     ///
     /// # Safety
     ///
-    /// `start` 必须指向大小为 `size` 的可写独占区域，且该区域在堆使用期间持续有效。
-    unsafe fn initialize(&mut self, start: usize, size: usize) -> Result<(), HeapError> {
+    /// `backing` 必须是页帧分配器独占分配、可写且在堆使用期间持续有效的连续区域。
+    unsafe fn initialize(&mut self, backing: PhysicalFrameRun) -> Result<(), HeapError> {
+        let start = backing.start_address();
+        let size = backing.size();
         let alignment = core::mem::align_of::<FreeBlock>();
         let Some(end) = start.checked_add(size) else {
             return Err(HeapError::InvalidRegion);
@@ -97,6 +100,7 @@ impl Heap {
         self.start = start;
         self.end = end;
         self.first_free_block = first_free_block;
+        self.backing = Some(backing);
         Ok(())
     }
 
@@ -289,9 +293,22 @@ impl Heap {
     }
 }
 
-fn initialize_kernel_heap(start: usize, size: usize) -> Result<(), HeapError> {
+fn initialize_kernel_heap(backing: PhysicalFrameRun) -> Result<(), HeapError> {
     // 安全性：堆只在启动阶段初始化，此时尚未开启 S-mode 定时器中断。
-    unsafe { (*core::ptr::addr_of_mut!(KERNEL_HEAP)).initialize(start, size) }
+    unsafe { (*core::ptr::addr_of_mut!(KERNEL_HEAP)).initialize(backing) }
+}
+
+fn heap_region() -> (usize, usize) {
+    // 安全性：调用方在堆初始化完成后读取不可变区域边界。
+    let heap = unsafe { &*core::ptr::addr_of!(KERNEL_HEAP) };
+    if let Some(backing) = heap.backing.as_ref() {
+        (
+            backing.start_address(),
+            backing.start_address() + backing.size(),
+        )
+    } else {
+        (heap.start, heap.end)
+    }
 }
 
 fn allocate(layout: Layout) -> Option<NonNull<u8>> {
@@ -351,9 +368,11 @@ fn align_up(value: usize, alignment: usize) -> Option<usize> {
 
 /// 描述堆初始化或释放操作失败的原因。
 #[derive(Clone, Copy)]
-pub enum HeapError {
+pub(super) enum HeapError {
     /// 堆区域未对齐、容量不足或地址范围溢出。
     InvalidRegion,
+    /// 页帧分配器无法提供堆所需的连续后备页。
+    FrameAllocation(FrameError),
     /// 分配头部无效、指针非法或释放区间与空闲块重叠。
     InvalidAllocation,
     /// 启动演示中的固定布局无法构造。
@@ -372,9 +391,10 @@ pub enum HeapError {
 
 impl HeapError {
     /// 返回用于启动诊断的错误说明。
-    pub fn description(self) -> &'static str {
+    pub(super) fn description(self) -> &'static str {
         match self {
             Self::InvalidRegion => "内核堆区域无效",
+            Self::FrameAllocation(error) => error.description(),
             Self::InvalidAllocation => "内核堆释放指针无效或重复释放",
             Self::InvalidDemoLayout => "内核堆演示布局无效",
             Self::DemoOutOfMemory => "内核堆演示分配失败",
@@ -386,19 +406,18 @@ impl HeapError {
     }
 }
 
-/// 初始化固定内核堆。
+/// 从页帧分配器取得固定容量的内核堆后备区。
 ///
 /// 必须在任何堆分配之前调用，并且只调用一次。
-pub fn initialize() -> Result<(), HeapError> {
-    // 安全性：HEAP_STORAGE 是独占的静态可写 BSS 区域，生命周期覆盖整个内核运行期。
-    let heap_start = unsafe { core::ptr::addr_of_mut!(HEAP_STORAGE.0).cast::<u8>() as usize };
-    // 安全性：起始地址指向完整静态数组，固定容量与该数组长度一致。
-    initialize_kernel_heap(heap_start, KERNEL_HEAP_SIZE)
+pub(super) fn initialize() -> Result<(), HeapError> {
+    let backing = frame_allocator::allocate_zeroed_run(KERNEL_HEAP_FRAME_COUNT)
+        .map_err(HeapError::FrameAllocation)?;
+    initialize_kernel_heap(backing)
 }
 
 /// 检查对齐、释放、地址复用和相邻空闲块合并。
-pub(crate) fn check_allocator() -> Result<(), HeapError> {
-    let heap_start = unsafe { core::ptr::addr_of!(HEAP_STORAGE.0).cast::<u8>() as usize };
+pub(super) fn check_allocator() -> Result<(), HeapError> {
+    let heap_start = heap_region().0;
 
     let first_layout = Layout::from_size_align(37, 16).map_err(|_| HeapError::InvalidDemoLayout)?;
     let second_layout =
@@ -436,7 +455,7 @@ pub(crate) fn check_allocator() -> Result<(), HeapError> {
 }
 
 /// 检查 `Vec` 经全局分配器扩容后释放内存的行为。
-pub(crate) fn check_global_allocator() -> Result<(), HeapError> {
+pub(super) fn check_global_allocator() -> Result<(), HeapError> {
     let initial_free = free_space();
     if initial_free != (KERNEL_HEAP_SIZE, 1) {
         return Err(HeapError::DemoDidNotCoalesce);

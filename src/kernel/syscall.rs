@@ -1,6 +1,6 @@
 //! 实现当前内核支持的最小 Linux RISC-V 系统调用集合。
 
-use crate::arch::riscv64::console;
+use crate::device::console;
 
 const LINUX_WRITE_SYSCALL: usize = 64;
 const LINUX_READ_SYSCALL: usize = 63;
@@ -11,6 +11,16 @@ const STDIN_FILE_DESCRIPTOR: usize = 0;
 const STDOUT_FILE_DESCRIPTOR: usize = 1;
 const STDERR_FILE_DESCRIPTOR: usize = 2;
 const CLOCK_MONOTONIC: usize = 1;
+
+/// Linux RISC-V 64 位 ABI 的 `timespec` 内存布局。
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct LinuxTimespec {
+    /// 从内核时钟起点经过的整秒数。
+    seconds: i64,
+    /// 当前整秒内经过的纳秒数。
+    nanoseconds: i64,
+}
 
 #[derive(Clone, Copy)]
 #[repr(isize)]
@@ -170,17 +180,21 @@ fn clock_gettime(context: SyscallContext, clock_id: usize, timespec_address: usi
         return LinuxErrno::InvalidArgument.return_value();
     }
 
-    let timespec_size = core::mem::size_of::<super::clock::Timespec>();
-    if timespec_address % core::mem::align_of::<super::clock::Timespec>() != 0
+    let timespec_size = core::mem::size_of::<LinuxTimespec>();
+    if timespec_address % core::mem::align_of::<LinuxTimespec>() != 0
         || !context.contains_stack_buffer(timespec_address, timespec_size)
     {
         return LinuxErrno::Fault.return_value();
     }
 
-    let time = super::clock::monotonic_timespec();
+    let time = super::clock::monotonic_time();
+    let timespec = LinuxTimespec {
+        seconds: time.seconds as i64,
+        nanoseconds: time.nanoseconds as i64,
+    };
     // 安全性：对齐检查和栈范围检查保证目标是当前任务已映射的完整可写 timespec。
     unsafe {
-        super::memory::write_user_value(timespec_address, time);
+        super::memory::write_user_value(timespec_address, timespec);
     }
 
     0

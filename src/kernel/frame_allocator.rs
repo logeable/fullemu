@@ -1,37 +1,37 @@
-//! 从固定的物理页池中分配和回收 4 KiB 页帧。
+//! 根据 FDT 描述的 RAM 范围分配和回收 4 KiB 页帧。
 //!
-//! 当前页池静态保留在内核 BSS 中，位图记录每一页的占用状态。它与按字节分配内核对象的
-//! `heap` 分离；Sv39 页表页已使用此分配器，任务栈也由页帧提供。当前单 hart 的调用发生在启动期
-//! 或 S-mode 陷入处理路径；两种路径都不会被可调度的 S-mode 定时器中断重入。
+//! 分配器元数据固定保存在内核 BSS，不依赖堆；堆可在初始化后从这里取得连续页帧作为后备区。
+//! 当前单 hart 的调用发生在启动期或 S-mode 陷入处理路径，不会被可调度的 S-mode 定时器重入。
 
-use alloc::vec::Vec;
+use fullemu::device_tree::memory_info::{FdtMemoryInfo, PhysicalMemoryRegion};
 
-const PAGE_SIZE: usize = 4096;
-const FRAME_COUNT: usize = 128;
-const BITMAP_WORD_BITS: usize = usize::BITS as usize;
-const BITMAP_WORD_COUNT: usize = FRAME_COUNT.div_ceil(BITMAP_WORD_BITS);
-const FRAME_POOL_SIZE: usize = FRAME_COUNT * PAGE_SIZE;
+pub(super) const PAGE_SIZE: usize = 4096;
+const MAX_FREE_RANGES: usize = 256;
+const MAX_MEMORY_REGIONS: usize = 32;
 
-#[repr(C, align(4096))]
-struct FrameStorage([[u8; PAGE_SIZE]; FRAME_COUNT]);
-
-static mut FRAME_STORAGE: FrameStorage = FrameStorage([[0; PAGE_SIZE]; FRAME_COUNT]);
 static mut FRAME_ALLOCATOR: FrameAllocator = FrameAllocator::empty();
 
+extern "C" {
+    static __bss_end: u8;
+    static __user_program_load_start: u8;
+    static __user_program_load_end: u8;
+}
+
 /// 表示页池中的一个物理页帧。
+#[must_use = "页帧令牌代表独占的物理内存所有权"]
 #[derive(Debug, PartialEq, Eq)]
-pub struct PhysicalFrame {
+pub(super) struct PhysicalFrame {
     start_address: usize,
 }
 
 impl PhysicalFrame {
     /// 返回页帧的物理起始地址。
-    pub const fn start_address(&self) -> usize {
+    pub(super) const fn start_address(&self) -> usize {
         self.start_address
     }
 
     /// 将页帧所有权交给记录其物理地址的调用方。
-    pub fn into_address(self) -> usize {
+    pub(super) fn into_address(self) -> usize {
         self.start_address
     }
 
@@ -40,139 +40,297 @@ impl PhysicalFrame {
     /// # Safety
     ///
     /// 调用方必须保证自己独占该页帧，且没有其他资源继续持有或引用它。
-    pub(crate) unsafe fn from_address(address: usize) -> Result<Self, FrameError> {
+    pub(super) unsafe fn from_address(address: usize) -> Result<Self, FrameError> {
         // 安全性：调用方保证独占所有权；单 hart 分配器不会在当前启动或陷入路径并发修改位图。
         unsafe { (*core::ptr::addr_of!(FRAME_ALLOCATOR)).frame_from_address(address) }
     }
 }
 
-struct FrameAllocator {
+/// 表示一段连续、由页帧分配器独占的物理页帧。
+#[must_use = "连续页帧令牌代表独占的物理内存所有权"]
+pub(super) struct PhysicalFrameRun {
     start_address: usize,
-    allocated: [usize; BITMAP_WORD_COUNT],
+    frame_count: usize,
+}
+
+impl PhysicalFrameRun {
+    /// 返回连续页帧的物理起始地址。
+    pub(super) const fn start_address(&self) -> usize {
+        self.start_address
+    }
+
+    /// 返回连续页帧的总字节数。
+    pub(super) const fn size(&self) -> usize {
+        self.frame_count * PAGE_SIZE
+    }
+}
+
+#[derive(Clone, Copy)]
+struct FrameRange {
+    start_address: usize,
+    frame_count: usize,
+}
+
+impl FrameRange {
+    const EMPTY: Self = Self {
+        start_address: 0,
+        frame_count: 0,
+    };
+
+    fn end_address(self) -> usize {
+        self.start_address + self.frame_count * PAGE_SIZE
+    }
+}
+
+struct FrameAllocator {
+    memory_regions: [PhysicalMemoryRegion; MAX_MEMORY_REGIONS],
+    memory_region_count: usize,
+    managed_ranges: [FrameRange; MAX_FREE_RANGES],
+    managed_range_count: usize,
+    free_ranges: [FrameRange; MAX_FREE_RANGES],
+    free_range_count: usize,
     initialized: bool,
 }
 
 impl FrameAllocator {
     const fn empty() -> Self {
         Self {
-            start_address: 0,
-            allocated: [0; BITMAP_WORD_COUNT],
+            memory_regions: [PhysicalMemoryRegion { start: 0, size: 0 }; MAX_MEMORY_REGIONS],
+            memory_region_count: 0,
+            managed_ranges: [FrameRange::EMPTY; MAX_FREE_RANGES],
+            managed_range_count: 0,
+            free_ranges: [FrameRange::EMPTY; MAX_FREE_RANGES],
+            free_range_count: 0,
             initialized: false,
         }
     }
 
-    fn initialize(&mut self, start_address: usize) -> Result<(), FrameError> {
+    fn initialize(&mut self, memory_info: &FdtMemoryInfo) -> Result<(), FrameError> {
         if self.initialized {
             return Err(FrameError::AlreadyInitialized);
         }
-        if start_address == 0 || start_address & (PAGE_SIZE - 1) != 0 {
-            return Err(FrameError::InvalidPool);
-        }
-        if start_address.checked_add(FRAME_POOL_SIZE).is_none() {
-            return Err(FrameError::InvalidPool);
+        if memory_info.memory_regions().len() > MAX_MEMORY_REGIONS {
+            return Err(FrameError::TooManyMemoryRegions);
         }
 
-        self.start_address = start_address;
-        self.allocated = [0; BITMAP_WORD_COUNT];
+        let kernel_end = core::ptr::addr_of!(__bss_end) as usize;
+        let program_start = core::ptr::addr_of!(__user_program_load_start) as usize;
+        let program_end = core::ptr::addr_of!(__user_program_load_end) as usize;
+        self.memory_region_count = memory_info.memory_regions().len();
+        for (index, memory) in memory_info.memory_regions().iter().copied().enumerate() {
+            self.memory_regions[index] = memory;
+        }
+        for index in 1..self.memory_region_count {
+            let memory = self.memory_regions[index];
+            let mut insertion = index;
+            while insertion > 0 && self.memory_regions[insertion - 1].start > memory.start {
+                self.memory_regions[insertion] = self.memory_regions[insertion - 1];
+                insertion -= 1;
+            }
+            self.memory_regions[insertion] = memory;
+        }
+
+        for memory_index in 0..self.memory_region_count {
+            let memory = self.memory_regions[memory_index];
+            let memory_start =
+                usize::try_from(memory.start).map_err(|_| FrameError::InvalidMemoryRange)?;
+            let start = memory_start.max(kernel_end);
+            let end = memory
+                .end_exclusive()
+                .and_then(|end| usize::try_from(end).ok())
+                .ok_or(FrameError::InvalidMemoryRange)?;
+            let start = align_up(start).ok_or(FrameError::InvalidMemoryRange)?;
+            let end = end & !(PAGE_SIZE - 1);
+            if start >= end {
+                continue;
+            }
+
+            let mut frame_start = start;
+            while frame_start < end {
+                let frame_end = frame_start
+                    .checked_add(PAGE_SIZE)
+                    .ok_or(FrameError::InvalidMemoryRange)?;
+                let frame_region = PhysicalMemoryRegion {
+                    start: frame_start as u64,
+                    size: PAGE_SIZE as u64,
+                };
+                let overlaps_program = frame_start < program_end && program_start < frame_end;
+                if !overlaps_program && memory_info.contains_unreserved_ram_region(frame_region) {
+                    self.append_managed_frame(frame_start)?;
+                }
+                frame_start = frame_end;
+            }
+        }
+
+        if self.managed_range_count == 0 {
+            return Err(FrameError::NoUsableMemory);
+        }
+        self.free_ranges = self.managed_ranges;
+        self.free_range_count = self.managed_range_count;
         self.initialized = true;
         Ok(())
     }
 
     fn allocate(&mut self) -> Result<PhysicalFrame, FrameError> {
-        self.ensure_initialized()?;
+        let run = self.allocate_run(1)?;
+        Ok(PhysicalFrame {
+            start_address: run.start_address,
+        })
+    }
 
-        for frame_index in 0..FRAME_COUNT {
-            let word_index = frame_index / BITMAP_WORD_BITS;
-            let bit_index = frame_index % BITMAP_WORD_BITS;
-            let bit_mask = 1usize << bit_index;
-            if self.allocated[word_index] & bit_mask == 0 {
-                self.allocated[word_index] |= bit_mask;
-                return Ok(PhysicalFrame {
-                    start_address: self.start_address + frame_index * PAGE_SIZE,
+    fn allocate_run(&mut self, frame_count: usize) -> Result<PhysicalFrameRun, FrameError> {
+        self.ensure_initialized()?;
+        if frame_count == 0 {
+            return Err(FrameError::ZeroFrameCount);
+        }
+        for index in 0..self.free_range_count {
+            let range = self.free_ranges[index];
+            if range.frame_count >= frame_count {
+                let start_address = range.start_address;
+                self.free_ranges[index].start_address += frame_count * PAGE_SIZE;
+                self.free_ranges[index].frame_count -= frame_count;
+                if self.free_ranges[index].frame_count == 0 {
+                    self.remove_free_range(index);
+                }
+                return Ok(PhysicalFrameRun {
+                    start_address,
+                    frame_count,
                 });
             }
         }
-
-        Err(FrameError::OutOfFrames)
-    }
-
-    fn allocate_contiguous(
-        &mut self,
-        frame_count: usize,
-    ) -> Result<Vec<PhysicalFrame>, FrameError> {
-        self.ensure_initialized()?;
-        if frame_count == 0 || frame_count > FRAME_COUNT {
-            return Err(FrameError::OutOfFrames);
-        }
-
-        let mut frames = Vec::new();
-        frames
-            .try_reserve_exact(frame_count)
-            .map_err(|_| FrameError::MetadataAllocation)?;
-
-        let mut run_start = None;
-        let mut run_length = 0;
-        for frame_index in 0..FRAME_COUNT {
-            let word_index = frame_index / BITMAP_WORD_BITS;
-            let bit_index = frame_index % BITMAP_WORD_BITS;
-            if self.allocated[word_index] & (1usize << bit_index) == 0 {
-                run_start.get_or_insert(frame_index);
-                run_length += 1;
-                if run_length == frame_count {
-                    let Some(start) = run_start else {
-                        return Err(FrameError::InvalidAllocation);
-                    };
-                    for allocated_index in start..start + frame_count {
-                        let word_index = allocated_index / BITMAP_WORD_BITS;
-                        let bit_index = allocated_index % BITMAP_WORD_BITS;
-                        self.allocated[word_index] |= 1usize << bit_index;
-                        frames.push(PhysicalFrame {
-                            start_address: self.start_address + allocated_index * PAGE_SIZE,
-                        });
-                    }
-                    return Ok(frames);
-                }
-            } else {
-                run_start = None;
-                run_length = 0;
-            }
-        }
-
         Err(FrameError::OutOfFrames)
     }
 
     fn deallocate(&mut self, frame: PhysicalFrame) -> Result<(), FrameError> {
         self.ensure_initialized()?;
+        if !self.is_managed_address(frame.start_address) {
+            return Err(FrameError::FrameOutsidePool);
+        }
+        if self.is_free_address(frame.start_address) {
+            return Err(FrameError::FrameAlreadyFree);
+        }
+        self.insert_free_range(frame.start_address, 1)
+    }
 
-        let frame_index = self.frame_index(frame.start_address)?;
-        let word_index = frame_index / BITMAP_WORD_BITS;
-        let bit_index = frame_index % BITMAP_WORD_BITS;
-        let bit_mask = 1usize << bit_index;
-        if self.allocated[word_index] & bit_mask == 0 {
+    fn deallocate_run(&mut self, run: PhysicalFrameRun) -> Result<(), FrameError> {
+        self.ensure_initialized()?;
+        let end = run
+            .start_address
+            .checked_add(
+                run.frame_count
+                    .checked_mul(PAGE_SIZE)
+                    .ok_or(FrameError::InvalidMemoryRange)?,
+            )
+            .ok_or(FrameError::InvalidMemoryRange)?;
+        let managed = self.managed_ranges[..self.managed_range_count]
+            .iter()
+            .any(|range| run.start_address >= range.start_address && end <= range.end_address());
+        if !managed || run.frame_count == 0 || run.start_address & (PAGE_SIZE - 1) != 0 {
+            return Err(FrameError::FrameOutsidePool);
+        }
+        self.insert_free_range(run.start_address, run.frame_count)
+    }
+
+    fn is_managed_address(&self, address: usize) -> bool {
+        address & (PAGE_SIZE - 1) == 0
+            && self.managed_ranges[..self.managed_range_count]
+                .iter()
+                .any(|range| address >= range.start_address && address < range.end_address())
+    }
+
+    fn is_free_address(&self, address: usize) -> bool {
+        self.free_ranges[..self.free_range_count]
+            .iter()
+            .any(|range| address >= range.start_address && address < range.end_address())
+    }
+
+    fn insert_free_range(
+        &mut self,
+        start_address: usize,
+        frame_count: usize,
+    ) -> Result<(), FrameError> {
+        let end_address = start_address
+            .checked_add(
+                frame_count
+                    .checked_mul(PAGE_SIZE)
+                    .ok_or(FrameError::InvalidMemoryRange)?,
+            )
+            .ok_or(FrameError::InvalidMemoryRange)?;
+        let mut index = 0;
+        while index < self.free_range_count && self.free_ranges[index].start_address < start_address
+        {
+            index += 1;
+        }
+        if index > 0 && self.free_ranges[index - 1].end_address() > start_address {
+            return Err(FrameError::FrameAlreadyFree);
+        }
+        if index < self.free_range_count && self.free_ranges[index].start_address < end_address {
             return Err(FrameError::FrameAlreadyFree);
         }
 
-        self.allocated[word_index] &= !bit_mask;
+        let joins_previous =
+            index > 0 && self.free_ranges[index - 1].end_address() == start_address;
+        let joins_next =
+            index < self.free_range_count && self.free_ranges[index].start_address == end_address;
+        match (joins_previous, joins_next) {
+            (true, true) => {
+                self.free_ranges[index - 1].frame_count +=
+                    frame_count + self.free_ranges[index].frame_count;
+                self.remove_free_range(index);
+            }
+            (true, false) => self.free_ranges[index - 1].frame_count += frame_count,
+            (false, true) => {
+                self.free_ranges[index].start_address = start_address;
+                self.free_ranges[index].frame_count += frame_count;
+            }
+            (false, false) => {
+                if self.free_range_count == MAX_FREE_RANGES {
+                    return Err(FrameError::TooManyFreeRanges);
+                }
+                self.free_ranges
+                    .copy_within(index..self.free_range_count, index + 1);
+                self.free_ranges[index] = FrameRange {
+                    start_address,
+                    frame_count,
+                };
+                self.free_range_count += 1;
+            }
+        }
         Ok(())
     }
 
-    fn frame_index(&self, address: usize) -> Result<usize, FrameError> {
-        let Some(offset) = address.checked_sub(self.start_address) else {
-            return Err(FrameError::FrameOutsidePool);
-        };
-        if offset >= FRAME_POOL_SIZE || offset & (PAGE_SIZE - 1) != 0 {
-            return Err(FrameError::FrameOutsidePool);
+    fn append_managed_frame(&mut self, address: usize) -> Result<(), FrameError> {
+        if self.managed_range_count > 0 {
+            let last = &mut self.managed_ranges[self.managed_range_count - 1];
+            if last.end_address() == address {
+                last.frame_count += 1;
+                return Ok(());
+            }
         }
+        if self.managed_range_count == MAX_FREE_RANGES {
+            return Err(FrameError::TooManyFreeRanges);
+        }
+        self.managed_ranges[self.managed_range_count] = FrameRange {
+            start_address: address,
+            frame_count: 1,
+        };
+        self.managed_range_count += 1;
+        Ok(())
+    }
 
-        Ok(offset / PAGE_SIZE)
+    fn remove_free_range(&mut self, index: usize) {
+        self.free_ranges
+            .copy_within(index + 1..self.free_range_count, index);
+        self.free_range_count -= 1;
+        self.free_ranges[self.free_range_count] = FrameRange::EMPTY;
     }
 
     fn frame_from_address(&self, address: usize) -> Result<PhysicalFrame, FrameError> {
         self.ensure_initialized()?;
-        let frame_index = self.frame_index(address)?;
-        let word_index = frame_index / BITMAP_WORD_BITS;
-        let bit_index = frame_index % BITMAP_WORD_BITS;
-        if self.allocated[word_index] & (1usize << bit_index) == 0 {
+        if !self.is_managed_address(address) {
+            return Err(FrameError::FrameOutsidePool);
+        }
+        if self.is_free_address(address) {
             return Err(FrameError::FrameAlreadyFree);
         }
 
@@ -183,12 +341,10 @@ impl FrameAllocator {
 
     fn free_count(&self) -> Result<usize, FrameError> {
         self.ensure_initialized()?;
-        Ok(FRAME_COUNT
-            - self
-                .allocated
-                .iter()
-                .map(|word| word.count_ones() as usize)
-                .sum::<usize>())
+        Ok(self.free_ranges[..self.free_range_count]
+            .iter()
+            .map(|range| range.frame_count)
+            .sum())
     }
 
     fn is_allocated_frame_address(&self, address: usize) -> bool {
@@ -196,17 +352,7 @@ impl FrameAllocator {
             return false;
         }
 
-        let Some(offset) = address.checked_sub(self.start_address) else {
-            return false;
-        };
-        if offset >= FRAME_POOL_SIZE || offset & (PAGE_SIZE - 1) != 0 {
-            return false;
-        }
-
-        let frame_index = offset / PAGE_SIZE;
-        let word_index = frame_index / BITMAP_WORD_BITS;
-        let bit_index = frame_index % BITMAP_WORD_BITS;
-        self.allocated[word_index] & (1usize << bit_index) != 0
+        self.is_managed_address(address) && !self.is_free_address(address)
     }
 
     fn ensure_initialized(&self) -> Result<(), FrameError> {
@@ -218,24 +364,37 @@ impl FrameAllocator {
     }
 }
 
-/// 初始化固定页帧池；必须在分配或释放页帧前调用，并且只调用一次。
-pub fn initialize() -> Result<(), FrameError> {
-    // 安全性：FrameStorage 是页对齐的静态可写区域，大小恰为 FRAME_POOL_SIZE。
-    let pool_start = unsafe { core::ptr::addr_of_mut!(FRAME_STORAGE.0).cast::<u8>() as usize };
+fn align_up(value: usize) -> Option<usize> {
+    value
+        .checked_add(PAGE_SIZE - 1)
+        .map(|aligned| aligned & !(PAGE_SIZE - 1))
+}
+
+/// 根据 FDT RAM 范围建立物理页帧池，并排除启动期占用的内存。
+pub(super) fn initialize(memory_info: &FdtMemoryInfo) -> Result<(), FrameError> {
     // 安全性：初始化只在启动期单 hart 路径执行，定时器和全局 S-mode 中断尚未开启。
-    unsafe { (*core::ptr::addr_of_mut!(FRAME_ALLOCATOR)).initialize(pool_start) }
+    unsafe { (*core::ptr::addr_of_mut!(FRAME_ALLOCATOR)).initialize(memory_info) }
+}
+
+/// 分配一段连续页帧，不建立堆元数据；供早期堆初始化使用。
+pub(super) fn allocate_zeroed_run(frame_count: usize) -> Result<PhysicalFrameRun, FrameError> {
+    // 安全性：当前分配位于启动期或 S-mode 陷入路径，不会被定时器重入；项目仅启用单 hart。
+    let run = unsafe { (*core::ptr::addr_of_mut!(FRAME_ALLOCATOR)).allocate_run(frame_count)? };
+    // 安全性：run 独占连续已分配页帧，且 QEMU virt 的 RAM 在启动阶段可通过恒等地址访问。
+    unsafe { core::ptr::write_bytes(run.start_address as *mut u8, 0, run.size()) };
+    Ok(run)
 }
 
 /// 分配一个物理页帧。
 ///
 /// 返回的页内容未初始化；读取前必须先写入有效内容。
-pub fn allocate_frame() -> Result<PhysicalFrame, FrameError> {
+pub(super) fn allocate_frame() -> Result<PhysicalFrame, FrameError> {
     // 安全性：当前分配只发生在启动期或 S-mode 陷入处理路径，不会被定时器重入；项目仅启用单 hart。
     unsafe { (*core::ptr::addr_of_mut!(FRAME_ALLOCATOR)).allocate() }
 }
 
 /// 分配一个物理页帧，并将整页内容清零。
-pub fn allocate_zeroed_frame() -> Result<PhysicalFrame, FrameError> {
+pub(super) fn allocate_zeroed_frame() -> Result<PhysicalFrame, FrameError> {
     let frame = allocate_frame()?;
     // 安全性：frame 是当前调用独占持有的已分配页，且页池在 S-mode 下可写并保持恒等映射。
     unsafe {
@@ -244,60 +403,30 @@ pub fn allocate_zeroed_frame() -> Result<PhysicalFrame, FrameError> {
     Ok(frame)
 }
 
-/// 连续分配指定数量的页帧并清零，适用于需要连续虚拟栈区的内核栈。
-pub fn allocate_contiguous_zeroed_frames(
-    frame_count: usize,
-) -> Result<Vec<PhysicalFrame>, FrameError> {
-    // 安全性：当前分配只发生在启动期或 S-mode 陷入处理路径，不会被定时器重入；项目仅启用单 hart。
-    let frames =
-        unsafe { (*core::ptr::addr_of_mut!(FRAME_ALLOCATOR)).allocate_contiguous(frame_count)? };
-    for frame in &frames {
-        // 安全性：frames 中每个令牌独占一张已分配页，页池在 S-mode 下保持恒等映射且可写。
-        unsafe { core::ptr::write_bytes(frame.start_address as *mut u8, 0, PAGE_SIZE) };
-    }
-    Ok(frames)
-}
-
-/// 分配并清零指定数量的任意页帧，失败时归还本次已取得的全部页帧。
-pub fn allocate_zeroed_frames(frame_count: usize) -> Result<Vec<PhysicalFrame>, FrameError> {
-    if frame_count == 0 {
-        return Err(FrameError::OutOfFrames);
-    }
-
-    let mut frames = Vec::new();
-    frames
-        .try_reserve_exact(frame_count)
-        .map_err(|_| FrameError::MetadataAllocation)?;
-    for _ in 0..frame_count {
-        match allocate_zeroed_frame() {
-            Ok(frame) => frames.push(frame),
-            Err(error) => {
-                let mut release_failed = false;
-                while let Some(frame) = frames.pop() {
-                    if deallocate_frame(frame).is_err() {
-                        release_failed = true;
-                    }
-                }
-                if release_failed {
-                    return Err(FrameError::RollbackFailed);
-                }
-                return Err(error);
-            }
-        }
-    }
-    Ok(frames)
-}
-
 /// 释放此前由该分配器分配的页帧。
-pub fn deallocate_frame(frame: PhysicalFrame) -> Result<(), FrameError> {
+pub(super) fn deallocate_frame(frame: PhysicalFrame) -> Result<(), FrameError> {
     // 安全性：当前释放只发生在启动期或 S-mode 陷入处理路径，不会被定时器重入；项目仅启用单 hart。
     unsafe { (*core::ptr::addr_of_mut!(FRAME_ALLOCATOR)).deallocate(frame) }
 }
 
+/// 归还一段连续页帧。
+pub(super) fn deallocate_run(run: PhysicalFrameRun) -> Result<(), FrameError> {
+    // 安全性：调用方移交独占的连续页帧令牌；单 hart 分配器不会并发修改空闲区间。
+    unsafe { (*core::ptr::addr_of_mut!(FRAME_ALLOCATOR)).deallocate_run(run) }
+}
+
 /// 返回页池中当前空闲页帧的数量。
-pub fn free_frame_count() -> Result<usize, FrameError> {
+pub(super) fn free_frame_count() -> Result<usize, FrameError> {
     // 安全性：当前读取只发生在启动期或 S-mode 陷入处理路径，不会被定时器重入；项目仅启用单 hart。
     unsafe { (*core::ptr::addr_of!(FRAME_ALLOCATOR)).free_count() }
+}
+
+/// 返回 FDT 描述的 RAM 范围，供地址空间建立内核恒等映射。
+pub(super) fn physical_memory_regions() -> Result<&'static [PhysicalMemoryRegion], FrameError> {
+    // 安全性：初始化完成后范围数组保持不变；返回切片不暴露分配器的可变状态。
+    let allocator = unsafe { &*core::ptr::addr_of!(FRAME_ALLOCATOR) };
+    allocator.ensure_initialized()?;
+    Ok(&allocator.memory_regions[..allocator.memory_region_count])
 }
 
 /// 检查物理地址是否对应页池中当前已分配的页帧。
@@ -307,10 +436,8 @@ pub(crate) fn is_allocated_frame_address(address: usize) -> bool {
 }
 
 /// 检查页帧分配、对齐、释放复用和完整归还。
-pub(crate) fn check_allocation() -> Result<(), FrameError> {
-    if free_frame_count()? != FRAME_COUNT {
-        return Err(FrameError::UnexpectedFreeCount);
-    }
+pub(super) fn check_allocation() -> Result<(), FrameError> {
+    let initial_free_count = free_frame_count()?;
 
     let first = allocate_frame()?;
     let second = allocate_frame()?;
@@ -326,7 +453,7 @@ pub(crate) fn check_allocation() -> Result<(), FrameError> {
     }
 
     let second_address = second.start_address();
-    // 安全性：自检独占持有 second，且该令牌代表页池内一整张可写页。
+    // 安全性：自检独占持有 second，且该令牌代表 RAM 中一整张可写页。
     unsafe { core::ptr::write_bytes(second.start_address as *mut u8, 0xa5, PAGE_SIZE) };
     deallocate_frame(second)?;
     let reused = allocate_zeroed_frame()?;
@@ -340,41 +467,44 @@ pub(crate) fn check_allocation() -> Result<(), FrameError> {
     deallocate_frame(first)?;
     deallocate_frame(reused)?;
     deallocate_frame(third)?;
-    if free_frame_count()? != FRAME_COUNT {
+    if free_frame_count()? != initial_free_count {
         return Err(FrameError::UnexpectedFreeCount);
     }
 
     crate::klog_info!(
-        "物理页帧分配器自检通过：页池起始={:#018x}，页数={}，页大小={} 字节；对齐、独立分配、脏页清零、释放复用和完整归还均符合预期",
-        core::ptr::addr_of!(FRAME_STORAGE) as usize,
-        FRAME_COUNT,
+        "物理页帧分配器自检通过：可用页数={}，页大小={} 字节；对齐、独立分配、脏页清零、释放复用和完整归还均符合预期",
+        initial_free_count,
         PAGE_SIZE
     );
     Ok(())
 }
 
 fn frame_is_zeroed(frame: &PhysicalFrame) -> bool {
-    // 安全性：调用方持有该页帧的唯一令牌，地址和长度都落在固定可读页池内。
+    // 安全性：调用方持有该页帧的唯一令牌，地址和长度都位于已分配的恒等映射 RAM 中。
     let bytes = unsafe { core::slice::from_raw_parts(frame.start_address as *const u8, PAGE_SIZE) };
     bytes.iter().all(|byte| *byte == 0)
 }
 
-/// 描述固定物理页池的初始化和页帧操作错误。
+/// 描述 FDT 物理内存管理和页帧操作错误。
 #[derive(Clone, Copy)]
-pub enum FrameError {
-    /// 页池地址未对齐或其地址范围溢出。
-    InvalidPool,
+pub(super) enum FrameError {
+    /// FDT 描述的物理内存范围无效或地址换算溢出。
+    InvalidMemoryRange,
+    /// FDT 描述的 RAM 区域数量超过固定启动信息容量。
+    TooManyMemoryRegions,
+    /// 扣除内核、DTB 和固件保留区域后没有可分配页帧。
+    NoUsableMemory,
+    /// 可用物理内存被切分为过多区间。
+    TooManyFreeRanges,
     /// 分配器尚未初始化。
     NotInitialized,
     /// 分配器已经初始化，不能重复清空分配状态。
     AlreadyInitialized,
-    /// 页池中的所有页帧均已分配。
+    /// 连续页帧分配请求的数量为零。
+    ZeroFrameCount,
+    /// 所有可用页帧均已分配，或没有足够大的连续范围。
     OutOfFrames,
-    /// 无法为页帧所有权记录分配内核堆内存。
-    MetadataAllocation,
-    /// 分配失败后无法完整归还本次已经取得的页帧。
-    RollbackFailed,
-    /// 要释放的页帧不属于当前页池或地址未按页对齐。
+    /// 要释放的页帧不属于 FDT 确认的可用范围或地址未按页对齐。
     FrameOutsidePool,
     /// 页帧已经处于空闲状态。
     FrameAlreadyFree,
@@ -390,15 +520,17 @@ pub enum FrameError {
 
 impl FrameError {
     /// 返回用于启动诊断的错误说明。
-    pub fn description(self) -> &'static str {
+    pub(super) fn description(self) -> &'static str {
         match self {
-            Self::InvalidPool => "物理页帧池地址无效",
+            Self::InvalidMemoryRange => "FDT 物理内存范围无效或地址计算溢出",
+            Self::TooManyMemoryRegions => "FDT RAM 区域数量超过物理页帧分配器容量",
+            Self::NoUsableMemory => "FDT RAM 中没有可分配的物理页帧",
+            Self::TooManyFreeRanges => "可用物理内存区间数量超过物理页帧分配器容量",
             Self::NotInitialized => "物理页帧分配器尚未初始化",
             Self::AlreadyInitialized => "物理页帧分配器重复初始化",
-            Self::OutOfFrames => "物理页帧池已耗尽",
-            Self::MetadataAllocation => "无法为页帧所有权记录分配内核堆内存",
-            Self::RollbackFailed => "页帧分配失败后无法完整回滚",
-            Self::FrameOutsidePool => "待释放页帧不属于物理页池",
+            Self::ZeroFrameCount => "连续页帧分配数量不能为零",
+            Self::OutOfFrames => "可用物理页帧已耗尽或连续范围不足",
+            Self::FrameOutsidePool => "待释放页帧不属于 FDT 确认的可用物理内存",
             Self::FrameAlreadyFree => "物理页帧已被释放",
             Self::InvalidAllocation => "页帧分配未满足对齐或唯一性要求",
             Self::UnexpectedFreeCount => "物理页帧自检后的空闲页数不符",

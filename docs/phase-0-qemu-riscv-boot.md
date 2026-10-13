@@ -36,7 +36,7 @@ RISC-V `unknown-none-elf` target 提供无操作系统运行时的 ELF 构建目
 
 - `src/arch/riscv64/boot.S`：汇编入口，处理单 hart 策略、栈、`gp` 和 `.bss`，再调用 Rust。
 - `src/main.rs`：内核入口和 panic 停机路径。
-- `src/arch/riscv64/console.rs`：仅用于当前 QEMU 平台的轮询式 UART 输出。
+- 当前 QEMU `virt` 的轮询式 UART 输出实现在 `src/device/uart16550.rs`；早期阶段曾位于 `src/arch/riscv64/console.rs`。
 - `linker.ld`：ELF 入口、内存布局和 16 KiB 引导栈。
 - `.cargo/config.toml`：默认 target、链接脚本参数和 `cargo run` runner。
 - `scripts/run-qemu.sh`：集中维护平台参数，并检查 QEMU 与内核 ELF 是否存在。

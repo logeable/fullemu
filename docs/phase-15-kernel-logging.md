@@ -6,19 +6,19 @@
 
 ## 实现范围
 
-- `arch::riscv64::console` 继续负责 UART 字节传输；`kernel::logging` 负责日志级别、调用模块名称和统一前缀。
+- 当时由 `arch::riscv64::console` 负责 UART 字节传输；当前该驱动已移至 `device::uart16550`，`device::console` 提供统一字节接口，`kernel::logging` 负责日志级别、调用模块名称和统一前缀。
 - `klog_error!`、`klog_warn!`、`klog_info!`、`klog_debug!` 和 `klog_trace!` 宏通过 `module_path!()` 自动记录来源。
 - 日志格式为 `[LEVEL time=秒.微秒s module::path] message`，使用 `core::fmt` 同步写入 UART，不申请堆内存，也不引入第三方依赖。每条通过级别过滤的日志读取一次 RISC-V `time` 计数器，避免被过滤的日志产生额外计时读取。
 - 显示时间由单调递增的硬件时间计数换算而来，不是调度器周期 tick，也不是日历时间。当前按 QEMU `virt` 的 `timebase-frequency=10 MHz` 换算为秒和微秒；时间起点由平台计数器决定，不代表操作系统启动时刻。日志前缀不输出原始计数值。
 - 日志阈值通过编译时环境变量 `FULLEMU_LOG_LEVEL` 选择，级别为 `off`、`error`、`warn`、`info`、`debug`、`trace`；未设置时默认使用 `info`。较高级别自动包含较低级别，例如 `debug` 同时保留错误、警告和信息日志；未识别的值按 `info` 处理。
-- 启动摘要、致命错误、U-mode 启动/退出和未处理陷入已改为使用日志。FDT 头部与内存范围使用 `Debug`，结构节点与属性使用 `Trace`，所以默认启动不显示这些明细；指定 `LOG_LEVEL=debug` 或 `LOG_LEVEL=trace` 可重新查看。用户 `write` 始终输出不带内核前缀的原始字节。
+- 启动摘要、致命错误、U-mode 启动/退出和未处理陷入已改为使用日志。FDT 头部与内存范围使用 `Debug`，结构节点与属性使用 `Trace`；属性日志包含原始十六进制字节，方便区分文本、cell 和其他二进制值。默认启动不显示这些明细；指定 `LOG_LEVEL=debug` 或 `LOG_LEVEL=trace` 可重新查看。关闭 Trace 时不会为属性诊断额外遍历结构块。用户 `write` 始终输出不带内核前缀的原始字节。
 
 ## 暂不实现
 
 - 不提供日历时间或真实墙上时钟。换算频率固定为 QEMU `virt` 的 10 MHz；其他平台必须先提供正确的 `timebase-frequency`，否则可读时间值不准确。
 - 没有日志缓冲区、串口锁或跨 hart 同步。当前基准运行仅使用一个 hart，日志通过轮询串口同步输出；多个可抢占写入者可能让一条记录交错。
 - 阈值只在编译时选择，尚无启动参数或运行时配置。设置为 `off` 可关闭全部内核日志。
-- UART 驱动仍固定适配 QEMU `virt`；更换平台时需要替换底层 console，而日志策略接口保持不变。
+- UART 驱动仍固定适配 QEMU `virt`；更换平台时需要替换底层设备实现，而日志策略接口保持不变。
 
 ## 运行与验收
 

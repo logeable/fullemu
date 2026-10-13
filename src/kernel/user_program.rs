@@ -17,53 +17,53 @@ extern "C" {
 }
 
 /// 已复制到内存中的用户程序入口和镜像信息。
-pub struct LoadedUserProgram {
+pub(super) struct LoadedUserProgram {
     /// 用户程序在构建清单中的名称。
-    pub name: &'static str,
+    pub(super) name: &'static str,
     /// 用户程序入口地址。
-    pub entry: usize,
+    pub(super) entry: usize,
     /// 用户程序链接时使用的固定虚拟起始地址。
-    pub virtual_start: usize,
+    pub(super) virtual_start: usize,
     /// 用户程序固定加载槽位的起始地址。
-    pub slot_start: usize,
+    pub(super) slot_start: usize,
     /// 用户程序固定加载槽位的结束地址。
-    pub slot_end: usize,
+    pub(super) slot_end: usize,
     /// 从独立构建产物复制的字节数。
-    pub image_size: usize,
+    pub(super) image_size: usize,
 }
 
 /// 固定加载区容量不足时返回该错误。
-pub struct UserProgramLoadError {
+pub(super) struct UserProgramLoadError {
     /// 无法装入的用户程序名称。
-    pub program_name: &'static str,
+    pub(super) program_name: &'static str,
     /// 用户程序镜像实际长度。
-    pub image_size: usize,
+    pub(super) image_size: usize,
     /// 链接脚本预留的加载区长度。
-    pub capacity: usize,
+    pub(super) capacity: usize,
     description: &'static str,
 }
 
 impl UserProgramLoadError {
     /// 返回用于启动诊断的错误说明。
-    pub fn description(&self) -> &'static str {
+    pub(super) fn description(&self) -> &'static str {
         self.description
     }
 }
 
 /// 按构建清单名称查找程序索引。
-pub fn find_index(name: &str) -> Option<usize> {
+pub(super) fn find_index(name: &str) -> Option<usize> {
     USER_PROGRAMS
         .iter()
         .position(|program| program.name == name)
 }
 
 /// 返回构建清单中的用户程序数量。
-pub fn count() -> usize {
+pub(super) fn count() -> usize {
     USER_PROGRAMS.len()
 }
 
 /// 将指定程序装入独立槽位；索引超出清单时表示没有该程序。
-pub fn load(index: usize) -> Result<Option<LoadedUserProgram>, UserProgramLoadError> {
+pub(super) fn load(index: usize) -> Result<Option<LoadedUserProgram>, UserProgramLoadError> {
     let Some(program) = USER_PROGRAMS.get(index) else {
         return Ok(None);
     };

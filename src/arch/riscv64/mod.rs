@@ -1,6 +1,5 @@
 //! 首个 QEMU 目标所需的 RISC-V 64 位启动代码和平台支持。
 
-pub mod console;
 // 此上下文切换实现保留第 8 阶段的调用点切换示例，当前默认实验改用完整陷入帧。
 #[allow(dead_code)]
 pub mod context;

@@ -1,8 +1,9 @@
 //! 遍历 Sv39 页表并输出连续虚拟/物理映射范围，供启动调试使用。
 
-use super::{
-    address_space_count, address_space_root, canonicalize_sv39, PageTable, PAGE_MASK,
-    PAGE_TABLE_ENTRIES, PTE_EXECUTE, PTE_READ, PTE_USER, PTE_VALID, PTE_WRITE,
+use super::address_space::{address_space_count, address_space_root};
+use super::page_table::{
+    canonicalize_sv39, PageTable, PAGE_MASK, PAGE_TABLE_ENTRIES, PTE_EXECUTE, PTE_READ, PTE_USER,
+    PTE_VALID, PTE_WRITE,
 };
 
 /// 以调试日志输出每个任务页表中的有效映射。

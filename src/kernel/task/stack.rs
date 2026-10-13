@@ -1,10 +1,10 @@
 //! 管理任务内核栈和用户栈的页帧所有权。
 //!
-//! 内核栈要求物理页连续，以恒等映射形成连续栈地址；用户栈通过页表逐页映射，物理页可以分散。
+//! 内核栈要求物理页连续，以恒等映射形成连续栈地址；用户栈逐页映射，物理页可以分散。
 
 use alloc::vec::Vec;
 
-use crate::kernel::frame_allocator::{self, FrameError, PhysicalFrame};
+use crate::kernel::frame_allocator::{self, FrameError, PhysicalFrame, PhysicalFrameRun};
 
 const PAGE_SIZE: usize = 4096;
 const USER_STACK_SIZE: usize = 16 * 1024;
@@ -12,54 +12,46 @@ const KERNEL_STACK_SIZE: usize = 16 * 1024;
 const USER_STACK_TOP: usize = (1usize << 38) - PAGE_SIZE;
 const STACK_PAGE_COUNT: usize = USER_STACK_SIZE / PAGE_SIZE;
 
-struct StackBacking {
-    frames: Vec<PhysicalFrame>,
+/// 描述任务栈页帧分配失败。
+pub(super) enum StackError {
+    Frame(FrameError),
+    MetadataAllocation,
+    RollbackFailed,
 }
 
-impl StackBacking {
-    fn allocate_contiguous(page_count: usize) -> Result<Self, FrameError> {
-        let frames = frame_allocator::allocate_contiguous_zeroed_frames(page_count)?;
-        Ok(Self { frames })
-    }
-
-    fn allocate_scattered(page_count: usize) -> Result<Self, FrameError> {
-        let frames = frame_allocator::allocate_zeroed_frames(page_count)?;
-        Ok(Self { frames })
-    }
-
-    fn first_address(&self) -> usize {
-        self.frames[0].start_address()
-    }
-
-    fn size(&self) -> usize {
-        self.frames.len() * PAGE_SIZE
-    }
-}
-
-impl Drop for StackBacking {
-    fn drop(&mut self) {
-        while let Some(frame) = self.frames.pop() {
-            if let Err(error) = frame_allocator::deallocate_frame(frame) {
-                crate::klog_error!("释放任务栈页帧失败：{}", error.description());
-                super::stop_forever();
-            }
+impl StackError {
+    pub(super) fn description(&self) -> &'static str {
+        match self {
+            Self::Frame(error) => error.description(),
+            Self::MetadataAllocation => "无法为用户栈页帧所有权分配内核堆内存",
+            Self::RollbackFailed => "用户栈分配失败后无法归还已取得的页帧",
         }
     }
 }
 
+impl From<FrameError> for StackError {
+    fn from(error: FrameError) -> Self {
+        Self::Frame(error)
+    }
+}
+
 pub(super) struct KernelStack {
-    backing: StackBacking,
+    backing: Option<PhysicalFrameRun>,
 }
 
 impl KernelStack {
-    pub(super) fn allocate() -> Result<Self, FrameError> {
+    pub(super) fn allocate() -> Result<Self, StackError> {
+        let backing = frame_allocator::allocate_zeroed_run(KERNEL_STACK_SIZE / PAGE_SIZE)?;
         Ok(Self {
-            backing: StackBacking::allocate_contiguous(KERNEL_STACK_SIZE / PAGE_SIZE)?,
+            backing: Some(backing),
         })
     }
 
     pub(super) fn top(&self) -> usize {
-        self.backing.first_address() + self.backing.size()
+        let Some(backing) = self.backing.as_ref() else {
+            super::stop_forever();
+        };
+        backing.start_address() + backing.size()
     }
 
     pub(super) fn range(&self) -> (usize, usize) {
@@ -67,19 +59,46 @@ impl KernelStack {
     }
 }
 
+impl Drop for KernelStack {
+    fn drop(&mut self) {
+        if let Some(backing) = self.backing.take() {
+            if let Err(error) = frame_allocator::deallocate_run(backing) {
+                crate::klog_error!("释放任务内核栈页帧失败：{}", error.description());
+                super::stop_forever();
+            }
+        }
+    }
+}
+
 pub(super) struct UserStack {
-    backing: StackBacking,
+    frames: Vec<PhysicalFrame>,
 }
 
 impl UserStack {
-    pub(super) fn allocate() -> Result<Self, FrameError> {
-        Ok(Self {
-            backing: StackBacking::allocate_scattered(STACK_PAGE_COUNT)?,
-        })
+    pub(super) fn allocate() -> Result<Self, StackError> {
+        let mut frames = Vec::new();
+        frames
+            .try_reserve_exact(STACK_PAGE_COUNT)
+            .map_err(|_| StackError::MetadataAllocation)?;
+
+        for _ in 0..STACK_PAGE_COUNT {
+            match frame_allocator::allocate_zeroed_frame() {
+                Ok(frame) => frames.push(frame),
+                Err(error) => {
+                    while let Some(frame) = frames.pop() {
+                        if frame_allocator::deallocate_frame(frame).is_err() {
+                            return Err(StackError::RollbackFailed);
+                        }
+                    }
+                    return Err(StackError::Frame(error));
+                }
+            }
+        }
+        Ok(Self { frames })
     }
 
     pub(super) fn start(&self) -> usize {
-        USER_STACK_TOP - self.backing.size()
+        USER_STACK_TOP - self.frames.len() * PAGE_SIZE
     }
 
     pub(super) fn top(&self) -> usize {
@@ -91,6 +110,17 @@ impl UserStack {
     }
 
     pub(super) fn frames(&self) -> &[PhysicalFrame] {
-        &self.backing.frames
+        &self.frames
+    }
+}
+
+impl Drop for UserStack {
+    fn drop(&mut self) {
+        while let Some(frame) = self.frames.pop() {
+            if let Err(error) = frame_allocator::deallocate_frame(frame) {
+                crate::klog_error!("释放任务用户栈页帧失败：{}", error.description());
+                super::stop_forever();
+            }
+        }
     }
 }

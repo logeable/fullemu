@@ -6,6 +6,7 @@
 extern crate alloc;
 
 mod arch;
+mod device;
 mod kernel;
 
 /// RISC-V 汇编完成栈和 `.bss` 初始化后，将 hart ID 与 FDT 地址传入此入口。

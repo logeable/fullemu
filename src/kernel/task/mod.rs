@@ -37,7 +37,7 @@ static mut CURRENT_TASK_INDEX: usize = 0;
 static mut PENDING_KERNEL_STACK_RELEASE: Option<usize> = None;
 
 /// 装入构建配置指定的入口用户程序并开始运行。
-pub fn run_boot_program() -> ! {
+pub(super) fn run_boot_program() -> ! {
     let Some(program_index) = super::user_program::find_index(BOOT_PROGRAM_NAME) else {
         crate::klog_error!("用户程序清单中没有入口程序：{BOOT_PROGRAM_NAME}");
         stop_forever();
@@ -47,7 +47,7 @@ pub fn run_boot_program() -> ! {
 }
 
 /// 同时装入并调度构建清单中的全部程序。
-pub fn run_batch_programs() -> ! {
+pub(super) fn run_batch_programs() -> ! {
     let program_count = super::user_program::count();
     if program_count == 0 || program_count > MAX_USER_TASKS {
         crate::klog_error!("批处理程序数量无效：{program_count}");
@@ -202,7 +202,8 @@ fn start_programs(program_indices: &[usize]) -> ! {
         });
     }
 
-    // 安全性：页表初始化前仍处于恒等寻址模式；页帧池及内核栈均位于内核 BSS 范围。
+    // 安全性：页表初始化前仍使用恒等地址；分配器元数据位于内核 BSS。
+    // 页帧和内核栈由 FDT 可用 RAM 提供，并将在 Sv39 初始化中建立恒等映射。
     let kernel_end = core::ptr::addr_of!(__bss_end) as usize;
     if let Err(error) = super::memory::initialize(
         kernel_end,
