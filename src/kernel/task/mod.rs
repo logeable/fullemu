@@ -452,6 +452,12 @@ fn stop_forever() -> ! {
 }
 
 extern "C" {
-    static __kernel_start: u8;
+    static __text_start: u8;
+    static __text_end: u8;
+    static __rodata_start: u8;
+    static __rodata_end: u8;
+    static __data_start: u8;
+    static __data_end: u8;
+    static __bss_start: u8;
     static __bss_end: u8;
 }

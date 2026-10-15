@@ -95,13 +95,28 @@ fn create_task_inner(program_index: usize) -> Result<TaskId, TaskCreationError> 
         physical_start: program.slot_start,
         size: program.slot_end - program.slot_start,
     };
-    let kernel_start = core::ptr::addr_of!(super::__kernel_start) as usize;
-    let kernel_end = core::ptr::addr_of!(super::__bss_end) as usize;
+    let kernel_layout = super::super::memory::KernelMemoryLayout {
+        text: super::super::memory::KernelSectionRange {
+            start: core::ptr::addr_of!(super::__text_start) as usize,
+            end: core::ptr::addr_of!(super::__text_end) as usize,
+        },
+        rodata: super::super::memory::KernelSectionRange {
+            start: core::ptr::addr_of!(super::__rodata_start) as usize,
+            end: core::ptr::addr_of!(super::__rodata_end) as usize,
+        },
+        data: super::super::memory::KernelSectionRange {
+            start: core::ptr::addr_of!(super::__data_start) as usize,
+            end: core::ptr::addr_of!(super::__data_end) as usize,
+        },
+        bss: super::super::memory::KernelSectionRange {
+            start: core::ptr::addr_of!(super::__bss_start) as usize,
+            end: core::ptr::addr_of!(super::__bss_end) as usize,
+        },
+    };
 
     super::super::memory::create_address_space(
         task_id.index(),
-        kernel_start,
-        kernel_end,
+        kernel_layout,
         &user_stack_mapping,
         user_image_mapping,
     )

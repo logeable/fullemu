@@ -10,7 +10,6 @@ HOST_TARGET := $(shell rustc -vV | sed -n 's/^host: //p')
 KERNEL := target/$(TARGET)/release/fullemu
 USER_BUILD_DIR := user/target/$(TARGET)/release
 USER_IMAGE_MANIFEST := $(USER_BUILD_DIR)/user-programs.manifest
-USER_LAYOUT_FILE := $(USER_BUILD_DIR)/user-program-layout
 USER_BIN_SOURCES := $(filter-out user/src/bin/disabled-%,$(wildcard user/src/bin/*.rs))
 USER_BIN_NAMES := $(patsubst user/src/bin/%.rs,%,$(USER_BIN_SOURCES))
 ifeq ($(BOOT_MODE),batch)
@@ -29,16 +28,16 @@ build-kernel:
 	FULLEMU_USER_IMAGE_MANIFEST= FULLEMU_LOG_LEVEL=$(LOG_LEVEL) FULLEMU_BOOT_PROGRAM=$(BOOT_PROGRAM) FULLEMU_BOOT_MODE=$(BOOT_MODE) $(CARGO) build --release --target $(TARGET)
 
 build-user:
-	cd user && FULLEMU_USER_LAYOUT_FILE="$(CURDIR)/$(USER_LAYOUT_FILE)" FULLEMU_BOOT_MODE=$(BOOT_MODE) FULLEMU_BATCH_EXCLUDED_BINS="$(BATCH_EXCLUDED_BINS)" $(CARGO) build --release --target $(TARGET) $(USER_BIN_FLAGS)
+	cd user && $(CARGO) build --release --target $(TARGET) $(USER_BIN_FLAGS)
 	@set -eu; \
 	manifest_tmp="$(USER_IMAGE_MANIFEST).tmp"; \
 	: > "$$manifest_tmp"; \
-	while read -r program_name link_address; do \
+	for program_name in $(USER_BIN_NAMES); do \
 		program_elf="$(USER_BUILD_DIR)/$$program_name"; \
 		program_image="$$program_elf.bin"; \
 		$(OBJCOPY) --strip-all -O binary "$$program_elf" "$$program_image"; \
-		printf '%s %s %s\n' "$$program_name" "$$link_address" "$$program_image" >> "$$manifest_tmp"; \
-	done < "$(USER_LAYOUT_FILE)"; \
+		printf '%s %s\n' "$$program_name" "$$program_image" >> "$$manifest_tmp"; \
+	done; \
 	mv "$$manifest_tmp" "$(USER_IMAGE_MANIFEST)"
 
 run: build

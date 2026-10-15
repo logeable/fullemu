@@ -14,7 +14,7 @@ make run
 
 内核默认以 shell 模式启动 `shell`。运行 `make run BOOT_MODE=batch` 可启动多道程序批处理；默认通过 `BATCH_EXCLUDED_BINS=shell` 在构建时排除交互式 shell。可调整该变量指定不参与批处理的程序。也可在 shell 模式下选择其他入口，例如 `make run BOOT_PROGRAM=memory_fault`。这两项配置分别选择运行模式和 shell 模式的入口程序。
 
-`make build` 会先构建独立的 `user/` 程序，将每个 bin 链接到共同虚拟地址 `0x80400000`，再把 ELF 转换为原始二进制并由内核复制到各自的固定物理槽位。`user/target/riscv64gc-unknown-none-elf/release/user-programs.manifest` 记录程序名、虚拟基址和镜像路径；链接脚本保证入口位于虚拟基址，内核构建会校验所有程序使用统一虚拟基址，运行时页表将其映射到当前程序的物理槽位。以 `disabled-` 开头的 bin 源文件会被 `make build-user` 和用户构建脚本忽略；新增或移除其他 `user/src/bin/` 程序时，布局及镜像清单会随 `make build-user` 更新。若只需编译不含用户程序的内核，可运行 `make build-kernel` 或直接运行 `cargo build --target riscv64gc-unknown-none-elf`。当前 syscall 仅实现上述 Linux ABI 的有限子集，不代表已兼容完整 Linux 用户态。按 `Ctrl-C` 结束 QEMU。
+`make build` 会先构建独立的 `user/` 程序，所有 bin 都通过同一链接脚本链接到共同虚拟地址 `0x40000000`，再把 ELF 转换为原始二进制并由内核复制到各自的固定物理槽位（当前从 `0x80400000` 开始）。`user/target/riscv64gc-unknown-none-elf/release/user-programs.manifest` 只记录程序名和镜像路径；共同虚拟基址由 `user/linker.ld` 与内核装载器约定，运行时页表将该地址映射到当前程序的物理槽位。以 `disabled-` 开头的 bin 源文件会被 `make build-user` 忽略；新增或移除其他 `user/src/bin/` 程序时，镜像清单会随 `make build-user` 更新。若只需编译不含用户程序的内核，可运行 `make build-kernel` 或直接运行 `cargo build --target riscv64gc-unknown-none-elf`。当前 syscall 仅实现上述 Linux ABI 的有限子集，不代表已兼容完整 Linux 用户态。按 `Ctrl-C` 结束 QEMU。
 
 若 QEMU 可执行文件不在 PATH，可运行 `make run QEMU=/path/to/qemu-system-riscv64`。也可以单独运行 `make build-user` 构建用户程序。
 
@@ -54,4 +54,7 @@ make run
 - [第 30 阶段：FDT 驱动的物理页帧与堆后备区](docs/phase-30-fdt-backed-physical-memory.md) 记录按 FDT RAM 范围构造可用页帧区间，并由页帧分配器为内核堆提供后备页。
 - [第 31 阶段：从 FDT 发现 UART 控制台](docs/phase-31-fdt-uart-discovery.md) 记录启动时读取 UART 寄存器范围并配置控制台驱动。
 - [第 32 阶段：单任务创建与失败回滚](docs/phase-32-single-task-creation.md) 记录批处理和 shell 共用的单任务准备路径、追加式 `TaskId` 及资源回收边界。
+- [第 33 阶段：Sv39 内核与用户地址空间规划](docs/phase-33-sv39-address-space-plan.md) 盘点当前实际映射，明确低半部用户区、高半部内核区的目标约定及后续迁移顺序。
+- [第 34 阶段：分离用户镜像虚拟地址与物理槽位](docs/phase-34-user-image-virtual-address.md) 将用户程序共同入口迁到 `0x40000000`，避免覆盖 QEMU RAM 恒等映射，并保留固定物理镜像槽位。
+- [第 35 阶段：按链接段设置内核页权限](docs/phase-35-kernel-section-permissions.md) 按 4 KiB 页边界将内核代码、只读数据和可写数据映射为不同权限。
 - [项目原则与代码规范](docs/development-principles.md) 是设计和协作规范。

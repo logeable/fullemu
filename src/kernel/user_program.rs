@@ -1,11 +1,10 @@
 //! 管理同时驻留的用户程序镜像，并复制到各自固定的物理加载槽位。
 
 const USER_PROGRAM_SLOT_SIZE: usize = 64 * 1024;
-const USER_PROGRAM_VIRTUAL_BASE: usize = 0x8040_0000;
+const USER_PROGRAM_VIRTUAL_BASE: usize = 0x4000_0000;
 
 struct UserProgramImage {
     name: &'static str,
-    linked_base: usize,
     bytes: &'static [u8],
 }
 
@@ -106,14 +105,6 @@ pub(super) fn load(index: usize) -> Result<Option<LoadedUserProgram>, UserProgra
             description: "用户程序镜像超过固定加载槽位容量",
         });
     }
-    if program.linked_base != USER_PROGRAM_VIRTUAL_BASE {
-        return Err(UserProgramLoadError {
-            program_name: program.name,
-            image_size: program.bytes.len(),
-            capacity,
-            description: "用户程序没有链接到统一的虚拟起始地址",
-        });
-    }
     // 安全性：链接脚本保证加载区位于内核映像之后且落在 QEMU RAM 内；
     // 编译期嵌入的源镜像与目标物理槽位不重叠，镜像长度和槽位边界已在复制前检查。
     unsafe {
@@ -128,8 +119,8 @@ pub(super) fn load(index: usize) -> Result<Option<LoadedUserProgram>, UserProgra
 
     Ok(Some(LoadedUserProgram {
         name: program.name,
-        entry: program.linked_base,
-        virtual_start: program.linked_base,
+        entry: USER_PROGRAM_VIRTUAL_BASE,
+        virtual_start: USER_PROGRAM_VIRTUAL_BASE,
         slot_start,
         slot_end,
         image_size: program.bytes.len(),

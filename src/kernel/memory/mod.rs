@@ -9,18 +9,11 @@ mod user_access;
 /// 为单个任务建立独立地址空间；失败时不保留部分页表。
 pub(super) fn create_address_space(
     address_space_index: usize,
-    kernel_start: usize,
-    kernel_end: usize,
+    kernel_layout: KernelMemoryLayout,
     user_stack: &UserStackMapping<'_>,
     user_image: UserImageMapping,
 ) -> Result<(), PageTableError> {
-    address_space::create_address_space(
-        address_space_index,
-        kernel_start,
-        kernel_end,
-        user_stack,
-        user_image,
-    )
+    address_space::create_address_space(address_space_index, kernel_layout, user_stack, user_image)
 }
 
 /// 切换到指定任务的 Sv39 根页表。
@@ -59,6 +52,22 @@ pub(super) struct UserImageMapping {
     pub(super) virtual_start: usize,
     pub(super) physical_start: usize,
     pub(super) size: usize,
+}
+
+/// 描述需要分别设置页表权限的内核链接段范围。
+#[derive(Clone, Copy)]
+pub(super) struct KernelMemoryLayout {
+    pub(super) text: KernelSectionRange,
+    pub(super) rodata: KernelSectionRange,
+    pub(super) data: KernelSectionRange,
+    pub(super) bss: KernelSectionRange,
+}
+
+/// 描述一个内核链接段的虚拟地址范围，结束地址不包含在范围内。
+#[derive(Clone, Copy)]
+pub(super) struct KernelSectionRange {
+    pub(super) start: usize,
+    pub(super) end: usize,
 }
 
 /// 描述一个任务的用户栈虚拟起点及其拥有的物理页帧。

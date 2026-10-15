@@ -53,4 +53,4 @@ make run BOOT_MODE=batch LOG_LEVEL=info
 
 ## 后续连接
 
-在此基础上可实现 shell 前台 `run <程序名>`：shell 请求创建任务、等待其退出，再恢复 shell。该实验还需明确调度器如何在 shell 等待期间运行新任务、退出状态如何返回，以及固定镜像槽何时可以再次使用；不需要先实现文件系统或后台任务。
+在实现 shell 前台 `run <程序名>` 前，已通过[第 33 阶段：Sv39 内核与用户地址空间规划](phase-33-sv39-address-space-plan.md)明确地址契约，并在[第 34 阶段：分离用户镜像虚拟地址与物理槽位](phase-34-user-image-virtual-address.md)将镜像入口移出 RAM 恒等映射范围。之后可让 shell 请求创建任务、等待其退出并恢复运行；该实验还需明确退出状态和固定镜像槽的复用约束，不需要先实现文件系统或后台任务。

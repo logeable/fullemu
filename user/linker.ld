@@ -2,7 +2,7 @@
 OUTPUT_ARCH(riscv)
 ENTRY(_start)
 
-PROVIDE(__user_image_base = 0x80400000);
+PROVIDE(__user_image_base = 0x40000000);
 
 SECTIONS
 {

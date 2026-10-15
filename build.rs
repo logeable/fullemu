@@ -5,7 +5,6 @@ use std::path::{Path, PathBuf};
 const IMAGE_MANIFEST_ENV: &str = "FULLEMU_USER_IMAGE_MANIFEST";
 const BOOT_PROGRAM_ENV: &str = "FULLEMU_BOOT_PROGRAM";
 const BOOT_MODE_ENV: &str = "FULLEMU_BOOT_MODE";
-const USER_PROGRAM_VIRTUAL_BASE: usize = 0x8040_0000;
 const MAX_USER_PROGRAMS: usize = 8;
 
 fn main() {
@@ -60,9 +59,9 @@ fn generate_catalog(manifest_path: &Path, output_directory: &Path) -> String {
         }
 
         let fields: Vec<_> = line.split_whitespace().collect();
-        if fields.len() != 3 {
+        if fields.len() != 2 {
             panic!(
-                "用户程序镜像清单第 {} 行应包含程序名、用户虚拟地址和镜像路径",
+                "用户程序镜像清单第 {} 行应包含程序名和镜像路径",
                 line_index + 1
             );
         }
@@ -87,15 +86,7 @@ fn generate_catalog(manifest_path: &Path, output_directory: &Path) -> String {
             panic!("最多支持同时驻留 {MAX_USER_PROGRAMS} 个用户程序");
         }
 
-        let linked_base = parse_hexadecimal(fields[1], "用户虚拟地址", line_index + 1);
-        if linked_base != USER_PROGRAM_VIRTUAL_BASE {
-            panic!(
-                "用户程序 {name} 的虚拟地址为 {linked_base:#x}，但所有程序必须链接到 {USER_PROGRAM_VIRTUAL_BASE:#x}（第 {} 行）",
-                line_index + 1
-            );
-        }
-
-        let relative_image_path = Path::new(fields[2]);
+        let relative_image_path = Path::new(fields[1]);
         let image_path = if relative_image_path.is_absolute() {
             relative_image_path.to_path_buf()
         } else {
@@ -126,7 +117,7 @@ fn generate_catalog(manifest_path: &Path, output_directory: &Path) -> String {
         println!("cargo:rerun-if-changed={}", image_path.display());
 
         generated_catalog.push_str(&format!(
-            "    UserProgramImage {{ name: {name:?}, linked_base: {linked_base:#x}, bytes: include_bytes!(concat!(env!(\"OUT_DIR\"), \"/user_program_{}.bin\")) }},\n",
+            "    UserProgramImage {{ name: {name:?}, bytes: include_bytes!(concat!(env!(\"OUT_DIR\"), \"/user_program_{}.bin\")) }},\n",
             entries.len(),
         ));
         entries.push(name);
@@ -138,11 +129,4 @@ fn generate_catalog(manifest_path: &Path, output_directory: &Path) -> String {
 
     generated_catalog.push_str("];\n");
     generated_catalog
-}
-
-fn parse_hexadecimal(value: &str, field_name: &str, line_number: usize) -> usize {
-    let digits = value.strip_prefix("0x").unwrap_or(value);
-    usize::from_str_radix(digits, 16).unwrap_or_else(|_| {
-        panic!("用户程序镜像清单第 {line_number} 行的{field_name}不是有效十六进制数：{value}");
-    })
 }

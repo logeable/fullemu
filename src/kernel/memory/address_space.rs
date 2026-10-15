@@ -7,7 +7,9 @@ use super::page_table::{
     PAGE_TABLE_ENTRIES, PTE_ACCESSED, PTE_DIRTY, PTE_EXECUTE, PTE_READ, PTE_USER, PTE_VALID,
     PTE_WRITE,
 };
-use super::{PageTableError, UserImageMapping, UserStackMapping};
+use super::{
+    KernelMemoryLayout, KernelSectionRange, PageTableError, UserImageMapping, UserStackMapping,
+};
 
 static mut ADDRESS_SPACES: Vec<Option<usize>> = Vec::new();
 
@@ -17,16 +19,12 @@ static mut ADDRESS_SPACES: Vec<Option<usize>> = Vec::new();
 /// 地址空间按稳定索引追加，失败的创建不会留下空槽或消耗索引。
 pub(super) fn create_address_space(
     address_space_index: usize,
-    kernel_start: usize,
-    kernel_end: usize,
+    kernel_layout: KernelMemoryLayout,
     user_stack: &UserStackMapping<'_>,
     user_image: UserImageMapping,
 ) -> Result<(), PageTableError> {
-    let kernel_end = align_up(kernel_end)?;
-
-    if kernel_start & PAGE_MASK != 0 || kernel_end <= kernel_start {
-        return Err(PageTableError::InvalidRange);
-    }
+    validate_kernel_layout(kernel_layout)?;
+    let kernel_end = align_up(kernel_layout.bss.end)?;
 
     let Some(stack_size) = user_stack.frames.len().checked_mul(PAGE_SIZE) else {
         return Err(PageTableError::InvalidRange);
@@ -72,12 +70,31 @@ pub(super) fn create_address_space(
         || user_image.physical_start & PAGE_MASK != 0
         || user_image.size == 0
         || user_image.size & PAGE_MASK != 0
-        || user_image.virtual_start < kernel_end
         || user_image.physical_start < kernel_end
+        || virtual_end > (1usize << 38)
         || virtual_end <= user_image.virtual_start
         || physical_end <= user_image.physical_start
     {
         return Err(PageTableError::InvalidRange);
+    }
+
+    for memory in crate::kernel::frame_allocator::physical_memory_regions()
+        .map_err(PageTableError::FrameAllocation)?
+    {
+        let memory_start =
+            usize::try_from(memory.start).map_err(|_| PageTableError::InvalidRange)?;
+        let memory_end = memory
+            .end_exclusive()
+            .and_then(|end| usize::try_from(end).ok())
+            .ok_or(PageTableError::InvalidRange)?;
+        if ranges_overlap(
+            user_image.virtual_start,
+            virtual_end,
+            memory_start,
+            memory_end,
+        ) {
+            return Err(PageTableError::InvalidRange);
+        }
     }
 
     {
@@ -95,9 +112,7 @@ pub(super) fn create_address_space(
         .map_err(PageTableError::FrameAllocation)?;
     let root_address = root_frame.into_address();
     let root_table = root_address as *mut PageTable;
-    if let Err(error) =
-        populate_address_space(root_table, kernel_start, kernel_end, user_stack, user_image)
-    {
+    if let Err(error) = populate_address_space(root_table, kernel_layout, user_stack, user_image) {
         if rollback_page_table_tree(root_address).is_err() {
             return Err(PageTableError::RollbackFailed);
         }
@@ -111,8 +126,7 @@ pub(super) fn create_address_space(
 
 fn populate_address_space(
     root_table: *mut PageTable,
-    kernel_start: usize,
-    kernel_end: usize,
+    kernel_layout: KernelMemoryLayout,
     user_stack: &UserStackMapping<'_>,
     user_image: UserImageMapping,
 ) -> Result<(), PageTableError> {
@@ -135,16 +149,10 @@ fn populate_address_space(
         }
     }
 
-    let mut kernel_page = kernel_start;
-    while kernel_page < kernel_end {
-        map_page(
-            root_table,
-            kernel_page,
-            kernel_page,
-            PTE_READ | PTE_WRITE | PTE_EXECUTE,
-        )?;
-        kernel_page += PAGE_SIZE;
-    }
+    map_kernel_section(root_table, kernel_layout.text, PTE_READ | PTE_EXECUTE)?;
+    map_kernel_section(root_table, kernel_layout.rodata, PTE_READ)?;
+    map_kernel_section(root_table, kernel_layout.data, PTE_READ | PTE_WRITE)?;
+    map_kernel_section(root_table, kernel_layout.bss, PTE_READ | PTE_WRITE)?;
 
     let mut image_offset = 0;
     while image_offset < user_image.size {
@@ -180,6 +188,41 @@ fn populate_address_space(
         console_page += PAGE_SIZE;
     }
 
+    Ok(())
+}
+
+fn validate_kernel_layout(layout: KernelMemoryLayout) -> Result<(), PageTableError> {
+    let sections = [layout.text, layout.rodata, layout.data, layout.bss];
+    for section in sections {
+        if section.start & PAGE_MASK != 0 || section.end < section.start {
+            return Err(PageTableError::InvalidRange);
+        }
+    }
+
+    if align_up(layout.text.end)? != layout.rodata.start
+        || align_up(layout.rodata.end)? != layout.data.start
+        || align_up(layout.data.end)? != layout.bss.start
+        || layout.bss.end <= layout.text.start
+    {
+        return Err(PageTableError::InvalidRange);
+    }
+
+    Ok(())
+}
+
+fn map_kernel_section(
+    root_table: *mut PageTable,
+    section: KernelSectionRange,
+    permissions: usize,
+) -> Result<(), PageTableError> {
+    let mut page = section.start;
+    let end = align_up(section.end)?;
+    while page < end {
+        map_page(root_table, page, page, permissions)?;
+        page = page
+            .checked_add(PAGE_SIZE)
+            .ok_or(PageTableError::InvalidRange)?;
+    }
     Ok(())
 }
 

@@ -10,7 +10,7 @@ SECTIONS
     . = 0x80200000;
     __kernel_start = .;
 
-    . = ALIGN(4);
+    . = ALIGN(4096);
     __text_start = .;
     .text : {
         KEEP(*(.text.entry))
@@ -18,14 +18,14 @@ SECTIONS
     }
     __text_end = .;
 
-    . = ALIGN(8);
+    . = ALIGN(4096);
     __rodata_start = .;
     .rodata : {
         *(.rodata .rodata.*)
     }
     __rodata_end = .;
 
-    . = ALIGN(8);
+    . = ALIGN(4096);
     __data_start = .;
     .data : {
         *(.sdata .sdata.*)
@@ -36,7 +36,7 @@ SECTIONS
     /* 进入编译后的 Rust 代码前，必须先初始化 gp。 */
     __global_pointer$ = __data_start + 0x800;
 
-    . = ALIGN(8);
+    . = ALIGN(4096);
     __bss_start = .;
     .bss (NOLOAD) : {
         *(.sbss .sbss.*)
