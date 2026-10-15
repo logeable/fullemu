@@ -181,7 +181,7 @@ impl fmt::Display for HexBytes<'_> {
     }
 }
 
-/// 运行各分配器的启动自检；调用前必须初始化内核堆和物理页帧分配器。
+/// 运行启动自检；调用前必须初始化内核堆和物理页帧分配器。
 fn run_startup_checks() -> Result<(), StartupCheckError> {
     super::heap::check_allocator().map_err(StartupCheckError::HeapAllocator)?;
     super::heap::check_global_allocator().map_err(StartupCheckError::GlobalAllocator)?;

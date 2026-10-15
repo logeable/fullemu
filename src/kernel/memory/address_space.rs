@@ -11,182 +11,184 @@ use super::{PageTableError, UserImageMapping, UserStackMapping};
 
 static mut ADDRESS_SPACES: Vec<Option<usize>> = Vec::new();
 
-extern "C" {
-    static __kernel_start: u8;
-}
-
-/// 为每个任务建立独立页表，并激活第一个任务的地址空间。
+/// 为一个任务建立独立页表；失败时归还本次创建的页表树。
 ///
-/// `kernel_end` 是内核映像及 BSS 的结束地址；两个切片按任务索引对应，分别描述该任务
-/// 的用户栈页帧和用户程序映射。所有程序和用户栈使用共同虚拟区域，但映射到各自物理页。
-/// 所有页表都映射相同的 S-mode 内核区域，每张表只映射对应任务自己的 U-mode 区域。
-pub(super) fn initialize(
+/// `address_space_index` 必须等于当前已成功创建的地址空间数量。这样成功创建的任务
+/// 地址空间按稳定索引追加，失败的创建不会留下空槽或消耗索引。
+pub(super) fn create_address_space(
+    address_space_index: usize,
+    kernel_start: usize,
     kernel_end: usize,
-    user_stacks: &[UserStackMapping<'_>],
-    user_images: &[UserImageMapping],
+    user_stack: &UserStackMapping<'_>,
+    user_image: UserImageMapping,
 ) -> Result<(), PageTableError> {
-    let kernel_start = core::ptr::addr_of!(__kernel_start) as usize;
     let kernel_end = align_up(kernel_end)?;
 
-    if kernel_start & PAGE_MASK != 0
-        || kernel_end <= kernel_start
-        || user_stacks.is_empty()
-        || user_stacks.len() != user_images.len()
+    if kernel_start & PAGE_MASK != 0 || kernel_end <= kernel_start {
+        return Err(PageTableError::InvalidRange);
+    }
+
+    let Some(stack_size) = user_stack.frames.len().checked_mul(PAGE_SIZE) else {
+        return Err(PageTableError::InvalidRange);
+    };
+    let Some(stack_end) = user_stack.virtual_start.checked_add(stack_size) else {
+        return Err(PageTableError::InvalidRange);
+    };
+    if user_stack.virtual_start & PAGE_MASK != 0
+        || user_stack.frames.is_empty()
+        || stack_end > (1usize << 38)
     {
         return Err(PageTableError::InvalidRange);
     }
 
-    for stack in user_stacks {
-        let Some(stack_size) = stack.frames.len().checked_mul(PAGE_SIZE) else {
-            return Err(PageTableError::InvalidRange);
-        };
-        let Some(stack_end) = stack.virtual_start.checked_add(stack_size) else {
-            return Err(PageTableError::InvalidRange);
-        };
-        if stack.virtual_start & PAGE_MASK != 0
-            || stack.frames.is_empty()
-            || stack_end > (1usize << 38)
+    for (page_index, frame) in user_stack.frames.iter().enumerate() {
+        let physical_address = frame.start_address();
+        if physical_address & PAGE_MASK != 0
+            || !crate::kernel::frame_allocator::is_allocated_frame_address(physical_address)
         {
             return Err(PageTableError::InvalidRange);
         }
-        for (page_index, frame) in stack.frames.iter().enumerate() {
-            let physical_address = frame.start_address();
-            if physical_address & PAGE_MASK != 0
-                || !crate::kernel::frame_allocator::is_allocated_frame_address(physical_address)
-            {
-                return Err(PageTableError::InvalidRange);
-            }
-            let page_virtual_start = stack.virtual_start + page_index * PAGE_SIZE;
-            if user_images.iter().any(|image| {
-                image
-                    .virtual_start
-                    .checked_add(image.size)
-                    .is_none_or(|image_end| {
-                        ranges_overlap(
-                            page_virtual_start,
-                            page_virtual_start + PAGE_SIZE,
-                            image.virtual_start,
-                            image_end,
-                        )
-                    })
-            }) {
-                return Err(PageTableError::InvalidRange);
-            }
-        }
-    }
-
-    for (index, image) in user_images.iter().enumerate() {
-        let Some(virtual_end) = image.virtual_start.checked_add(image.size) else {
+        let page_virtual_start = user_stack.virtual_start + page_index * PAGE_SIZE;
+        let Some(image_end) = user_image.virtual_start.checked_add(user_image.size) else {
             return Err(PageTableError::InvalidRange);
         };
-        let Some(physical_end) = image.physical_start.checked_add(image.size) else {
-            return Err(PageTableError::InvalidRange);
-        };
-        if image.virtual_start & PAGE_MASK != 0
-            || image.physical_start & PAGE_MASK != 0
-            || image.size == 0
-            || image.size & PAGE_MASK != 0
-            || image.virtual_start < kernel_end
-            || image.physical_start < kernel_end
-            || virtual_end <= image.virtual_start
-            || physical_end <= image.physical_start
-            || user_images[..index].iter().any(|other| {
-                ranges_overlap(
-                    image.physical_start,
-                    physical_end,
-                    other.physical_start,
-                    other.physical_start.saturating_add(other.size),
-                )
-            })
-        {
+        if ranges_overlap(
+            page_virtual_start,
+            page_virtual_start + PAGE_SIZE,
+            user_image.virtual_start,
+            image_end,
+        ) {
             return Err(PageTableError::InvalidRange);
         }
     }
 
-    // 安全性：初始化只在单 hart 启动路径执行，定时器和全局 S-mode 中断尚未开启。
-    let address_spaces = unsafe { &mut *core::ptr::addr_of_mut!(ADDRESS_SPACES) };
-    if !address_spaces.is_empty() {
-        return Err(PageTableError::AlreadyInitialized);
+    let Some(virtual_end) = user_image.virtual_start.checked_add(user_image.size) else {
+        return Err(PageTableError::InvalidRange);
+    };
+    let Some(physical_end) = user_image.physical_start.checked_add(user_image.size) else {
+        return Err(PageTableError::InvalidRange);
+    };
+    if user_image.virtual_start & PAGE_MASK != 0
+        || user_image.physical_start & PAGE_MASK != 0
+        || user_image.size == 0
+        || user_image.size & PAGE_MASK != 0
+        || user_image.virtual_start < kernel_end
+        || user_image.physical_start < kernel_end
+        || virtual_end <= user_image.virtual_start
+        || physical_end <= user_image.physical_start
+    {
+        return Err(PageTableError::InvalidRange);
     }
-    address_spaces
-        .try_reserve_exact(user_stacks.len())
-        .map_err(|_| PageTableError::AddressSpaceMetadataAllocation)?;
-    address_spaces.resize(user_stacks.len(), None);
 
-    for (address_space_index, (stack, image)) in user_stacks.iter().zip(user_images).enumerate() {
-        let root_frame = crate::kernel::frame_allocator::allocate_zeroed_frame()
-            .map_err(PageTableError::FrameAllocation)?;
-        let root_address = root_frame.into_address();
-        set_address_space_root(address_space_index, Some(root_address))?;
-        let root_table = root_address as *mut PageTable;
+    {
+        // 安全性：地址空间创建只在单 hart 的启动或陷入路径执行；S-mode 定时器陷入期间不会并发修改该容器。
+        let address_spaces = unsafe { &mut *core::ptr::addr_of_mut!(ADDRESS_SPACES) };
+        if address_space_index != address_spaces.len() {
+            return Err(PageTableError::AddressSpaceIdOutOfOrder);
+        }
+        address_spaces
+            .try_reserve(1)
+            .map_err(|_| PageTableError::AddressSpaceMetadataAllocation)?;
+    }
 
-        // FDT 描述的 RAM 建立为 S-mode 可读写恒等映射，页帧、堆和内核栈才可在启用 Sv39 后访问。
-        for memory in crate::kernel::frame_allocator::physical_memory_regions()
-            .map_err(PageTableError::FrameAllocation)?
-        {
-            let mut page =
-                usize::try_from(memory.start).map_err(|_| PageTableError::InvalidRange)?;
-            let end = memory
-                .end_exclusive()
-                .and_then(|end| usize::try_from(end).ok())
+    let root_frame = crate::kernel::frame_allocator::allocate_zeroed_frame()
+        .map_err(PageTableError::FrameAllocation)?;
+    let root_address = root_frame.into_address();
+    let root_table = root_address as *mut PageTable;
+    if let Err(error) =
+        populate_address_space(root_table, kernel_start, kernel_end, user_stack, user_image)
+    {
+        if rollback_page_table_tree(root_address).is_err() {
+            return Err(PageTableError::RollbackFailed);
+        }
+        return Err(error);
+    }
+
+    // 安全性：容器容量已预留；只有页表树完整建立后才发布根地址，单 hart 不会并发观察中间状态。
+    unsafe { (&mut *core::ptr::addr_of_mut!(ADDRESS_SPACES)).push(Some(root_address)) };
+    Ok(())
+}
+
+fn populate_address_space(
+    root_table: *mut PageTable,
+    kernel_start: usize,
+    kernel_end: usize,
+    user_stack: &UserStackMapping<'_>,
+    user_image: UserImageMapping,
+) -> Result<(), PageTableError> {
+    // FDT 描述的 RAM 建立为 S-mode 可读写恒等映射，页帧、堆和内核栈才可在启用 Sv39 后访问。
+    for memory in crate::kernel::frame_allocator::physical_memory_regions()
+        .map_err(PageTableError::FrameAllocation)?
+    {
+        let mut page = usize::try_from(memory.start).map_err(|_| PageTableError::InvalidRange)?;
+        let end = memory
+            .end_exclusive()
+            .and_then(|end| usize::try_from(end).ok())
+            .ok_or(PageTableError::InvalidRange)?;
+        page = align_up(page)?;
+        let end = end & !PAGE_MASK;
+        while page < end {
+            map_page(root_table, page, page, PTE_READ | PTE_WRITE)?;
+            page = page
+                .checked_add(PAGE_SIZE)
                 .ok_or(PageTableError::InvalidRange)?;
-            page = align_up(page)?;
-            let end = end & !PAGE_MASK;
-            while page < end {
-                map_page(root_table, page, page, PTE_READ | PTE_WRITE)?;
-                page = page
-                    .checked_add(PAGE_SIZE)
-                    .ok_or(PageTableError::InvalidRange)?;
-            }
-        }
-
-        let mut kernel_page = kernel_start;
-        while kernel_page < kernel_end {
-            map_page(
-                root_table,
-                kernel_page,
-                kernel_page,
-                PTE_READ | PTE_WRITE | PTE_EXECUTE,
-            )?;
-            kernel_page += PAGE_SIZE;
-        }
-
-        let mut image_offset = 0;
-        while image_offset < image.size {
-            map_page(
-                root_table,
-                image.virtual_start + image_offset,
-                image.physical_start + image_offset,
-                PTE_READ | PTE_WRITE | PTE_EXECUTE | PTE_USER,
-            )?;
-            image_offset += PAGE_SIZE;
-        }
-
-        for (page_index, frame) in stack.frames.iter().enumerate() {
-            map_page(
-                root_table,
-                stack.virtual_start + page_index * PAGE_SIZE,
-                frame.start_address(),
-                PTE_READ | PTE_WRITE | PTE_USER,
-            )?;
-        }
-
-        let console_region = crate::device::console::mmio_region();
-        let console_start = console_region.start & !PAGE_MASK;
-        let console_end = align_up(
-            console_region
-                .start
-                .checked_add(console_region.size)
-                .ok_or(PageTableError::InvalidRange)?,
-        )?;
-        let mut console_page = console_start;
-        while console_page < console_end {
-            map_page(root_table, console_page, console_page, PTE_READ | PTE_WRITE)?;
-            console_page += PAGE_SIZE;
         }
     }
 
-    activate_address_space(0)?;
+    let mut kernel_page = kernel_start;
+    while kernel_page < kernel_end {
+        map_page(
+            root_table,
+            kernel_page,
+            kernel_page,
+            PTE_READ | PTE_WRITE | PTE_EXECUTE,
+        )?;
+        kernel_page += PAGE_SIZE;
+    }
+
+    let mut image_offset = 0;
+    while image_offset < user_image.size {
+        map_page(
+            root_table,
+            user_image.virtual_start + image_offset,
+            user_image.physical_start + image_offset,
+            PTE_READ | PTE_WRITE | PTE_EXECUTE | PTE_USER,
+        )?;
+        image_offset += PAGE_SIZE;
+    }
+
+    for (page_index, frame) in user_stack.frames.iter().enumerate() {
+        map_page(
+            root_table,
+            user_stack.virtual_start + page_index * PAGE_SIZE,
+            frame.start_address(),
+            PTE_READ | PTE_WRITE | PTE_USER,
+        )?;
+    }
+
+    let console_region = crate::device::console::mmio_region();
+    let console_start = console_region.start & !PAGE_MASK;
+    let console_end = align_up(
+        console_region
+            .start
+            .checked_add(console_region.size)
+            .ok_or(PageTableError::InvalidRange)?,
+    )?;
+    let mut console_page = console_start;
+    while console_page < console_end {
+        map_page(root_table, console_page, console_page, PTE_READ | PTE_WRITE)?;
+        console_page += PAGE_SIZE;
+    }
+
+    Ok(())
+}
+
+fn rollback_page_table_tree(root_address: usize) -> Result<(), PageTableError> {
+    let validated_page_count = validate_page_table_tree(root_address, 2)?;
+    let released_page_count = release_page_table_tree(root_address, 2)?;
+    if released_page_count != validated_page_count {
+        return Err(PageTableError::PageTableCountMismatch);
+    }
     Ok(())
 }
 

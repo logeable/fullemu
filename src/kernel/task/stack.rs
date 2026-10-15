@@ -16,7 +16,6 @@ const STACK_PAGE_COUNT: usize = USER_STACK_SIZE / PAGE_SIZE;
 pub(super) enum StackError {
     Frame(FrameError),
     MetadataAllocation,
-    RollbackFailed,
 }
 
 impl StackError {
@@ -24,7 +23,6 @@ impl StackError {
         match self {
             Self::Frame(error) => error.description(),
             Self::MetadataAllocation => "无法为用户栈页帧所有权分配内核堆内存",
-            Self::RollbackFailed => "用户栈分配失败后无法归还已取得的页帧",
         }
     }
 }
@@ -81,20 +79,14 @@ impl UserStack {
             .try_reserve_exact(STACK_PAGE_COUNT)
             .map_err(|_| StackError::MetadataAllocation)?;
 
+        let mut stack = Self { frames };
         for _ in 0..STACK_PAGE_COUNT {
             match frame_allocator::allocate_zeroed_frame() {
-                Ok(frame) => frames.push(frame),
-                Err(error) => {
-                    while let Some(frame) = frames.pop() {
-                        if frame_allocator::deallocate_frame(frame).is_err() {
-                            return Err(StackError::RollbackFailed);
-                        }
-                    }
-                    return Err(StackError::Frame(error));
-                }
+                Ok(frame) => stack.frames.push(frame),
+                Err(error) => return Err(StackError::Frame(error)),
             }
         }
-        Ok(Self { frames })
+        Ok(stack)
     }
 
     pub(super) fn start(&self) -> usize {

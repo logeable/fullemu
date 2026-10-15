@@ -21,14 +21,15 @@
 | `kernel::heap` | 管理内核对象使用的字节堆，并实现全局分配器 | 初始化时从页帧分配器取得连续页帧作为固定堆后备区；为 `Vec` 等 `alloc` 容器提供字节分配 |
 | `kernel::frame_allocator` | 根据 FDT 中的 RAM 范围分配、清零和回收页帧 | 使用固定 BSS 区间表保存元数据，不依赖堆；排除内核映像、用户程序槽、DTB 和固件保留范围；页帧以所有权值交给调用方 |
 | `kernel::memory` | 汇总地址空间、页表和用户内存访问接口；定义映射输入与统一错误类型 | 对任务和 syscall 提供窄接口，不直接拥有用户栈、程序镜像或页表目标页 |
-| `kernel::memory::address_space` | 创建、切换、校验和销毁任务的 Sv39 地址空间 | 持有根页表索引；通过 `page_table` 建立映射，通过页帧分配器取得和归还页表页 |
+| `kernel::memory::address_space` | 逐个创建、切换、校验和销毁任务的 Sv39 地址空间 | 持有根页表索引；单个创建失败时回收部分页表树，通过 `page_table` 建立映射，通过页帧分配器取得和归还页表页 |
 | `kernel::memory::page_table` | 编码 Sv39 页表项、建立 4 KiB 映射并激活根页表 | 只管理页表机制；地址空间生命周期由 `address_space` 决定 |
 | `kernel::memory::page_table_log` | 遍历现有页表并把映射合并成诊断日志 | 只读页表；不创建或释放映射 |
 | `kernel::memory::user_access` | 在短暂设置 `sstatus.SUM` 的窗口内访问已验证的用户地址 | 只执行单次内存读写；范围校验由 syscall 调用路径负责 |
-| `kernel::task` | 创建启动任务、处理任务陷入现场、轮转调度和退出回收 | 持有任务记录；依赖栈资源、地址空间、系统调用和架构陷入/SBI 接口 |
+| `kernel::task` | 编排单任务创建、处理任务陷入现场、轮转调度和退出回收 | 持有追加式任务记录及稳定 `TaskId`；依赖任务创建器、栈资源、地址空间、系统调用和架构陷入/SBI 接口 |
+| `kernel::task::creation` | 按顺序取得一个用户任务所需的镜像、用户栈、内核栈和独立地址空间，全部成功后发布任务记录 | 从链接器符号读取完整内核映射范围并传给 memory；使用局部资源所有者实现失败回滚，页表就绪前不发布任务 |
 | `kernel::task::stack` | 分配任务内核栈和用户栈的页帧，并在资源销毁时归还 | 内核栈需要连续页帧；用户栈允许离散页帧；不决定调度策略 |
 | `kernel::syscall` | 将 Linux RISC-V syscall 编号和参数转换为当前内核行为 | 负责 ABI 参数与返回值；调用内存、时钟和控制台能力 |
-| `kernel::user_program` | 校验构建生成的清单并装载原始用户镜像 | 镜像来自构建产物；当前目标物理槽位固定 |
+| `kernel::user_program` | 校验构建生成的清单并装载原始用户镜像 | 镜像来自构建产物；目标物理槽位由链接器固定预留，装载前清零并覆盖 |
 | `kernel::clock` | 提供内核启动后的单调时间值 | 读取架构计时源并转换成内核时间值，不定义用户 ABI 布局 |
 | `kernel::logging` | 过滤并格式化内核诊断记录 | 通过 `device::console` 输出，并读取平台计时源 |
 | `device::console` | 为日志和 syscall 提供字节输入输出及格式化写入接口 | 通过 `ConsoleDevice` 契约调用当前 UART 实现 |
@@ -107,11 +108,13 @@ flowchart TD
 
 本轮继续将 `memory` 按机制边界拆为 `address_space`、`page_table` 和 `user_access`：前者拥有地址空间根表记录并编排创建、切换及销毁；`page_table` 集中处理 Sv39 PTE 和 `satp`；`user_access` 仅封装 SUM 开关与单次用户内存读写。`memory/mod.rs` 保留任务和 syscall 使用的接口、映射输入类型及统一错误说明，页表诊断仍由 `page_table_log` 只读遍历。
 
+本阶段新增 `task::creation`，把批处理和 shell 启动共用的单任务准备流程收拢起来。创建器先预留任务表容量，再依次装载程序镜像、分配用户栈、分配内核栈和建立该任务的页表；所有步骤成功后才追加带 `TaskId` 的任务记录。`UserStack` 和 `KernelStack` 在任务记录发布前由局部所有者持有，错误返回时自动释放；页表创建器负责清理未完成的页表树。用户镜像槽是链接器固定预留的物理区域，不是动态分配的页帧；创建失败后槽位可直接复用，下一次装载会先清零再复制，不通过不安全的虚拟地址别名在 Drop 中清理。批处理和 shell 仍只在启动期创建任务，本阶段没有加入 shell 命令、任务复用或并发同镜像实例。
+
 此前将原先过于宽泛的 `boot` 顶层模块重命名为 `device_tree`，并把 `info.rs` 明确命名为 `memory_info.rs`；启动编排仍属于 `kernel::startup`。QEMU UART 已从 `arch::riscv64` 移至独立的 `device` 模块：`ConsoleDevice` 表达内核所需的最小字节收发契约，日志和 syscall 通过 `device::console` 使用该接口，具体 NS16550 寄存器访问集中在 `device::uart16550`。本轮再由 `device_tree::console_info` 读取 QEMU `virt` FDT 中 `/soc` 子设备的 UART `reg` 范围，启动阶段先完成这项解析和控制台初始化，再输出日志；UART 物理地址不再写死在驱动中。当前仍只支持空 `ranges` 的 `/soc` 和 NS16550 兼容设备，尚未解析 `/chosen/stdout-path`、总线地址转换或建立通用设备发现/注册框架。另继续明确数据与机制/ABI 的归属：`PhysicalMemoryRegion` 留在 `device_tree::memory_info`，时钟返回内核自己的 `MonotonicTime`，Linux `timespec` 布局留在 syscall 边界。没有为了文件大小进行机械拆分，页表映射契约仍由 `kernel::memory` 统一维护，任务仍拥有自己的栈和镜像资源。
 
 当前仍有明确的重构工作：
 
-1. 在运行时任务创建成为目标后，再以拥有资源的管理对象替代任务表、当前索引和待回收栈等可变全局状态；需保留单 hart、中断和活动栈不变量。
+1. 单任务创建现已具备事务式准备和失败回滚，但创建仍只发生在启动期，任务表上限为 8，镜像仍使用固定槽位。要支持 shell 前台 `run`，下一步需把创建器接入运行期，并明确运行中任务与 shell 的调度、退出回收及固定镜像槽的占用约束；再评估将任务表、当前索引和待回收栈收拢到拥有资源的管理对象，保留单 hart、中断和活动栈不变量。
 2. 当前设备接口只覆盖轮询式 UART 控制台；增加其他设备前，再根据实际消费者扩展设备类别与发现/初始化接口，避免提前建立通用驱动框架。
 3. 页帧分配器目前按页扫描 FDT RAM 范围并用固定容量区间表追踪可用区；尚未解析 `/reserved-memory`、建立通用虚拟堆窗口或按需扩展堆。
 

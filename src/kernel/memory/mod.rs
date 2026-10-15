@@ -6,13 +6,21 @@ mod page_table;
 mod page_table_log;
 mod user_access;
 
-/// 为任务建立独立地址空间并激活第一个地址空间。
-pub(super) fn initialize(
+/// 为单个任务建立独立地址空间；失败时不保留部分页表。
+pub(super) fn create_address_space(
+    address_space_index: usize,
+    kernel_start: usize,
     kernel_end: usize,
-    user_stacks: &[UserStackMapping<'_>],
-    user_images: &[UserImageMapping],
+    user_stack: &UserStackMapping<'_>,
+    user_image: UserImageMapping,
 ) -> Result<(), PageTableError> {
-    address_space::initialize(kernel_end, user_stacks, user_images)
+    address_space::create_address_space(
+        address_space_index,
+        kernel_start,
+        kernel_end,
+        user_stack,
+        user_image,
+    )
 }
 
 /// 切换到指定任务的 Sv39 根页表。
@@ -87,8 +95,10 @@ pub(super) enum PageTableError {
     InvalidRootTable,
     /// 地址空间记录的堆内存分配失败。
     AddressSpaceMetadataAllocation,
-    /// 地址空间集合已经初始化。
-    AlreadyInitialized,
+    /// 地址空间必须按从零开始的连续索引创建。
+    AddressSpaceIdOutOfOrder,
+    /// 建立地址空间失败，且部分页表无法安全回滚。
+    RollbackFailed,
     /// 当前硬件没有接受 Sv39 模式。
     Sv39Unavailable,
 }
@@ -107,7 +117,8 @@ impl PageTableError {
             Self::UnexpectedSuperpage => "页表中出现本阶段未支持的大页映射",
             Self::InvalidRootTable => "根页表地址为零、未按 4 KiB 对齐或不属于已分配页帧",
             Self::AddressSpaceMetadataAllocation => "无法为地址空间记录分配内核堆内存",
-            Self::AlreadyInitialized => "地址空间集合已经初始化",
+            Self::AddressSpaceIdOutOfOrder => "地址空间 ID 未按顺序追加",
+            Self::RollbackFailed => "地址空间创建失败且页表回滚失败",
             Self::Sv39Unavailable => "硬件没有接受 Sv39 satp 模式",
         }
     }
