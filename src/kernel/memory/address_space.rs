@@ -13,9 +13,6 @@ use super::{
 
 static mut ADDRESS_SPACES: Vec<Option<usize>> = Vec::new();
 
-// 当前内核仍链接在物理地址；本阶段把同一内核页额外映射到这个 Sv39 高半区基址之上。
-const KERNEL_VIRTUAL_BASE: usize = 0xffff_ffc0_0000_0000;
-
 /// 为一个任务建立独立页表；失败时归还本次创建的页表树。
 ///
 /// `address_space_index` 必须等于当前已成功创建的地址空间数量。这样成功创建的任务
@@ -266,9 +263,8 @@ fn map_kernel_section_alias(
             .physical_start
             .checked_add(offset)
             .ok_or(PageTableError::InvalidRange)?;
-        let virtual_address = KERNEL_VIRTUAL_BASE
-            .checked_add(physical_page)
-            .ok_or(PageTableError::InvalidRange)?;
+        let virtual_address =
+            super::kernel_high_alias(physical_page).ok_or(PageTableError::InvalidRange)?;
         let section_virtual_address = section
             .virtual_start
             .checked_add(offset)

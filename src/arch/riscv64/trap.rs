@@ -140,6 +140,28 @@ impl TrapFrame {
 
 extern "C" {
     fn riscv64_start_first_task(frame: *const TrapFrame) -> !;
+    fn supervisor_trap_entry();
+}
+
+/// 返回链接器给出的低地址陷入入口符号地址。
+pub fn supervisor_trap_entry_address() -> usize {
+    supervisor_trap_entry as *const () as usize
+}
+
+/// 将 S-mode 陷入向量设置为直接模式下的指定入口。
+///
+/// # Safety
+///
+/// `entry` 必须至少按 4 字节对齐，并且在当前及之后使用的每个地址空间中都映射为可执行页。
+pub unsafe fn set_supervisor_trap_vector(entry: usize) {
+    // 安全性：调用方保证入口在当前和后续任务页表中均为有效的可执行映射。
+    unsafe {
+        core::arch::asm!(
+            "csrw stvec, {entry}",
+            entry = in(reg) entry,
+            options(nomem, nostack)
+        );
+    }
 }
 
 /// 从预先构造的陷入帧启动首个任务。

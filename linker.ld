@@ -17,6 +17,7 @@ SECTIONS
         *(.text .text.*)
     }
     __text_end = .;
+    __text_load_start = LOADADDR(.text);
 
     . = ALIGN(4096);
     __rodata_start = .;
@@ -24,6 +25,7 @@ SECTIONS
         *(.rodata .rodata.*)
     }
     __rodata_end = .;
+    __rodata_load_start = LOADADDR(.rodata);
 
     . = ALIGN(4096);
     __data_start = .;
@@ -32,6 +34,7 @@ SECTIONS
         *(.data .data.*)
     }
     __data_end = .;
+    __data_load_start = LOADADDR(.data);
 
     /* 进入编译后的 Rust 代码前，必须先初始化 gp。 */
     __global_pointer$ = __data_start + 0x800;
@@ -44,6 +47,7 @@ SECTIONS
         *(COMMON)
     }
     __bss_data_end = .;
+    __bss_load_start = LOADADDR(.bss);
 
     /* 第一个阶段只运行一个 hart，并为它分配独立的启动栈。 */
     . = ALIGN(16);

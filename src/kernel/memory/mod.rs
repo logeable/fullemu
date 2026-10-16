@@ -6,6 +6,14 @@ mod page_table;
 mod page_table_log;
 mod user_access;
 
+// 当前内核以低地址链接；此基址把物理页转换为已有页表中的高半区别名。
+const KERNEL_VIRTUAL_BASE: usize = 0xffff_ffc0_0000_0000;
+
+/// 计算一个内核物理地址在高半区中的别名地址。
+pub(super) fn kernel_high_alias(physical_address: usize) -> Option<usize> {
+    KERNEL_VIRTUAL_BASE.checked_add(physical_address)
+}
+
 /// 为单个任务建立独立地址空间；失败时不保留部分页表。
 pub(super) fn create_address_space(
     address_space_index: usize,
