@@ -143,7 +143,7 @@ extern "C" {
     fn supervisor_trap_entry();
 }
 
-/// 返回链接器给出的低地址陷入入口符号地址。
+/// 返回链接器给出的高半区陷入入口虚拟地址。
 pub fn supervisor_trap_entry_address() -> usize {
     supervisor_trap_entry as *const () as usize
 }

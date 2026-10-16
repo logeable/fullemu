@@ -26,6 +26,12 @@ impl StartupCheckError {
 }
 
 extern "C" {
+    static __boot_virtual_start: u8;
+    static __boot_virtual_end: u8;
+    static __boot_bss_virtual_start: u8;
+    static __boot_bss_virtual_end: u8;
+    static __boot_stack_virtual_start: u8;
+    static __boot_stack_virtual_end: u8;
     static __kernel_start: u8;
     static __text_start: u8;
     static __text_end: u8;
@@ -35,8 +41,6 @@ extern "C" {
     static __data_end: u8;
     static __bss_start: u8;
     static __bss_data_end: u8;
-    static __boot_stack_start: u8;
-    static __boot_stack_end: u8;
     static __bss_end: u8;
 }
 
@@ -192,6 +196,22 @@ fn run_startup_checks() -> Result<(), StartupCheckError> {
 
 /// 输出链接器定义的内核映像和各段范围；结束地址采用不包含式。
 fn log_kernel_sections() {
+    const KERNEL_VIRTUAL_OFFSET: usize = 0xffffffc000000000;
+    log_kernel_range(
+        "启动区",
+        core::ptr::addr_of!(__boot_virtual_start) as usize - KERNEL_VIRTUAL_OFFSET,
+        core::ptr::addr_of!(__boot_virtual_end) as usize - KERNEL_VIRTUAL_OFFSET,
+    );
+    log_kernel_range(
+        "启动区 BSS",
+        core::ptr::addr_of!(__boot_bss_virtual_start) as usize - KERNEL_VIRTUAL_OFFSET,
+        core::ptr::addr_of!(__boot_bss_virtual_end) as usize - KERNEL_VIRTUAL_OFFSET,
+    );
+    log_kernel_range(
+        "启动栈",
+        core::ptr::addr_of!(__boot_stack_virtual_start) as usize,
+        core::ptr::addr_of!(__boot_stack_virtual_end) as usize,
+    );
     log_kernel_range(
         "内核映像",
         core::ptr::addr_of!(__kernel_start) as usize,
@@ -216,11 +236,6 @@ fn log_kernel_sections() {
         ".bss",
         core::ptr::addr_of!(__bss_start) as usize,
         core::ptr::addr_of!(__bss_data_end) as usize,
-    );
-    log_kernel_range(
-        "启动栈",
-        core::ptr::addr_of!(__boot_stack_start) as usize,
-        core::ptr::addr_of!(__boot_stack_end) as usize,
     );
 }
 

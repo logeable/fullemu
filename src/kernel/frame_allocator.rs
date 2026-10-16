@@ -12,9 +12,9 @@ const MAX_MEMORY_REGIONS: usize = 32;
 static mut FRAME_ALLOCATOR: FrameAllocator = FrameAllocator::empty();
 
 extern "C" {
-    static __bss_end: u8;
-    static __user_program_load_start: u8;
-    static __user_program_load_end: u8;
+    static __kernel_load_end_virtual: u8;
+    static __user_program_load_virtual_start: u8;
+    static __user_program_load_virtual_end: u8;
 }
 
 /// 表示页池中的一个物理页帧。
@@ -113,9 +113,15 @@ impl FrameAllocator {
             return Err(FrameError::TooManyMemoryRegions);
         }
 
-        let kernel_end = core::ptr::addr_of!(__bss_end) as usize;
-        let program_start = core::ptr::addr_of!(__user_program_load_start) as usize;
-        let program_end = core::ptr::addr_of!(__user_program_load_end) as usize;
+        let kernel_end = super::memory::kernel_physical_address(core::ptr::addr_of!(
+            __kernel_load_end_virtual
+        ) as usize);
+        let program_start = super::memory::kernel_physical_address(core::ptr::addr_of!(
+            __user_program_load_virtual_start
+        ) as usize);
+        let program_end = super::memory::kernel_physical_address(core::ptr::addr_of!(
+            __user_program_load_virtual_end
+        ) as usize);
         self.memory_region_count = memory_info.memory_regions().len();
         for (index, memory) in memory_info.memory_regions().iter().copied().enumerate() {
             self.memory_regions[index] = memory;

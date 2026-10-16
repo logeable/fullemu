@@ -98,7 +98,7 @@ pub(super) fn activate(root_physical_address: usize) -> Result<(), PageTableErro
     }
 
     let satp_value = (SATP_SV39_MODE << SATP_MODE_SHIFT) | (root_physical_address >> 12);
-    // 安全性：根页表来自已分配页帧，恒等映射已覆盖当前内核代码、栈、数据和帧池。
+    // 安全性：根页表来自已分配页帧；新旧页表都映射高半区内核代码、共享内核栈及物理 RAM 恒等区。
     unsafe {
         core::arch::asm!(
             "csrw satp, {value}",

@@ -18,7 +18,7 @@ make run
 
 若 QEMU 可执行文件不在 PATH，可运行 `make run QEMU=/path/to/qemu-system-riscv64`。也可以单独运行 `make build-user` 构建用户程序。
 
-查看内核 ELF 的启动入口和可加载段地址，可运行 `make inspect-kernel-elf`。该检查用于核对高半区迁移前的链接与加载基线，不会改变内核运行地址。
+查看内核 ELF 的低地址启动入口以及内核主体的高 VMA/低 LMA，可运行 `make inspect-kernel-elf`。
 
 ## 代码与阶段说明
 
@@ -59,4 +59,10 @@ make run
 - [第 33 阶段：Sv39 内核与用户地址空间规划](docs/phase-33-sv39-address-space-plan.md) 盘点当前实际映射，明确低半部用户区、高半部内核区的目标约定及后续迁移顺序。
 - [第 34 阶段：分离用户镜像虚拟地址与物理槽位](docs/phase-34-user-image-virtual-address.md) 将用户程序共同入口迁到 `0x40000000`，避免覆盖 QEMU RAM 恒等映射，并保留固定物理镜像槽位。
 - [第 35 阶段：按链接段设置内核页权限](docs/phase-35-kernel-section-permissions.md) 按 4 KiB 页边界将内核代码、只读数据和可写数据映射为不同权限。
+- [第 36 阶段：检查高半区迁移前的 ELF 布局](docs/phase-36-high-half-elf-baseline.md) 建立可重复检查内核入口与加载段的工具。
+- [第 37 阶段：为内核段建立高地址别名](docs/phase-37-kernel-high-alias.md) 在任务页表中将内核物理页额外映射到高地址。
+- [第 38 阶段：显式区分内核段虚拟与物理起点](docs/phase-38-kernel-section-addresses.md) 为后续分离 VMA/LMA 明确页表映射输入。
+- [第 39 阶段：从链接器提供内核段装载地址](docs/phase-39-kernel-load-address-symbols.md) 让任务地址空间创建路径区分链接地址与物理装载位置。
+- [第 40 阶段：从高地址别名进入陷入入口](docs/phase-40-high-alias-trap-entry.md) 验证 syscall 与定时器陷入可从高地址进入内核。
+- [第 41 阶段：从低地址启动并在高半区运行内核](docs/phase-41-high-half-kernel-runtime.md) 在早期启用 Sv39，将 Rust 内核代码、全局数据和栈迁移到高半区 VMA。
 - [项目原则与代码规范](docs/development-principles.md) 是设计和协作规范。

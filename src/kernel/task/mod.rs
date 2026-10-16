@@ -86,14 +86,9 @@ fn start_programs(program_indices: &[usize]) -> ! {
         stop_forever();
     }
 
-    // 安全性：单 hart 尚未进入用户任务；新建的页表都共同映射内核 RAM，因此启动代码可在 Bare 模式下逐个构造它们。
+    // 安全性：启动页表仍保持活动；新建任务页表会映射内核高半区、启动栈及 RAM 恒等区。
     unsafe {
-        core::arch::asm!(
-            "csrw sie, zero",
-            "csrw satp, zero",
-            "sfence.vma zero, zero",
-            options(nostack)
-        );
+        core::arch::asm!("csrw sie, zero", options(nostack));
         core::ptr::write_volatile(core::ptr::addr_of_mut!(CURRENT_TASK_INDEX), 0);
     }
 
@@ -113,27 +108,45 @@ fn start_programs(program_indices: &[usize]) -> ! {
         }
     }
 
+    let mut kernel_stacks = [super::memory::KernelStackMapping {
+        virtual_start: 0,
+        physical_start: 0,
+        size: 0,
+    }; MAX_USER_TASKS];
+    // 安全性：任务创建已完成且启动中断仍关闭；每个内核栈的页帧所有权由任务记录持有。
+    let tasks = unsafe { &*core::ptr::addr_of!(TASKS) };
+    for (task, mapping) in tasks.iter().zip(kernel_stacks.iter_mut()) {
+        let Some(stack) = task.kernel_stack.as_ref() else {
+            crate::klog_error!("任务 {} 的内核栈不存在", task.id.index());
+            stop_forever();
+        };
+        let range = stack.range();
+        *mapping = super::memory::KernelStackMapping {
+            virtual_start: range.0,
+            physical_start: stack.physical_start(),
+            size: range.1 - range.0,
+        };
+    }
+    if let Err(error) = super::memory::map_kernel_stacks(&kernel_stacks[..tasks.len()]) {
+        crate::klog_error!("映射共享内核栈失败：{}", error.description());
+        stop_forever();
+    }
+
     set_task_state(0, TaskState::Running);
     if let Err(error) = super::memory::activate_address_space(0) {
         crate::klog_error!("无法激活首个任务地址空间：{}", error.description());
         stop_forever();
     }
 
-    // 当前内核 VMA=LMA，陷入入口符号值可作为物理地址计算别名；布局分离后需按段内偏移换算。
-    let Some(trap_entry_high_alias) = super::memory::kernel_high_alias(
-        crate::arch::riscv64::trap::supervisor_trap_entry_address(),
-    ) else {
-        crate::klog_error!("计算 S-mode 陷入入口高地址别名时溢出");
-        stop_forever();
-    };
-    // 安全性：每个任务页表都将内核 .text 的高地址别名映射为 SR-X，陷入入口位于该段内。
+    let trap_entry = crate::arch::riscv64::trap::supervisor_trap_entry_address();
+    // 安全性：陷入入口由链接器直接放在高半区 VMA，且每个任务页表均以 SR-X 映射该段。
     unsafe {
-        crate::arch::riscv64::trap::set_supervisor_trap_vector(trap_entry_high_alias);
+        crate::arch::riscv64::trap::set_supervisor_trap_vector(trap_entry);
     }
 
     super::memory::log_address_spaces();
     crate::klog_info!("已启用 Sv39 用户/内核页权限边界");
-    crate::klog_info!("S-mode 陷入入口已切换到内核高地址别名：{trap_entry_high_alias:#018x}");
+    crate::klog_info!("S-mode 陷入入口位于内核高半区：{trap_entry:#018x}");
     crate::klog_info!(
         "启动 {} 个用户任务；定时器中断保持调度响应",
         program_indices.len()
@@ -465,16 +478,14 @@ fn stop_forever() -> ! {
 }
 
 extern "C" {
+    static __boot_stack_virtual_start: u8;
+    static __boot_stack_virtual_end: u8;
     static __text_start: u8;
     static __text_end: u8;
-    static __text_load_start: u8;
     static __rodata_start: u8;
     static __rodata_end: u8;
-    static __rodata_load_start: u8;
     static __data_start: u8;
     static __data_end: u8;
-    static __data_load_start: u8;
     static __bss_start: u8;
     static __bss_end: u8;
-    static __bss_load_start: u8;
 }

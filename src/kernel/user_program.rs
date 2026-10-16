@@ -11,8 +11,8 @@ struct UserProgramImage {
 include!(concat!(env!("OUT_DIR"), "/user_program_catalog.rs"));
 
 extern "C" {
-    static __user_program_load_start: u8;
-    static __user_program_load_end: u8;
+    static __user_program_load_virtual_start: u8;
+    static __user_program_load_virtual_end: u8;
 }
 
 /// 已复制到内存中的用户程序入口和镜像信息。
@@ -68,8 +68,12 @@ pub(super) fn load(index: usize) -> Result<Option<LoadedUserProgram>, UserProgra
     };
 
     // 链接器将这两个符号定义为加载区首尾地址，而非存放数据的变量。
-    let load_start = core::ptr::addr_of!(__user_program_load_start) as usize;
-    let load_end = core::ptr::addr_of!(__user_program_load_end) as usize;
+    let load_start = super::memory::kernel_physical_address(core::ptr::addr_of!(
+        __user_program_load_virtual_start
+    ) as usize);
+    let load_end = super::memory::kernel_physical_address(core::ptr::addr_of!(
+        __user_program_load_virtual_end
+    ) as usize);
     let reserved_capacity = load_end - load_start;
     let capacity = USER_PROGRAM_SLOT_SIZE;
     let Some(slot_offset) = index.checked_mul(USER_PROGRAM_SLOT_SIZE) else {

@@ -8,7 +8,8 @@ use super::page_table::{
     PTE_WRITE,
 };
 use super::{
-    KernelMemoryLayout, KernelSectionRange, PageTableError, UserImageMapping, UserStackMapping,
+    KernelMemoryLayout, KernelSectionRange, KernelStackMapping, PageTableError, UserImageMapping,
+    UserStackMapping,
 };
 
 static mut ADDRESS_SPACES: Vec<Option<usize>> = Vec::new();
@@ -21,6 +22,7 @@ pub(super) fn create_address_space(
     address_space_index: usize,
     kernel_layout: KernelMemoryLayout,
     user_stack: &UserStackMapping<'_>,
+    kernel_stack: KernelStackMapping,
     user_image: UserImageMapping,
 ) -> Result<(), PageTableError> {
     validate_kernel_layout(kernel_layout)?;
@@ -118,7 +120,13 @@ pub(super) fn create_address_space(
         .map_err(PageTableError::FrameAllocation)?;
     let root_address = root_frame.into_address();
     let root_table = root_address as *mut PageTable;
-    if let Err(error) = populate_address_space(root_table, kernel_layout, user_stack, user_image) {
+    if let Err(error) = populate_address_space(
+        root_table,
+        kernel_layout,
+        user_stack,
+        kernel_stack,
+        user_image,
+    ) {
         if rollback_page_table_tree(root_address).is_err() {
             return Err(PageTableError::RollbackFailed);
         }
@@ -134,9 +142,10 @@ fn populate_address_space(
     root_table: *mut PageTable,
     kernel_layout: KernelMemoryLayout,
     user_stack: &UserStackMapping<'_>,
+    kernel_stack: KernelStackMapping,
     user_image: UserImageMapping,
 ) -> Result<(), PageTableError> {
-    // FDT 描述的 RAM 建立为 S-mode 可读写恒等映射，页帧、堆和内核栈才可在启用 Sv39 后访问。
+    // FDT 描述的 RAM 建立为 S-mode 可读写恒等映射，页帧、堆、FDT 和物理设备页可继续按物理地址访问。
     for memory in crate::kernel::frame_allocator::physical_memory_regions()
         .map_err(PageTableError::FrameAllocation)?
     {
@@ -160,11 +169,9 @@ fn populate_address_space(
     map_kernel_section(root_table, kernel_layout.data, PTE_READ | PTE_WRITE)?;
     map_kernel_section(root_table, kernel_layout.bss, PTE_READ | PTE_WRITE)?;
 
-    // 低地址映射供当前代码继续运行；高地址别名映射同一批物理页，供后续迁移阶段使用。
-    map_kernel_section_alias(root_table, kernel_layout.text, PTE_READ | PTE_EXECUTE)?;
-    map_kernel_section_alias(root_table, kernel_layout.rodata, PTE_READ)?;
-    map_kernel_section_alias(root_table, kernel_layout.data, PTE_READ | PTE_WRITE)?;
-    map_kernel_section_alias(root_table, kernel_layout.bss, PTE_READ | PTE_WRITE)?;
+    // 首个任务地址空间激活前，启动 Rust 调用链仍在引导栈上；映射引导栈和当前任务栈。
+    map_kernel_stack(root_table, kernel_layout.boot_stack)?;
+    map_kernel_stack(root_table, kernel_stack)?;
 
     let mut image_offset = 0;
     while image_offset < user_image.size {
@@ -251,30 +258,42 @@ fn map_kernel_section(
     Ok(())
 }
 
-fn map_kernel_section_alias(
-    root_table: *mut PageTable,
-    section: KernelSectionRange,
-    permissions: usize,
-) -> Result<(), PageTableError> {
-    let mapping_size = align_up(section.size)?;
-    let mut offset = 0;
-    while offset < mapping_size {
-        let physical_page = section
-            .physical_start
-            .checked_add(offset)
-            .ok_or(PageTableError::InvalidRange)?;
-        let virtual_address =
-            super::kernel_high_alias(physical_page).ok_or(PageTableError::InvalidRange)?;
-        let section_virtual_address = section
-            .virtual_start
-            .checked_add(offset)
-            .ok_or(PageTableError::InvalidRange)?;
-        if virtual_address != section_virtual_address {
-            map_page(root_table, virtual_address, physical_page, permissions)?;
+/// 让每张任务页表都能访问调度切换期间可能仍在使用的任一内核栈。
+pub(super) fn map_kernel_stacks(stacks: &[KernelStackMapping]) -> Result<(), PageTableError> {
+    for address_space_index in 0..address_space_count() {
+        let root_address =
+            address_space_root(address_space_index).ok_or(PageTableError::UnknownAddressSpace)?;
+        let root_table = root_address as *mut PageTable;
+        for stack in stacks {
+            map_kernel_stack(root_table, *stack)?;
         }
-        offset = offset
-            .checked_add(PAGE_SIZE)
-            .ok_or(PageTableError::InvalidRange)?;
+    }
+    Ok(())
+}
+
+fn map_kernel_stack(
+    root_table: *mut PageTable,
+    stack: KernelStackMapping,
+) -> Result<(), PageTableError> {
+    if stack.virtual_start & PAGE_MASK != 0
+        || stack.physical_start & PAGE_MASK != 0
+        || stack.size == 0
+        || stack.size & PAGE_MASK != 0
+        || stack.virtual_start.checked_add(stack.size).is_none()
+        || stack.physical_start.checked_add(stack.size).is_none()
+    {
+        return Err(PageTableError::InvalidRange);
+    }
+
+    let mut offset = 0;
+    while offset < stack.size {
+        map_page(
+            root_table,
+            stack.virtual_start + offset,
+            stack.physical_start + offset,
+            PTE_READ | PTE_WRITE,
+        )?;
+        offset += PAGE_SIZE;
     }
     Ok(())
 }

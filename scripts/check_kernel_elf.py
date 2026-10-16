@@ -1,4 +1,4 @@
-"""检查当前内核 ELF 的启动入口和物理/虚拟加载地址基线。"""
+"""检查低地址启动入口与高半区内核主体的 ELF 布局。"""
 
 import json
 import subprocess
@@ -6,6 +6,7 @@ import sys
 
 
 BOOT_ADDRESS = 0x80200000
+KERNEL_VIRTUAL_OFFSET = 0xFFFFFFC000000000
 PAGE_SIZE = 4096
 
 
@@ -47,7 +48,7 @@ def main() -> int:
         errors.append("内核 ELF 目标架构不是 RISC-V")
     if entry != BOOT_ADDRESS:
         errors.append(f"入口应为低地址启动入口 {BOOT_ADDRESS:#x}，实际为 {entry:#x}")
-    if not load_segments:
+    if len(load_segments) < 3:
         errors.append("ELF 中没有 PT_LOAD 段")
     elif load_segments[0]["VirtualAddress"] != BOOT_ADDRESS:
         errors.append("第一个 PT_LOAD 段没有从启动入口地址开始")
@@ -63,15 +64,25 @@ def main() -> int:
         physical = segment["PhysicalAddress"]
         alignment = segment["Alignment"]
         flags = {flag["Name"] for flag in segment["Flags"]["Flags"]}
-        if virtual != physical:
-            errors.append(
-                f"PT_LOAD[{index}] 当前基线要求 VMA 与 LMA 相同，"
-                f"实际为 {virtual:#x} 与 {physical:#x}"
-            )
         if alignment < PAGE_SIZE:
             errors.append(f"PT_LOAD[{index}] 对齐小于一页：{alignment:#x}")
         if index == 0 and "PF_X" not in flags:
             errors.append("第一个 PT_LOAD 段不可执行，启动入口无法从该段取指")
+        if index < 2 and virtual != physical:
+            errors.append(f"启动阶段 PT_LOAD[{index}] 必须使用低地址恒等布局")
+        if index >= 2:
+            if virtual < KERNEL_VIRTUAL_OFFSET:
+                errors.append(f"内核主体 PT_LOAD[{index}] 没有链接到 Sv39 高半区")
+            elif virtual - KERNEL_VIRTUAL_OFFSET != physical:
+                errors.append(
+                    f"PT_LOAD[{index}] 的 VMA 与 LMA 偏移不符合启动映射："
+                    f"VMA={virtual:#x} LMA={physical:#x}"
+                )
+
+    if len(load_segments) >= 3 and "PF_X" not in {
+        flag["Name"] for flag in load_segments[2]["Flags"]["Flags"]
+    }:
+        errors.append("第一个高半区内核段不可执行")
 
     print(f"内核 ELF：{elf_path}")
     print(f"入口地址：{entry:#018x}")
@@ -93,7 +104,7 @@ def main() -> int:
             print(f"布局错误：{error}", file=sys.stderr)
         return 1
 
-    print("当前基线有效：入口和所有可加载段都使用低地址恒等布局。")
+    print("布局有效：低地址入口建立临时映射，内核主体按高半区 VMA 与低地址 LMA 加载。")
     return 0
 
 

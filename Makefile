@@ -42,7 +42,7 @@ build-user:
 	done; \
 	mv "$$manifest_tmp" "$(USER_IMAGE_MANIFEST)"
 
-# 检查内核 ELF 的入口和 PT_LOAD 段；本阶段确认仍采用低地址恒等加载。
+# 检查低地址启动入口及高半区 VMA、低地址 LMA 的内核 PT_LOAD 段。
 inspect-kernel-elf: build
 	$(PYTHON) scripts/check_kernel_elf.py "$(KERNEL)" "$(READOBJ)"
 

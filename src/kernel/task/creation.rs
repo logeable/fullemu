@@ -84,40 +84,63 @@ fn create_task_inner(program_index: usize) -> Result<TaskId, TaskCreationError> 
 
     let user_stack_range = user_stack.range();
     let kernel_stack_range = kernel_stack.range();
+    let initial_frame_physical_address =
+        kernel_stack.physical_top() - core::mem::size_of::<TrapFrame>();
     let initial_frame_address = kernel_stack.top() - core::mem::size_of::<TrapFrame>();
     let initial_frame = TrapFrame::for_user_entry(program.entry, user_stack.top());
     let user_stack_mapping = super::super::memory::UserStackMapping {
         virtual_start: user_stack.start(),
         frames: user_stack.frames(),
     };
+    let kernel_stack_mapping = super::super::memory::KernelStackMapping {
+        virtual_start: kernel_stack_range.0,
+        physical_start: kernel_stack.physical_start(),
+        size: kernel_stack_range.1 - kernel_stack_range.0,
+    };
     let user_image_mapping = super::super::memory::UserImageMapping {
         virtual_start: program.virtual_start,
         physical_start: program.slot_start,
         size: program.slot_end - program.slot_start,
     };
-    // 当前 linker.ld 仍规定 VMA=LMA；物理起点改由 LMA 符号提供，不从 VMA 推测。
+    // 内核段虚拟范围来自高半区 VMA，物理 backing 单独来自链接器 LMA 符号。
     let kernel_layout = super::super::memory::KernelMemoryLayout {
+        boot_stack: super::super::memory::KernelStackMapping {
+            virtual_start: core::ptr::addr_of!(super::__boot_stack_virtual_start) as usize,
+            physical_start: super::super::memory::kernel_physical_address(core::ptr::addr_of!(
+                super::__boot_stack_virtual_start
+            ) as usize),
+            size: (core::ptr::addr_of!(super::__boot_stack_virtual_end) as usize)
+                - (core::ptr::addr_of!(super::__boot_stack_virtual_start) as usize),
+        },
         text: super::super::memory::KernelSectionRange {
             virtual_start: core::ptr::addr_of!(super::__text_start) as usize,
-            physical_start: core::ptr::addr_of!(super::__text_load_start) as usize,
+            physical_start: super::super::memory::kernel_physical_address(core::ptr::addr_of!(
+                super::__text_start
+            ) as usize),
             size: (core::ptr::addr_of!(super::__text_end) as usize)
                 - (core::ptr::addr_of!(super::__text_start) as usize),
         },
         rodata: super::super::memory::KernelSectionRange {
             virtual_start: core::ptr::addr_of!(super::__rodata_start) as usize,
-            physical_start: core::ptr::addr_of!(super::__rodata_load_start) as usize,
+            physical_start: super::super::memory::kernel_physical_address(core::ptr::addr_of!(
+                super::__rodata_start
+            ) as usize),
             size: (core::ptr::addr_of!(super::__rodata_end) as usize)
                 - (core::ptr::addr_of!(super::__rodata_start) as usize),
         },
         data: super::super::memory::KernelSectionRange {
             virtual_start: core::ptr::addr_of!(super::__data_start) as usize,
-            physical_start: core::ptr::addr_of!(super::__data_load_start) as usize,
+            physical_start: super::super::memory::kernel_physical_address(core::ptr::addr_of!(
+                super::__data_start
+            ) as usize),
             size: (core::ptr::addr_of!(super::__data_end) as usize)
                 - (core::ptr::addr_of!(super::__data_start) as usize),
         },
         bss: super::super::memory::KernelSectionRange {
             virtual_start: core::ptr::addr_of!(super::__bss_start) as usize,
-            physical_start: core::ptr::addr_of!(super::__bss_load_start) as usize,
+            physical_start: super::super::memory::kernel_physical_address(core::ptr::addr_of!(
+                super::__bss_start
+            ) as usize),
             size: (core::ptr::addr_of!(super::__bss_end) as usize)
                 - (core::ptr::addr_of!(super::__bss_start) as usize),
         },
@@ -127,13 +150,17 @@ fn create_task_inner(program_index: usize) -> Result<TaskId, TaskCreationError> 
         task_id.index(),
         kernel_layout,
         &user_stack_mapping,
+        kernel_stack_mapping,
         user_image_mapping,
     )
     .map_err(TaskCreationError::AddressSpace)?;
 
-    // 安全性：陷入帧位于本任务独占的连续内核栈页顶部，栈页所有权仍由下方局部变量持有。
+    // 安全性：陷入帧先通过低地址恒等映射写入本任务独占的物理栈页；发布的指针是页表映射后的高地址。
     unsafe {
-        core::ptr::write(initial_frame_address as *mut TrapFrame, initial_frame);
+        core::ptr::write(
+            initial_frame_physical_address as *mut TrapFrame,
+            initial_frame,
+        );
     }
 
     let program_name = program.name;
@@ -153,7 +180,7 @@ fn create_task_inner(program_index: usize) -> Result<TaskId, TaskCreationError> 
     }
 
     crate::klog_info!(
-        "用户任务已创建：任务={}，程序={}，入口 {:#018x}，镜像 {} 字节；用户栈虚拟={:#018x}..{:#018x}，内核栈恒等地址={:#018x}..{:#018x}",
+        "用户任务已创建：任务={}，程序={}，入口 {:#018x}，镜像 {} 字节；用户栈虚拟={:#018x}..{:#018x}，内核栈高地址={:#018x}..{:#018x}",
         task_id.index(),
         program_name,
         program_entry,

@@ -1,6 +1,6 @@
 //! 管理任务内核栈和用户栈的页帧所有权。
 //!
-//! 内核栈要求物理页连续，以恒等映射形成连续栈地址；用户栈逐页映射，物理页可以分散。
+//! 内核栈要求物理页连续，并由每张任务页表映射到内核高半区；用户栈逐页映射，物理页可以分散。
 
 use alloc::vec::Vec;
 
@@ -46,6 +46,15 @@ impl KernelStack {
     }
 
     pub(super) fn top(&self) -> usize {
+        let physical_top = self.physical_top();
+        let Some(virtual_top) = super::super::memory::kernel_high_alias(physical_top) else {
+            crate::klog_error!("计算内核栈高地址时溢出");
+            super::stop_forever();
+        };
+        virtual_top
+    }
+
+    pub(super) fn physical_top(&self) -> usize {
         let Some(backing) = self.backing.as_ref() else {
             super::stop_forever();
         };
@@ -54,6 +63,10 @@ impl KernelStack {
 
     pub(super) fn range(&self) -> (usize, usize) {
         (self.top() - KERNEL_STACK_SIZE, self.top())
+    }
+
+    pub(super) fn physical_start(&self) -> usize {
+        self.physical_top() - KERNEL_STACK_SIZE
     }
 }
 

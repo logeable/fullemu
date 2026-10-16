@@ -9,6 +9,11 @@ mod user_access;
 // 当前内核以低地址链接；此基址把物理页转换为已有页表中的高半区别名。
 const KERNEL_VIRTUAL_BASE: usize = 0xffff_ffc0_0000_0000;
 
+/// 将当前内核映像的高半区地址转换为对应物理装载地址。
+pub(super) const fn kernel_physical_address(virtual_address: usize) -> usize {
+    virtual_address - KERNEL_VIRTUAL_BASE
+}
+
 /// 计算一个内核物理地址在高半区中的别名地址。
 pub(super) fn kernel_high_alias(physical_address: usize) -> Option<usize> {
     KERNEL_VIRTUAL_BASE.checked_add(physical_address)
@@ -19,14 +24,26 @@ pub(super) fn create_address_space(
     address_space_index: usize,
     kernel_layout: KernelMemoryLayout,
     user_stack: &UserStackMapping<'_>,
+    kernel_stack: KernelStackMapping,
     user_image: UserImageMapping,
 ) -> Result<(), PageTableError> {
-    address_space::create_address_space(address_space_index, kernel_layout, user_stack, user_image)
+    address_space::create_address_space(
+        address_space_index,
+        kernel_layout,
+        user_stack,
+        kernel_stack,
+        user_image,
+    )
 }
 
 /// 切换到指定任务的 Sv39 根页表。
 pub(super) fn activate_address_space(address_space_index: usize) -> Result<(), PageTableError> {
     address_space::activate_address_space(address_space_index)
+}
+
+/// 在全部任务地址空间中映射共享的 S-mode 内核栈集合。
+pub(super) fn map_kernel_stacks(stacks: &[KernelStackMapping]) -> Result<(), PageTableError> {
+    address_space::map_kernel_stacks(stacks)
 }
 
 /// 销毁非活动地址空间，并返回释放的页表页数。
@@ -65,6 +82,7 @@ pub(super) struct UserImageMapping {
 /// 描述需要分别设置页表权限的内核链接段范围。
 #[derive(Clone, Copy)]
 pub(super) struct KernelMemoryLayout {
+    pub(super) boot_stack: KernelStackMapping,
     pub(super) text: KernelSectionRange,
     pub(super) rodata: KernelSectionRange,
     pub(super) data: KernelSectionRange,
@@ -86,6 +104,14 @@ pub(super) struct KernelSectionRange {
 pub(super) struct UserStackMapping<'a> {
     pub(super) virtual_start: usize,
     pub(super) frames: &'a [crate::kernel::frame_allocator::PhysicalFrame],
+}
+
+/// 描述任务内核栈的高地址虚拟范围及其连续物理 backing。
+#[derive(Clone, Copy)]
+pub(super) struct KernelStackMapping {
+    pub(super) virtual_start: usize,
+    pub(super) physical_start: usize,
+    pub(super) size: usize,
 }
 
 /// 以调试日志输出各任务页表中的映射范围。
