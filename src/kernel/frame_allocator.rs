@@ -106,12 +106,7 @@ impl FrameAllocator {
     }
 
     fn initialize(&mut self, memory_info: &FdtMemoryInfo) -> Result<(), FrameError> {
-        if self.initialized {
-            return Err(FrameError::AlreadyInitialized);
-        }
-        if memory_info.memory_regions().len() > MAX_MEMORY_REGIONS {
-            return Err(FrameError::TooManyMemoryRegions);
-        }
+        self.validate_initialization_request(memory_info)?;
 
         let kernel_end = super::memory::address::kernel_virtual_to_physical(core::ptr::addr_of!(
             __kernel_load_end_virtual
@@ -122,8 +117,44 @@ impl FrameAllocator {
         let program_end = super::memory::address::kernel_virtual_to_physical(core::ptr::addr_of!(
             __user_program_load_virtual_end
         ) as usize);
-        self.memory_region_count = memory_info.memory_regions().len();
-        for (index, memory) in memory_info.memory_regions().iter().copied().enumerate() {
+
+        self.copy_and_sort_memory_regions(memory_info.memory_regions());
+        for memory_index in 0..self.memory_region_count {
+            let memory = self.memory_regions[memory_index];
+            self.append_usable_frames_from_region(
+                memory,
+                memory_info,
+                kernel_end,
+                program_start,
+                program_end,
+            )?;
+        }
+
+        if self.managed_range_count == 0 {
+            return Err(FrameError::NoUsableMemory);
+        }
+        self.free_ranges = self.managed_ranges;
+        self.free_range_count = self.managed_range_count;
+        self.initialized = true;
+        Ok(())
+    }
+
+    fn validate_initialization_request(
+        &self,
+        memory_info: &FdtMemoryInfo,
+    ) -> Result<(), FrameError> {
+        if self.initialized {
+            return Err(FrameError::AlreadyInitialized);
+        }
+        if memory_info.memory_regions().len() > MAX_MEMORY_REGIONS {
+            return Err(FrameError::TooManyMemoryRegions);
+        }
+        Ok(())
+    }
+
+    fn copy_and_sort_memory_regions(&mut self, memory_regions: &[PhysicalMemoryRegion]) {
+        self.memory_region_count = memory_regions.len();
+        for (index, memory) in memory_regions.iter().copied().enumerate() {
             self.memory_regions[index] = memory;
         }
         for index in 1..self.memory_region_count {
@@ -135,45 +166,44 @@ impl FrameAllocator {
             }
             self.memory_regions[insertion] = memory;
         }
+    }
 
-        for memory_index in 0..self.memory_region_count {
-            let memory = self.memory_regions[memory_index];
-            let memory_start =
-                usize::try_from(memory.start).map_err(|_| FrameError::InvalidMemoryRange)?;
-            let start = memory_start.max(kernel_end);
-            let end = memory
-                .end_exclusive()
-                .and_then(|end| usize::try_from(end).ok())
+    fn append_usable_frames_from_region(
+        &mut self,
+        memory: PhysicalMemoryRegion,
+        memory_info: &FdtMemoryInfo,
+        kernel_end: usize,
+        program_start: usize,
+        program_end: usize,
+    ) -> Result<(), FrameError> {
+        let memory_start =
+            usize::try_from(memory.start).map_err(|_| FrameError::InvalidMemoryRange)?;
+        let start = memory_start.max(kernel_end);
+        let end = memory
+            .end_exclusive()
+            .and_then(|end| usize::try_from(end).ok())
+            .ok_or(FrameError::InvalidMemoryRange)?;
+        let start = align_up_to_page(start).ok_or(FrameError::InvalidMemoryRange)?;
+        let end = align_down_to_page(end);
+        if start >= end {
+            return Ok(());
+        }
+
+        let mut frame_start = start;
+        while frame_start < end {
+            let frame_end = frame_start
+                .checked_add(PAGE_SIZE)
                 .ok_or(FrameError::InvalidMemoryRange)?;
-            let start = align_up_to_page(start).ok_or(FrameError::InvalidMemoryRange)?;
-            let end = align_down_to_page(end);
-            if start >= end {
-                continue;
+            let frame_region = PhysicalMemoryRegion {
+                start: frame_start as u64,
+                size: PAGE_SIZE as u64,
+            };
+            let overlaps_program = frame_start < program_end && program_start < frame_end;
+            if !overlaps_program && memory_info.contains_unreserved_ram_region(frame_region) {
+                self.append_managed_frame(frame_start)?;
             }
-
-            let mut frame_start = start;
-            while frame_start < end {
-                let frame_end = frame_start
-                    .checked_add(PAGE_SIZE)
-                    .ok_or(FrameError::InvalidMemoryRange)?;
-                let frame_region = PhysicalMemoryRegion {
-                    start: frame_start as u64,
-                    size: PAGE_SIZE as u64,
-                };
-                let overlaps_program = frame_start < program_end && program_start < frame_end;
-                if !overlaps_program && memory_info.contains_unreserved_ram_region(frame_region) {
-                    self.append_managed_frame(frame_start)?;
-                }
-                frame_start = frame_end;
-            }
+            frame_start = frame_end;
         }
-
-        if self.managed_range_count == 0 {
-            return Err(FrameError::NoUsableMemory);
-        }
-        self.free_ranges = self.managed_ranges;
-        self.free_range_count = self.managed_range_count;
-        self.initialized = true;
         Ok(())
     }
 

@@ -26,6 +26,53 @@ pub(super) fn create_address_space(
     user_image: UserImageMapping,
 ) -> Result<(), PageTableError> {
     validate_kernel_layout(kernel_layout)?;
+    validate_user_mappings(kernel_layout, user_stack, user_image)?;
+
+    {
+        // 安全性：地址空间创建只在单 hart 的启动或陷入路径执行；S-mode 定时器陷入期间不会并发修改该容器。
+        let address_spaces = unsafe { &mut *core::ptr::addr_of_mut!(ADDRESS_SPACES) };
+        if address_space_index != address_spaces.len() {
+            return Err(PageTableError::AddressSpaceIdOutOfOrder);
+        }
+        address_spaces
+            .try_reserve(1)
+            .map_err(|_| PageTableError::AddressSpaceMetadataAllocation)?;
+    }
+
+    let root_frame = crate::kernel::frame_allocator::allocate_zeroed_frame()
+        .map_err(PageTableError::FrameAllocation)?;
+    let root_address = root_frame.start_address();
+    let Some(root_virtual_address) = super::address::physical_to_kernel_virtual(root_address)
+    else {
+        crate::kernel::frame_allocator::deallocate_frame(root_frame)
+            .map_err(PageTableError::FrameDeallocation)?;
+        return Err(PageTableError::InvalidRange);
+    };
+    let root_address = root_frame.into_address();
+    let root_table = root_virtual_address as *mut PageTable;
+    if let Err(error) = populate_address_space(
+        root_table,
+        kernel_layout,
+        user_stack,
+        kernel_stack,
+        user_image,
+    ) {
+        if rollback_page_table_tree(root_address).is_err() {
+            return Err(PageTableError::RollbackFailed);
+        }
+        return Err(error);
+    }
+
+    // 安全性：容器容量已预留；只有页表树完整建立后才发布根地址，单 hart 不会并发观察中间状态。
+    unsafe { (&mut *core::ptr::addr_of_mut!(ADDRESS_SPACES)).push(Some(root_address)) };
+    Ok(())
+}
+
+fn validate_user_mappings(
+    kernel_layout: KernelMemoryLayout,
+    user_stack: &UserStackMapping<'_>,
+    user_image: UserImageMapping,
+) -> Result<(), PageTableError> {
     let kernel_end = align_up_to_page(
         kernel_layout
             .bss
@@ -106,43 +153,6 @@ pub(super) fn create_address_space(
         }
     }
 
-    {
-        // 安全性：地址空间创建只在单 hart 的启动或陷入路径执行；S-mode 定时器陷入期间不会并发修改该容器。
-        let address_spaces = unsafe { &mut *core::ptr::addr_of_mut!(ADDRESS_SPACES) };
-        if address_space_index != address_spaces.len() {
-            return Err(PageTableError::AddressSpaceIdOutOfOrder);
-        }
-        address_spaces
-            .try_reserve(1)
-            .map_err(|_| PageTableError::AddressSpaceMetadataAllocation)?;
-    }
-
-    let root_frame = crate::kernel::frame_allocator::allocate_zeroed_frame()
-        .map_err(PageTableError::FrameAllocation)?;
-    let root_address = root_frame.start_address();
-    let Some(root_virtual_address) = super::address::physical_to_kernel_virtual(root_address)
-    else {
-        crate::kernel::frame_allocator::deallocate_frame(root_frame)
-            .map_err(PageTableError::FrameDeallocation)?;
-        return Err(PageTableError::InvalidRange);
-    };
-    let root_address = root_frame.into_address();
-    let root_table = root_virtual_address as *mut PageTable;
-    if let Err(error) = populate_address_space(
-        root_table,
-        kernel_layout,
-        user_stack,
-        kernel_stack,
-        user_image,
-    ) {
-        if rollback_page_table_tree(root_address).is_err() {
-            return Err(PageTableError::RollbackFailed);
-        }
-        return Err(error);
-    }
-
-    // 安全性：容器容量已预留；只有页表树完整建立后才发布根地址，单 hart 不会并发观察中间状态。
-    unsafe { (&mut *core::ptr::addr_of_mut!(ADDRESS_SPACES)).push(Some(root_address)) };
     Ok(())
 }
 

@@ -2,6 +2,7 @@
 
 use crate::arch::riscv64::trap::TrapFrame;
 
+use super::super::memory::{KernelMemoryLayout, KernelSectionRange, KernelStackMapping};
 use super::{stack::StackError, KernelStack, Task, TaskId, TaskState, UserStack, MAX_USER_TASKS};
 
 /// 单任务创建失败的阶段和原因。
@@ -100,49 +101,7 @@ fn create_task_inner(program_index: usize) -> Result<TaskId, TaskCreationError> 
         physical_start: program.slot_start,
         size: program.slot_end - program.slot_start,
     };
-    // 内核段虚拟范围来自高半区 VMA，物理 backing 单独来自链接器 LMA 符号。
-    let kernel_layout = super::super::memory::KernelMemoryLayout {
-        boot_stack: super::super::memory::KernelStackMapping {
-            virtual_start: core::ptr::addr_of!(super::__boot_stack_virtual_start) as usize,
-            physical_start: super::super::memory::address::kernel_virtual_to_physical(
-                core::ptr::addr_of!(super::__boot_stack_virtual_start) as usize,
-            ),
-            size: (core::ptr::addr_of!(super::__boot_stack_virtual_end) as usize)
-                - (core::ptr::addr_of!(super::__boot_stack_virtual_start) as usize),
-        },
-        text: super::super::memory::KernelSectionRange {
-            virtual_start: core::ptr::addr_of!(super::__text_start) as usize,
-            physical_start: super::super::memory::address::kernel_virtual_to_physical(
-                core::ptr::addr_of!(super::__text_start) as usize,
-            ),
-            size: (core::ptr::addr_of!(super::__text_end) as usize)
-                - (core::ptr::addr_of!(super::__text_start) as usize),
-        },
-        rodata: super::super::memory::KernelSectionRange {
-            virtual_start: core::ptr::addr_of!(super::__rodata_start) as usize,
-            physical_start: super::super::memory::address::kernel_virtual_to_physical(
-                core::ptr::addr_of!(super::__rodata_start) as usize,
-            ),
-            size: (core::ptr::addr_of!(super::__rodata_end) as usize)
-                - (core::ptr::addr_of!(super::__rodata_start) as usize),
-        },
-        data: super::super::memory::KernelSectionRange {
-            virtual_start: core::ptr::addr_of!(super::__data_start) as usize,
-            physical_start: super::super::memory::address::kernel_virtual_to_physical(
-                core::ptr::addr_of!(super::__data_start) as usize,
-            ),
-            size: (core::ptr::addr_of!(super::__data_end) as usize)
-                - (core::ptr::addr_of!(super::__data_start) as usize),
-        },
-        bss: super::super::memory::KernelSectionRange {
-            virtual_start: core::ptr::addr_of!(super::__bss_start) as usize,
-            physical_start: super::super::memory::address::kernel_virtual_to_physical(
-                core::ptr::addr_of!(super::__bss_start) as usize,
-            ),
-            size: (core::ptr::addr_of!(super::__bss_end) as usize)
-                - (core::ptr::addr_of!(super::__bss_start) as usize),
-        },
-    };
+    let kernel_layout = kernel_memory_layout();
 
     super::super::memory::create_address_space(
         task_id.index(),
@@ -186,4 +145,44 @@ fn create_task_inner(program_index: usize) -> Result<TaskId, TaskCreationError> 
         kernel_stack_range.1
     );
     Ok(task_id)
+}
+
+/// 从链接器符号组装高半区内核段及其物理装载范围。
+fn kernel_memory_layout() -> KernelMemoryLayout {
+    let boot_stack_start = core::ptr::addr_of!(super::__boot_stack_virtual_start) as usize;
+    let boot_stack_end = core::ptr::addr_of!(super::__boot_stack_virtual_end) as usize;
+
+    KernelMemoryLayout {
+        boot_stack: KernelStackMapping {
+            virtual_start: boot_stack_start,
+            physical_start: super::super::memory::address::kernel_virtual_to_physical(
+                boot_stack_start,
+            ),
+            size: boot_stack_end - boot_stack_start,
+        },
+        text: kernel_section(
+            core::ptr::addr_of!(super::__text_start) as usize,
+            core::ptr::addr_of!(super::__text_end) as usize,
+        ),
+        rodata: kernel_section(
+            core::ptr::addr_of!(super::__rodata_start) as usize,
+            core::ptr::addr_of!(super::__rodata_end) as usize,
+        ),
+        data: kernel_section(
+            core::ptr::addr_of!(super::__data_start) as usize,
+            core::ptr::addr_of!(super::__data_end) as usize,
+        ),
+        bss: kernel_section(
+            core::ptr::addr_of!(super::__bss_start) as usize,
+            core::ptr::addr_of!(super::__bss_end) as usize,
+        ),
+    }
+}
+
+fn kernel_section(virtual_start: usize, virtual_end: usize) -> KernelSectionRange {
+    KernelSectionRange {
+        virtual_start,
+        physical_start: super::super::memory::address::kernel_virtual_to_physical(virtual_start),
+        size: virtual_end - virtual_start,
+    }
 }

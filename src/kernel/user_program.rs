@@ -8,6 +8,12 @@ struct UserProgramImage {
     bytes: &'static [u8],
 }
 
+struct ProgramSlot {
+    physical_start: usize,
+    physical_end: usize,
+    virtual_start: usize,
+}
+
 include!(concat!(env!("OUT_DIR"), "/user_program_catalog.rs"));
 
 extern "C" {
@@ -67,6 +73,34 @@ pub(super) fn load(index: usize) -> Result<Option<LoadedUserProgram>, UserProgra
         return Ok(None);
     };
 
+    let slot = validated_program_slot(index, program)?;
+
+    // 安全性：链接器保证加载区位于内核映像之后且落在 QEMU RAM 内；
+    // 编译期嵌入的源镜像与目标物理槽位不重叠，镜像长度和槽位边界已在复制前检查。
+    unsafe {
+        core::ptr::write_bytes(slot.virtual_start as *mut u8, 0, USER_PROGRAM_SLOT_SIZE);
+        core::ptr::copy_nonoverlapping(
+            program.bytes.as_ptr(),
+            slot.virtual_start as *mut u8,
+            program.bytes.len(),
+        );
+        core::arch::asm!("fence.i", options(nostack));
+    }
+
+    Ok(Some(LoadedUserProgram {
+        name: program.name,
+        entry: USER_PROGRAM_VIRTUAL_BASE,
+        virtual_start: USER_PROGRAM_VIRTUAL_BASE,
+        slot_start: slot.physical_start,
+        slot_end: slot.physical_end,
+        image_size: program.bytes.len(),
+    }))
+}
+
+fn validated_program_slot(
+    index: usize,
+    program: &UserProgramImage,
+) -> Result<ProgramSlot, UserProgramLoadError> {
     // 链接器将这两个符号定义为加载区首尾地址，而非存放数据的变量。
     let load_virtual_start = core::ptr::addr_of!(__user_program_load_virtual_start) as usize;
     let load_virtual_end = core::ptr::addr_of!(__user_program_load_virtual_end) as usize;
@@ -115,24 +149,9 @@ pub(super) fn load(index: usize) -> Result<Option<LoadedUserProgram>, UserProgra
             description: "用户程序槽位虚拟地址计算溢出",
         });
     };
-    // 安全性：链接脚本保证加载区位于内核映像之后且落在 QEMU RAM 内；
-    // 编译期嵌入的源镜像与目标物理槽位不重叠，镜像长度和槽位边界已在复制前检查。
-    unsafe {
-        core::ptr::write_bytes(slot_virtual_start as *mut u8, 0, capacity);
-        core::ptr::copy_nonoverlapping(
-            program.bytes.as_ptr(),
-            slot_virtual_start as *mut u8,
-            program.bytes.len(),
-        );
-        core::arch::asm!("fence.i", options(nostack));
-    }
-
-    Ok(Some(LoadedUserProgram {
-        name: program.name,
-        entry: USER_PROGRAM_VIRTUAL_BASE,
-        virtual_start: USER_PROGRAM_VIRTUAL_BASE,
-        slot_start,
-        slot_end,
-        image_size: program.bytes.len(),
-    }))
+    Ok(ProgramSlot {
+        physical_start: slot_start,
+        physical_end: slot_end,
+        virtual_start: slot_virtual_start,
+    })
 }
