@@ -23,9 +23,9 @@ pub(super) struct LoadedUserProgram {
     pub(super) entry: usize,
     /// 用户程序链接时使用的固定虚拟起始地址。
     pub(super) virtual_start: usize,
-    /// 用户程序固定加载槽位的起始地址。
+    /// 用户程序固定加载槽位的物理起始地址。
     pub(super) slot_start: usize,
-    /// 用户程序固定加载槽位的结束地址。
+    /// 用户程序固定加载槽位的物理结束地址。
     pub(super) slot_end: usize,
     /// 从独立构建产物复制的字节数。
     pub(super) image_size: usize,
@@ -68,12 +68,10 @@ pub(super) fn load(index: usize) -> Result<Option<LoadedUserProgram>, UserProgra
     };
 
     // 链接器将这两个符号定义为加载区首尾地址，而非存放数据的变量。
-    let load_start = super::memory::kernel_physical_address(core::ptr::addr_of!(
-        __user_program_load_virtual_start
-    ) as usize);
-    let load_end = super::memory::kernel_physical_address(core::ptr::addr_of!(
-        __user_program_load_virtual_end
-    ) as usize);
+    let load_virtual_start = core::ptr::addr_of!(__user_program_load_virtual_start) as usize;
+    let load_virtual_end = core::ptr::addr_of!(__user_program_load_virtual_end) as usize;
+    let load_start = super::memory::address::kernel_virtual_to_physical(load_virtual_start);
+    let load_end = super::memory::address::kernel_virtual_to_physical(load_virtual_end);
     let reserved_capacity = load_end - load_start;
     let capacity = USER_PROGRAM_SLOT_SIZE;
     let Some(slot_offset) = index.checked_mul(USER_PROGRAM_SLOT_SIZE) else {
@@ -109,13 +107,21 @@ pub(super) fn load(index: usize) -> Result<Option<LoadedUserProgram>, UserProgra
             description: "用户程序镜像超过固定加载槽位容量",
         });
     }
+    let Some(slot_virtual_start) = load_virtual_start.checked_add(slot_offset) else {
+        return Err(UserProgramLoadError {
+            program_name: program.name,
+            image_size: program.bytes.len(),
+            capacity,
+            description: "用户程序槽位虚拟地址计算溢出",
+        });
+    };
     // 安全性：链接脚本保证加载区位于内核映像之后且落在 QEMU RAM 内；
     // 编译期嵌入的源镜像与目标物理槽位不重叠，镜像长度和槽位边界已在复制前检查。
     unsafe {
-        core::ptr::write_bytes(slot_start as *mut u8, 0, capacity);
+        core::ptr::write_bytes(slot_virtual_start as *mut u8, 0, capacity);
         core::ptr::copy_nonoverlapping(
             program.bytes.as_ptr(),
-            slot_start as *mut u8,
+            slot_virtual_start as *mut u8,
             program.bytes.len(),
         );
         core::arch::asm!("fence.i", options(nostack));

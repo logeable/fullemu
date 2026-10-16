@@ -1,9 +1,8 @@
 //! 实现 Sv39 页表项的建立、地址空间激活和页地址计算。
 
+use super::page::is_page_aligned;
 use super::PageTableError;
 
-pub(super) const PAGE_SIZE: usize = 4096;
-pub(super) const PAGE_MASK: usize = PAGE_SIZE - 1;
 pub(super) const PAGE_TABLE_ENTRIES: usize = 512;
 const SATP_SV39_MODE: usize = 8;
 const SATP_MODE_SHIFT: usize = 60;
@@ -17,18 +16,8 @@ pub(super) const PTE_USER: usize = 1 << 4;
 pub(super) const PTE_ACCESSED: usize = 1 << 6;
 pub(super) const PTE_DIRTY: usize = 1 << 7;
 
-const SV39_VIRTUAL_ADDRESS_MASK: usize = (1 << 39) - 1;
-
 #[repr(C, align(4096))]
 pub(super) struct PageTable(pub(super) [usize; PAGE_TABLE_ENTRIES]);
-
-pub(super) fn canonicalize_sv39(address: usize) -> usize {
-    if address & (1 << 38) == 0 {
-        address & SV39_VIRTUAL_ADDRESS_MASK
-    } else {
-        address | !SV39_VIRTUAL_ADDRESS_MASK
-    }
-}
 
 pub(super) fn map_page(
     root_table: *mut PageTable,
@@ -51,8 +40,16 @@ pub(super) fn map_page(
         if entry_value & PTE_VALID == 0 {
             let child_frame = crate::kernel::frame_allocator::allocate_zeroed_frame()
                 .map_err(PageTableError::FrameAllocation)?;
+            let child_address = child_frame.start_address();
+            let Some(child_virtual_address) =
+                super::address::physical_to_kernel_virtual(child_address)
+            else {
+                crate::kernel::frame_allocator::deallocate_frame(child_frame)
+                    .map_err(PageTableError::FrameDeallocation)?;
+                return Err(PageTableError::InvalidRange);
+            };
             let child_address = child_frame.into_address();
-            let child = child_address as *mut PageTable;
+            let child = child_virtual_address as *mut PageTable;
             let child_physical_page = child_address >> 12;
             // 安全性：当前 PTE 指针属于有效父页表；新子表地址满足 Sv39 PPN 编码布局。
             unsafe { core::ptr::write(entry, (child_physical_page << 10) | PTE_VALID) };
@@ -65,7 +62,9 @@ pub(super) fn map_page(
             if !crate::kernel::frame_allocator::is_allocated_frame_address(child_address) {
                 return Err(PageTableError::InvalidChildTable);
             }
-            table = child_address as *mut PageTable;
+            let child_virtual_address = super::address::physical_to_kernel_virtual(child_address)
+                .ok_or(PageTableError::InvalidChildTable)?;
+            table = child_virtual_address as *mut PageTable;
         }
     }
 
@@ -91,14 +90,14 @@ pub(super) fn map_page(
 
 pub(super) fn activate(root_physical_address: usize) -> Result<(), PageTableError> {
     if root_physical_address == 0
-        || root_physical_address & PAGE_MASK != 0
+        || !is_page_aligned(root_physical_address)
         || !crate::kernel::frame_allocator::is_allocated_frame_address(root_physical_address)
     {
         return Err(PageTableError::InvalidRootTable);
     }
 
     let satp_value = (SATP_SV39_MODE << SATP_MODE_SHIFT) | (root_physical_address >> 12);
-    // 安全性：根页表来自已分配页帧；新旧页表都映射高半区内核代码、共享内核栈及物理 RAM 恒等区。
+    // 安全性：根页表来自已分配页帧；新旧页表都映射高半区内核代码、直接映射 RAM 及共享内核栈。
     unsafe {
         core::arch::asm!(
             "csrw satp, {value}",
@@ -138,11 +137,4 @@ pub(super) fn active_root_address() -> usize {
         return 0;
     }
     (satp_value & SATP_PPN_MASK) << 12
-}
-
-pub(super) fn align_up(address: usize) -> Result<usize, PageTableError> {
-    address
-        .checked_add(PAGE_MASK)
-        .map(|value| value & !PAGE_MASK)
-        .ok_or(PageTableError::InvalidRange)
 }

@@ -1,9 +1,10 @@
 //! 遍历 Sv39 页表并输出连续虚拟/物理映射范围，供启动调试使用。
 
+use super::address::{canonicalize_sv39, physical_to_kernel_virtual};
 use super::address_space::{address_space_count, address_space_root};
+use super::page::is_page_aligned;
 use super::page_table::{
-    canonicalize_sv39, PageTable, PAGE_MASK, PAGE_TABLE_ENTRIES, PTE_EXECUTE, PTE_READ, PTE_USER,
-    PTE_VALID, PTE_WRITE,
+    PageTable, PAGE_TABLE_ENTRIES, PTE_EXECUTE, PTE_READ, PTE_USER, PTE_VALID, PTE_WRITE,
 };
 
 /// 以调试日志输出每个任务页表中的有效映射。
@@ -31,9 +32,17 @@ pub(super) fn log_address_spaces() {
             root_address
         );
 
+        let Some(root_virtual_address) = physical_to_kernel_virtual(root_address) else {
+            crate::klog_error!(
+                "Sv39 页表无效：任务={}，根页表无法映射到内核高半区",
+                address_space_index
+            );
+            continue;
+        };
+
         let mut mapping_run = None;
         walk_page_table(
-            root_address as *const PageTable,
+            root_virtual_address as *const PageTable,
             2,
             0,
             address_space_index,
@@ -94,7 +103,7 @@ fn walk_page_table(
         }
 
         let child_table_address = ((entry >> 10) << 12) as usize;
-        if child_table_address & PAGE_MASK != 0
+        if !is_page_aligned(child_table_address)
             || !crate::kernel::frame_allocator::is_allocated_frame_address(child_table_address)
         {
             crate::klog_error!(
@@ -104,8 +113,15 @@ fn walk_page_table(
             continue;
         }
 
+        let Some(child_virtual_address) = physical_to_kernel_virtual(child_table_address) else {
+            crate::klog_error!(
+                "Sv39 页表无效：任务={}，子页表无法映射到内核高半区",
+                address_space_index
+            );
+            continue;
+        };
         walk_page_table(
-            child_table_address as *const PageTable,
+            child_virtual_address as *const PageTable,
             level - 1,
             next_virtual_page_number,
             address_space_index,

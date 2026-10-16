@@ -84,8 +84,6 @@ fn create_task_inner(program_index: usize) -> Result<TaskId, TaskCreationError> 
 
     let user_stack_range = user_stack.range();
     let kernel_stack_range = kernel_stack.range();
-    let initial_frame_physical_address =
-        kernel_stack.physical_top() - core::mem::size_of::<TrapFrame>();
     let initial_frame_address = kernel_stack.top() - core::mem::size_of::<TrapFrame>();
     let initial_frame = TrapFrame::for_user_entry(program.entry, user_stack.top());
     let user_stack_mapping = super::super::memory::UserStackMapping {
@@ -106,41 +104,41 @@ fn create_task_inner(program_index: usize) -> Result<TaskId, TaskCreationError> 
     let kernel_layout = super::super::memory::KernelMemoryLayout {
         boot_stack: super::super::memory::KernelStackMapping {
             virtual_start: core::ptr::addr_of!(super::__boot_stack_virtual_start) as usize,
-            physical_start: super::super::memory::kernel_physical_address(core::ptr::addr_of!(
-                super::__boot_stack_virtual_start
-            ) as usize),
+            physical_start: super::super::memory::address::kernel_virtual_to_physical(
+                core::ptr::addr_of!(super::__boot_stack_virtual_start) as usize,
+            ),
             size: (core::ptr::addr_of!(super::__boot_stack_virtual_end) as usize)
                 - (core::ptr::addr_of!(super::__boot_stack_virtual_start) as usize),
         },
         text: super::super::memory::KernelSectionRange {
             virtual_start: core::ptr::addr_of!(super::__text_start) as usize,
-            physical_start: super::super::memory::kernel_physical_address(core::ptr::addr_of!(
-                super::__text_start
-            ) as usize),
+            physical_start: super::super::memory::address::kernel_virtual_to_physical(
+                core::ptr::addr_of!(super::__text_start) as usize,
+            ),
             size: (core::ptr::addr_of!(super::__text_end) as usize)
                 - (core::ptr::addr_of!(super::__text_start) as usize),
         },
         rodata: super::super::memory::KernelSectionRange {
             virtual_start: core::ptr::addr_of!(super::__rodata_start) as usize,
-            physical_start: super::super::memory::kernel_physical_address(core::ptr::addr_of!(
-                super::__rodata_start
-            ) as usize),
+            physical_start: super::super::memory::address::kernel_virtual_to_physical(
+                core::ptr::addr_of!(super::__rodata_start) as usize,
+            ),
             size: (core::ptr::addr_of!(super::__rodata_end) as usize)
                 - (core::ptr::addr_of!(super::__rodata_start) as usize),
         },
         data: super::super::memory::KernelSectionRange {
             virtual_start: core::ptr::addr_of!(super::__data_start) as usize,
-            physical_start: super::super::memory::kernel_physical_address(core::ptr::addr_of!(
-                super::__data_start
-            ) as usize),
+            physical_start: super::super::memory::address::kernel_virtual_to_physical(
+                core::ptr::addr_of!(super::__data_start) as usize,
+            ),
             size: (core::ptr::addr_of!(super::__data_end) as usize)
                 - (core::ptr::addr_of!(super::__data_start) as usize),
         },
         bss: super::super::memory::KernelSectionRange {
             virtual_start: core::ptr::addr_of!(super::__bss_start) as usize,
-            physical_start: super::super::memory::kernel_physical_address(core::ptr::addr_of!(
-                super::__bss_start
-            ) as usize),
+            physical_start: super::super::memory::address::kernel_virtual_to_physical(
+                core::ptr::addr_of!(super::__bss_start) as usize,
+            ),
             size: (core::ptr::addr_of!(super::__bss_end) as usize)
                 - (core::ptr::addr_of!(super::__bss_start) as usize),
         },
@@ -155,12 +153,9 @@ fn create_task_inner(program_index: usize) -> Result<TaskId, TaskCreationError> 
     )
     .map_err(TaskCreationError::AddressSpace)?;
 
-    // 安全性：陷入帧先通过低地址恒等映射写入本任务独占的物理栈页；发布的指针是页表映射后的高地址。
+    // 安全性：陷入帧写入本任务独占内核栈的高半区直接映射；该物理页已分配且保持映射。
     unsafe {
-        core::ptr::write(
-            initial_frame_physical_address as *mut TrapFrame,
-            initial_frame,
-        );
+        core::ptr::write(initial_frame_address as *mut TrapFrame, initial_frame);
     }
 
     let program_name = program.name;

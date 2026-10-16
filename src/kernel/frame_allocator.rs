@@ -5,7 +5,7 @@
 
 use fullemu::device_tree::memory_info::{FdtMemoryInfo, PhysicalMemoryRegion};
 
-pub(super) const PAGE_SIZE: usize = 4096;
+use super::memory::page::{align_down_to_page, align_up_to_page, is_page_aligned, PAGE_SIZE};
 const MAX_FREE_RANGES: usize = 256;
 const MAX_MEMORY_REGIONS: usize = 32;
 
@@ -113,13 +113,13 @@ impl FrameAllocator {
             return Err(FrameError::TooManyMemoryRegions);
         }
 
-        let kernel_end = super::memory::kernel_physical_address(core::ptr::addr_of!(
+        let kernel_end = super::memory::address::kernel_virtual_to_physical(core::ptr::addr_of!(
             __kernel_load_end_virtual
         ) as usize);
-        let program_start = super::memory::kernel_physical_address(core::ptr::addr_of!(
-            __user_program_load_virtual_start
-        ) as usize);
-        let program_end = super::memory::kernel_physical_address(core::ptr::addr_of!(
+        let program_start = super::memory::address::kernel_virtual_to_physical(
+            core::ptr::addr_of!(__user_program_load_virtual_start) as usize,
+        );
+        let program_end = super::memory::address::kernel_virtual_to_physical(core::ptr::addr_of!(
             __user_program_load_virtual_end
         ) as usize);
         self.memory_region_count = memory_info.memory_regions().len();
@@ -145,8 +145,8 @@ impl FrameAllocator {
                 .end_exclusive()
                 .and_then(|end| usize::try_from(end).ok())
                 .ok_or(FrameError::InvalidMemoryRange)?;
-            let start = align_up(start).ok_or(FrameError::InvalidMemoryRange)?;
-            let end = end & !(PAGE_SIZE - 1);
+            let start = align_up_to_page(start).ok_or(FrameError::InvalidMemoryRange)?;
+            let end = align_down_to_page(end);
             if start >= end {
                 continue;
             }
@@ -231,14 +231,14 @@ impl FrameAllocator {
         let managed = self.managed_ranges[..self.managed_range_count]
             .iter()
             .any(|range| run.start_address >= range.start_address && end <= range.end_address());
-        if !managed || run.frame_count == 0 || run.start_address & (PAGE_SIZE - 1) != 0 {
+        if !managed || run.frame_count == 0 || !is_page_aligned(run.start_address) {
             return Err(FrameError::FrameOutsidePool);
         }
         self.insert_free_range(run.start_address, run.frame_count)
     }
 
     fn is_managed_address(&self, address: usize) -> bool {
-        address & (PAGE_SIZE - 1) == 0
+        is_page_aligned(address)
             && self.managed_ranges[..self.managed_range_count]
                 .iter()
                 .any(|range| address >= range.start_address && address < range.end_address())
@@ -370,12 +370,6 @@ impl FrameAllocator {
     }
 }
 
-fn align_up(value: usize) -> Option<usize> {
-    value
-        .checked_add(PAGE_SIZE - 1)
-        .map(|aligned| aligned & !(PAGE_SIZE - 1))
-}
-
 /// 根据 FDT RAM 范围建立物理页帧池，并排除启动期占用的内存。
 pub(super) fn initialize(memory_info: &FdtMemoryInfo) -> Result<(), FrameError> {
     // 安全性：初始化只在启动期单 hart 路径执行，定时器和全局 S-mode 中断尚未开启。
@@ -386,8 +380,14 @@ pub(super) fn initialize(memory_info: &FdtMemoryInfo) -> Result<(), FrameError> 
 pub(super) fn allocate_zeroed_run(frame_count: usize) -> Result<PhysicalFrameRun, FrameError> {
     // 安全性：当前分配位于启动期或 S-mode 陷入路径，不会被定时器重入；项目仅启用单 hart。
     let run = unsafe { (*core::ptr::addr_of_mut!(FRAME_ALLOCATOR)).allocate_run(frame_count)? };
-    // 安全性：run 独占连续已分配页帧，且 QEMU virt 的 RAM 在启动阶段可通过恒等地址访问。
-    unsafe { core::ptr::write_bytes(run.start_address as *mut u8, 0, run.size()) };
+    let Some(virtual_address) =
+        super::memory::address::physical_to_kernel_virtual(run.start_address)
+    else {
+        deallocate_run(run)?;
+        return Err(FrameError::InvalidMemoryRange);
+    };
+    // 安全性：run 独占连续已分配页帧；当前启动页表或任务页表将该 RAM 映射到高半区地址。
+    unsafe { core::ptr::write_bytes(virtual_address as *mut u8, 0, run.size()) };
     Ok(run)
 }
 
@@ -402,9 +402,15 @@ pub(super) fn allocate_frame() -> Result<PhysicalFrame, FrameError> {
 /// 分配一个物理页帧，并将整页内容清零。
 pub(super) fn allocate_zeroed_frame() -> Result<PhysicalFrame, FrameError> {
     let frame = allocate_frame()?;
-    // 安全性：frame 是当前调用独占持有的已分配页，且页池在 S-mode 下可写并保持恒等映射。
+    let Some(virtual_address) =
+        super::memory::address::physical_to_kernel_virtual(frame.start_address)
+    else {
+        deallocate_frame(frame)?;
+        return Err(FrameError::InvalidMemoryRange);
+    };
+    // 安全性：frame 是当前调用独占持有的已分配页；当前页表将该 RAM 映射到高半区地址。
     unsafe {
-        core::ptr::write_bytes(frame.start_address as *mut u8, 0, PAGE_SIZE);
+        core::ptr::write_bytes(virtual_address as *mut u8, 0, PAGE_SIZE);
     }
     Ok(frame)
 }
@@ -427,7 +433,7 @@ pub(super) fn free_frame_count() -> Result<usize, FrameError> {
     unsafe { (*core::ptr::addr_of!(FRAME_ALLOCATOR)).free_count() }
 }
 
-/// 返回 FDT 描述的 RAM 范围，供地址空间建立内核恒等映射。
+/// 返回 FDT 描述的物理 RAM 范围，供地址空间建立内核高半区直接映射。
 pub(super) fn physical_memory_regions() -> Result<&'static [PhysicalMemoryRegion], FrameError> {
     // 安全性：初始化完成后范围数组保持不变；返回切片不暴露分配器的可变状态。
     let allocator = unsafe { &*core::ptr::addr_of!(FRAME_ALLOCATOR) };
@@ -448,9 +454,9 @@ pub(super) fn check_allocation() -> Result<(), FrameError> {
     let first = allocate_frame()?;
     let second = allocate_frame()?;
     let third = allocate_frame()?;
-    if first.start_address() & (PAGE_SIZE - 1) != 0
-        || second.start_address() & (PAGE_SIZE - 1) != 0
-        || third.start_address() & (PAGE_SIZE - 1) != 0
+    if !is_page_aligned(first.start_address())
+        || !is_page_aligned(second.start_address())
+        || !is_page_aligned(third.start_address())
         || first == second
         || first == third
         || second == third
@@ -459,8 +465,13 @@ pub(super) fn check_allocation() -> Result<(), FrameError> {
     }
 
     let second_address = second.start_address();
-    // 安全性：自检独占持有 second，且该令牌代表 RAM 中一整张可写页。
-    unsafe { core::ptr::write_bytes(second.start_address as *mut u8, 0xa5, PAGE_SIZE) };
+    let Some(second_virtual_address) =
+        super::memory::address::physical_to_kernel_virtual(second.start_address)
+    else {
+        return Err(FrameError::InvalidMemoryRange);
+    };
+    // 安全性：自检独占持有 second；当前页表将该 RAM 映射到高半区地址。
+    unsafe { core::ptr::write_bytes(second_virtual_address as *mut u8, 0xa5, PAGE_SIZE) };
     deallocate_frame(second)?;
     let reused = allocate_zeroed_frame()?;
     if reused.start_address() != second_address {
@@ -486,8 +497,13 @@ pub(super) fn check_allocation() -> Result<(), FrameError> {
 }
 
 fn frame_is_zeroed(frame: &PhysicalFrame) -> bool {
-    // 安全性：调用方持有该页帧的唯一令牌，地址和长度都位于已分配的恒等映射 RAM 中。
-    let bytes = unsafe { core::slice::from_raw_parts(frame.start_address as *const u8, PAGE_SIZE) };
+    let Some(virtual_address) =
+        super::memory::address::physical_to_kernel_virtual(frame.start_address)
+    else {
+        return false;
+    };
+    // 安全性：调用方持有该页帧的唯一令牌；当前页表将该 RAM 映射到高半区地址。
+    let bytes = unsafe { core::slice::from_raw_parts(virtual_address as *const u8, PAGE_SIZE) };
     bytes.iter().all(|byte| *byte == 0)
 }
 

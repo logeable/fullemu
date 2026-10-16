@@ -18,9 +18,11 @@
 
 | 模块 | 单一职责 | 资源所有权或接口边界 |
 | --- | --- | --- |
-| `kernel::heap` | 管理内核对象使用的字节堆，并实现全局分配器 | 初始化时从页帧分配器取得连续页帧作为固定堆后备区；为 `Vec` 等 `alloc` 容器提供字节分配 |
-| `kernel::frame_allocator` | 根据 FDT 中的 RAM 范围分配、清零和回收页帧 | 使用固定 BSS 区间表保存元数据，不依赖堆；排除内核映像、用户程序槽、DTB 和固件保留范围；页帧以所有权值交给调用方 |
-| `kernel::memory` | 汇总地址空间、页表和用户内存访问接口；定义映射输入与统一错误类型 | 对任务和 syscall 提供窄接口，不直接拥有用户栈、程序镜像或页表目标页 |
+| `kernel::heap` | 管理内核对象使用的字节堆，并实现全局分配器 | 初始化时从页帧分配器取得连续物理页作为固定堆后备区，通过 `memory` 地址接口取得高半区虚拟地址；为 `Vec` 等 `alloc` 容器提供字节分配 |
+| `kernel::frame_allocator` | 根据 FDT 中的 RAM 范围分配和回收物理页帧 | 使用固定 BSS 区间表保存物理范围元数据，不依赖堆；排除内核映像、用户程序槽、DTB 和固件保留范围；清零时通过 `memory` 地址接口访问页帧 |
+| `kernel::memory` | 定义任务和 syscall 使用的内存接口、映射输入与统一错误类型 | 地址换算和页几何由纯计算子模块直接提供；地址空间机制不拥有用户栈、程序镜像或页表目标页 |
+| `kernel::memory::address` | 定义 Sv39 规范地址规则、低半部用户地址上界、内核直接映射及内核映像 VMA/LMA 换算 | 纯地址计算，不访问页表或分配器；调用方负责保证所访问物理范围已映射；内核其他模块直接依赖此模块，不经 `memory` 转发 |
+| `kernel::memory::page` | 定义 4 KiB 基础页大小、对齐判断及页边界取整 | 纯算术模块，供页帧分配器、页表、地址空间和任务栈共用；不依赖这些调用方 |
 | `kernel::memory::address_space` | 逐个创建、切换、校验和销毁任务的 Sv39 地址空间 | 持有根页表索引；单个创建失败时回收部分页表树，通过 `page_table` 建立映射，通过页帧分配器取得和归还页表页 |
 | `kernel::memory::page_table` | 编码 Sv39 页表项、建立 4 KiB 映射并激活根页表 | 只管理页表机制；地址空间生命周期由 `address_space` 决定 |
 | `kernel::memory::page_table_log` | 遍历现有页表并把映射合并成诊断日志 | 只读页表；不创建或释放映射 |
@@ -47,7 +49,7 @@
 | `PhysicalFrame`、`PhysicalFrameRun` | `kernel::frame_allocator` | 表达页帧及连续页帧的独占所有权；只有内核子系统可传递这些令牌 |
 | `PageTable` | `kernel::memory::page_table` | 表示与 Sv39 硬件格式对齐的页表页 |
 | `UserImageMapping`、`UserStackMapping` | `kernel::memory` | 描述地址空间初始化需要的映射输入；任务拥有镜像和栈，memory 只建立映射 |
-| `KernelMemoryLayout`、`KernelSectionRange` | `kernel::memory` | 描述链接器提供的内核各段边界；memory 校验页对齐及顺序，并按段设置页权限 |
+| `KernelMemoryLayout`、`KernelSectionRange` | `kernel::memory` | 描述链接器提供的内核各段虚拟和物理边界；memory 校验页对齐及顺序，并按段设置页权限 |
 | `KernelStack`、`UserStack`、`Task`、`TaskState` | `kernel::task` 及其 `stack` 子模块 | 任务持有执行状态；stack 子模块单独封装栈页帧所有权与回收 |
 | `TrapFrame`、`TaskContext` | `arch::riscv64::trap`、`arch::riscv64::context` | 布局必须与对应汇编偏移一致，属于架构现场机制，不属于调度策略 |
 | `MonotonicTime` | `kernel::clock` | 表示内核内部时钟读数，不暴露用户 ABI 布局 |
@@ -66,12 +68,15 @@ flowchart TD
     Startup -->|解析并拥有启动信息| DeviceTree[device_tree FDT 与内存信息]
     Startup --> Kernel[kernel 策略与启动自检]
     Startup -->|FdtMemoryInfo 内存范围| Frames[frame_allocator]
-    Heap[heap 全局分配器] -->|连续页帧后备区| Frames
+    Heap[heap 全局分配器] -->|连续物理页后备区| Frames
+    Heap -->|后备页映射地址| Address[memory::address 地址换算]
     Startup --> Arch[arch RISC-V 机制]
     Kernel --> Arch
     Kernel --> Device[device 控制台接口]
     Device --> Uart[device::uart16550]
     Memory[memory Sv39] --> Frames
+    Memory --> Address
+    Frames -->|清零页帧时换算虚拟地址| Address
     Memory -->|映射设备寄存器范围| Device
     Task[task 调度] --> Memory
     Task --> Stack[task::stack]
@@ -89,9 +94,11 @@ flowchart TD
 ## 依赖约定
 
 - 架构模块提供机制，不决定批处理、任务选择或 Linux syscall 行为。
-- 页帧分配器管理物理页，不依赖堆、地址空间、任务或用户程序；其元数据使用固定容量区间表，避免堆初始化前的循环依赖。
-- 堆只管理对象字节分配，初始化时从页帧分配器取得连续页帧；页帧仍由堆持有，堆当前固定为 256 KiB。
-- `memory` 管理映射，不拥有映射目标所指向的程序镜像和任务栈页帧；设备 MMIO 范围由设备接口提供，页表模块不复制 UART 地址常量。
+- 页帧分配器管理物理页，不依赖堆、地址空间、任务或用户程序；其元数据使用固定容量区间表，避免堆初始化前的循环依赖。清零页帧时仅依赖 `memory::address` 的纯地址换算，不调用页表生命周期或地址空间接口。
+- `memory::address` 负责 Sv39 地址规则与内核地址换算，不验证映射是否已建立。调用方必须根据启动阶段和地址空间契约保证地址可访问；需要地址换算的内核模块直接调用该子模块，不通过 `memory` 增设纯转发函数。
+- `memory::page` 只依赖 Rust 核心整数运算，集中维护基础页大小和页对齐规则；堆对象对齐仍由 `kernel::heap` 按其任意对齐语义单独处理。
+- 堆只管理对象字节分配，初始化时从页帧分配器取得连续物理页，再以高半区直接映射虚拟地址管理对象；页帧所有权仍由堆持有，堆当前固定为 256 KiB。
+- `memory` 管理映射，不拥有映射目标所指向的程序镜像和任务栈页帧；任务页表将 FDT RAM 映射到高半区直接映射窗口，设备 MMIO 范围由设备接口提供并单独映射。
 - `task` 决定何时创建、切换和结束任务；栈模块只管理栈页帧所有权。
 - `syscall` 是 Linux ABI 边界。ABI 编号和错误码应留在该边界，不散布到调度、内存和设备模块。
 - 当两个子系统需要互相调用时，应优先把共享契约放进窄的数据接口，避免继续扩大双向依赖。
@@ -109,9 +116,11 @@ flowchart TD
 
 本轮继续将 `memory` 按机制边界拆为 `address_space`、`page_table` 和 `user_access`：前者拥有地址空间根表记录并编排创建、切换及销毁；`page_table` 集中处理 Sv39 PTE 和 `satp`；`user_access` 仅封装 SUM 开关与单次用户内存读写。`memory/mod.rs` 保留任务和 syscall 使用的接口、映射输入类型及统一错误说明，页表诊断仍由 `page_table_log` 只读遍历。
 
+本轮新增 `memory::page` 统一 4 KiB 页大小、对齐判断及向上/向下页对齐；页帧分配器、地址空间和任务栈直接使用该叶子模块。Sv39 规范地址转换及用户低半部上界收拢到 `memory::address`，页表诊断也从该处取得规范地址处理。地址换算不再经 `memory/mod.rs` 的转发函数，调用方直接依赖纯计算模块；地址空间创建等有意作为内存子系统接口保留在 `memory` 门面中。
+
 本阶段新增 `task::creation`，把批处理和 shell 启动共用的单任务准备流程收拢起来。创建器先预留任务表容量，再依次装载程序镜像、分配用户栈、分配内核栈和建立该任务的页表；所有步骤成功后才追加带 `TaskId` 的任务记录。`UserStack` 和 `KernelStack` 在任务记录发布前由局部所有者持有，错误返回时自动释放；页表创建器负责清理未完成的页表树。用户镜像槽是链接器固定预留的物理区域，不是动态分配的页帧；创建失败后槽位可直接复用，下一次装载会先清零再复制，不通过不安全的虚拟地址别名在 Drop 中清理。批处理和 shell 仍只在启动期创建任务，本阶段没有加入 shell 命令、任务复用或并发同镜像实例。
 
-当前启动入口 `_start` 与引导页表、引导栈位于低地址；引导汇编清零各段的物理装载范围，建立临时 Sv39 映射，再切换到高半区 `kernel_main`。内核 `.text`、`.rodata`、`.data` 和 `.bss` 的 VMA 为 `0xffffffc000000000 + LMA`，并按页边界分别映射为 `SR-X`、`SR--`、`SRW-` 和 `SRW-`。任务页表将 FDT RAM 低地址恒等映射为 S-mode 可读写，同时按高 VMA/低 LMA 映射内核段、启动栈和全部任务内核栈；共享内核栈映射使调度器切换 `satp` 后仍能完成当前陷入处理。固定用户镜像和用户栈分别映射为 `URWX`、`URW-`，仍位于 Sv39 低半部；用户镜像共同虚拟基址为 `0x40000000`，固定物理槽从 `0x80400000` 开始。`make inspect-kernel-elf` 检查低地址入口、启动段恒等布局及内核主体 VMA/LMA 偏移。临时启动页表按 QEMU `virt` 的单 hart、128 MiB RAM 环境用 1 GiB 叶子覆盖低设备窗口和 RAM 高半区别名；任务页表继续保留低地址 RAM 恒等映射，堆和物理页帧指针尚未迁移到统一的高地址直接映射接口。
+当前启动入口 `_start` 与引导页表、引导栈位于低地址；引导汇编清零各段的物理装载范围，建立临时 Sv39 映射，再切换到高半区 `kernel_main`。内核 `.text`、`.rodata`、`.data` 和 `.bss` 的 VMA 为 `0xffffffc000000000 + LMA`，并按页边界分别映射为 `SR-X`、`SR--`、`SRW-` 和 `SRW-`。任务页表将 FDT RAM 映射到 `0xffffffc000000000 + PA` 的高半区直接映射窗口，并按高 VMA/低 LMA 映射内核段、启动栈和全部任务内核栈；内核代码、堆、页帧和页表通过高半区虚拟地址访问，物理地址仅用于页表项、`satp` 和资源记录。共享内核栈映射使调度器切换 `satp` 后仍能完成当前陷入处理。固定用户镜像和用户栈分别映射为 `URWX`、`URW-`，仍位于 Sv39 低半部；用户镜像共同虚拟基址为 `0x40000000`，固定物理槽从 `0x80400000` 开始。`make inspect-kernel-elf` 检查低地址入口、启动段恒等布局及内核主体 VMA/LMA 偏移。临时启动页表按 QEMU `virt` 的单 hart、128 MiB RAM 环境用 1 GiB 叶子覆盖低设备窗口、RAM 低地址和高半区别名；任务页表不再建立 RAM 低地址恒等映射，UART MMIO 仍按设备物理地址单独映射。
 
 此前将原先过于宽泛的 `boot` 顶层模块重命名为 `device_tree`，并把 `info.rs` 明确命名为 `memory_info.rs`；启动编排仍属于 `kernel::startup`。QEMU UART 已从 `arch::riscv64` 移至独立的 `device` 模块：`ConsoleDevice` 表达内核所需的最小字节收发契约，日志和 syscall 通过 `device::console` 使用该接口，具体 NS16550 寄存器访问集中在 `device::uart16550`。本轮再由 `device_tree::console_info` 读取 QEMU `virt` FDT 中 `/soc` 子设备的 UART `reg` 范围，启动阶段先完成这项解析和控制台初始化，再输出日志；UART 物理地址不再写死在驱动中。当前仍只支持空 `ranges` 的 `/soc` 和 NS16550 兼容设备，尚未解析 `/chosen/stdout-path`、总线地址转换或建立通用设备发现/注册框架。另继续明确数据与机制/ABI 的归属：`PhysicalMemoryRegion` 留在 `device_tree::memory_info`，时钟返回内核自己的 `MonotonicTime`，Linux `timespec` 布局留在 syscall 边界。没有为了文件大小进行机械拆分，页表映射契约仍由 `kernel::memory` 统一维护，任务仍拥有自己的栈和镜像资源。
 

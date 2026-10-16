@@ -2,7 +2,7 @@
 //!
 //! 堆作为 Rust 全局分配器管理内核对象字节块。当前堆分配只发生在启动期，此时尚未开启中断；
 //! 若以后在系统调用路径中分配，陷入硬件也会先清除 SIE，避免单 hart 上的定时器重入。
-//! 堆元数据位于后备页中；Sv39 地址空间将这些页作为 S-mode 恒等映射，堆不管理页帧本身。
+//! 堆元数据使用高半区虚拟地址；后备页的物理所有权仍由堆持有，页帧分配器负责分配和回收。
 
 use core::alloc::{GlobalAlloc, Layout};
 use core::ptr::NonNull;
@@ -10,7 +10,7 @@ use core::ptr::NonNull;
 use crate::kernel::frame_allocator::{self, FrameError, PhysicalFrameRun};
 
 const KERNEL_HEAP_FRAME_COUNT: usize = 64;
-const KERNEL_HEAP_SIZE: usize = KERNEL_HEAP_FRAME_COUNT * frame_allocator::PAGE_SIZE;
+const KERNEL_HEAP_SIZE: usize = KERNEL_HEAP_FRAME_COUNT * super::memory::page::PAGE_SIZE;
 const ALLOCATION_MAGIC: u64 = 0x4655_4c4c_4845_4150;
 
 static mut KERNEL_HEAP: Heap = Heap::empty();
@@ -70,11 +70,15 @@ impl Heap {
     ///
     /// # Safety
     ///
-    /// `backing` 必须是页帧分配器独占分配、可写且在堆使用期间持续有效的连续区域。
+    /// `backing` 必须是页帧分配器独占分配、可写且在堆使用期间持续有效的连续区域；
+    /// 该区域的高半区直接映射必须在堆使用期间保持有效。
     unsafe fn initialize(&mut self, backing: PhysicalFrameRun) -> Result<(), HeapError> {
-        let start = backing.start_address();
+        let physical_start = backing.start_address();
         let size = backing.size();
         let alignment = core::mem::align_of::<FreeBlock>();
+        let Some(start) = super::memory::address::physical_to_kernel_virtual(physical_start) else {
+            return Err(HeapError::InvalidRegion);
+        };
         let Some(end) = start.checked_add(size) else {
             return Err(HeapError::InvalidRegion);
         };
@@ -301,14 +305,7 @@ fn initialize_kernel_heap(backing: PhysicalFrameRun) -> Result<(), HeapError> {
 fn heap_region() -> (usize, usize) {
     // 安全性：调用方在堆初始化完成后读取不可变区域边界。
     let heap = unsafe { &*core::ptr::addr_of!(KERNEL_HEAP) };
-    if let Some(backing) = heap.backing.as_ref() {
-        (
-            backing.start_address(),
-            backing.start_address() + backing.size(),
-        )
-    } else {
-        (heap.start, heap.end)
-    }
+    (heap.start, heap.end)
 }
 
 fn allocate(layout: Layout) -> Option<NonNull<u8>> {

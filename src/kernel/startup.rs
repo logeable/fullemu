@@ -45,21 +45,31 @@ extern "C" {
 }
 
 /// 按固定顺序初始化内核，并根据构建配置启动用户任务。
-pub(crate) fn run(hart_id: usize, device_tree: usize) -> ! {
+pub(crate) fn run(hart_id: usize, device_tree_physical_address: usize) -> ! {
     crate::kernel::clock::initialize();
 
-    // 安全性：OpenSBI 启动约定保证 a1 指向可读的 FDT；解析器只读取固定的 40 字节头部。
-    let fdt_header = match unsafe { FdtHeader::read_from_ptr(device_tree as *const u8) } {
-        Ok(header) => header,
-        Err(error) => {
-            crate::klog_error!("FDT 头部无效：{}", error.description());
-            panic!("FDT 头部无效");
-        }
+    let Some(device_tree_virtual_address) =
+        super::memory::address::physical_to_kernel_virtual(device_tree_physical_address)
+    else {
+        panic!("FDT 物理地址无法转换为内核高半区地址");
     };
 
-    // 安全性：OpenSBI 提供完整且可读的 FDT；头部已验证总长度至少覆盖所有声明区块。
+    // 安全性：OpenSBI 提供 FDT 物理地址，且启动页表将 QEMU RAM 映射到此高半区别名；解析器只读固定头部。
+    let fdt_header =
+        match unsafe { FdtHeader::read_from_ptr(device_tree_virtual_address as *const u8) } {
+            Ok(header) => header,
+            Err(error) => {
+                crate::klog_error!("FDT 头部无效：{}", error.description());
+                panic!("FDT 头部无效");
+            }
+        };
+
+    // 安全性：高半区 FDT 别名可读，且头部已验证总长度至少覆盖所有声明区块。
     let fdt_blob = unsafe {
-        core::slice::from_raw_parts(device_tree as *const u8, fdt_header.total_size as usize)
+        core::slice::from_raw_parts(
+            device_tree_virtual_address as *const u8,
+            fdt_header.total_size as usize,
+        )
     };
     let fdt = match FdtBlob::parse(fdt_blob) {
         Ok(fdt) => fdt,
@@ -86,7 +96,7 @@ pub(crate) fn run(hart_id: usize, device_tree: usize) -> ! {
     log_kernel_sections();
     crate::klog_info!("fullemu 已在 QEMU virt (RISC-V) 启动");
     crate::klog_info!("启动 hart：{hart_id:#018x}");
-    crate::klog_info!("设备树地址：{device_tree:#018x}");
+    crate::klog_info!("设备树物理地址：{device_tree_physical_address:#018x}");
     crate::klog_info!(
         "FDT UART：寄存器范围={:#018x}..{:#018x}",
         uart_region.start,
@@ -102,7 +112,7 @@ pub(crate) fn run(hart_id: usize, device_tree: usize) -> ! {
         fdt_header.strings_size
     );
 
-    let memory_info = match FdtMemoryInfo::parse(&fdt, device_tree as u64) {
+    let memory_info = match FdtMemoryInfo::parse(&fdt, device_tree_physical_address as u64) {
         Ok(memory_info) => memory_info,
         Err(error) => report_memory_info_error(error),
     };
@@ -196,16 +206,19 @@ fn run_startup_checks() -> Result<(), StartupCheckError> {
 
 /// 输出链接器定义的内核映像和各段范围；结束地址采用不包含式。
 fn log_kernel_sections() {
-    const KERNEL_VIRTUAL_OFFSET: usize = 0xffffffc000000000;
     log_kernel_range(
         "启动区",
-        core::ptr::addr_of!(__boot_virtual_start) as usize - KERNEL_VIRTUAL_OFFSET,
-        core::ptr::addr_of!(__boot_virtual_end) as usize - KERNEL_VIRTUAL_OFFSET,
+        core::ptr::addr_of!(__boot_virtual_start) as usize
+            - super::memory::address::KERNEL_DIRECT_MAP_BASE,
+        core::ptr::addr_of!(__boot_virtual_end) as usize
+            - super::memory::address::KERNEL_DIRECT_MAP_BASE,
     );
     log_kernel_range(
         "启动区 BSS",
-        core::ptr::addr_of!(__boot_bss_virtual_start) as usize - KERNEL_VIRTUAL_OFFSET,
-        core::ptr::addr_of!(__boot_bss_virtual_end) as usize - KERNEL_VIRTUAL_OFFSET,
+        core::ptr::addr_of!(__boot_bss_virtual_start) as usize
+            - super::memory::address::KERNEL_DIRECT_MAP_BASE,
+        core::ptr::addr_of!(__boot_bss_virtual_end) as usize
+            - super::memory::address::KERNEL_DIRECT_MAP_BASE,
     );
     log_kernel_range(
         "启动栈",

@@ -5,11 +5,11 @@
 use alloc::vec::Vec;
 
 use crate::kernel::frame_allocator::{self, FrameError, PhysicalFrame, PhysicalFrameRun};
+use crate::kernel::memory::{address, page::PAGE_SIZE};
 
-const PAGE_SIZE: usize = 4096;
 const USER_STACK_SIZE: usize = 16 * 1024;
 const KERNEL_STACK_SIZE: usize = 16 * 1024;
-const USER_STACK_TOP: usize = (1usize << 38) - PAGE_SIZE;
+const USER_STACK_TOP: usize = address::SV39_USER_ADDRESS_END_EXCLUSIVE - PAGE_SIZE;
 const STACK_PAGE_COUNT: usize = USER_STACK_SIZE / PAGE_SIZE;
 
 /// 描述任务栈页帧分配失败。
@@ -47,7 +47,7 @@ impl KernelStack {
 
     pub(super) fn top(&self) -> usize {
         let physical_top = self.physical_top();
-        let Some(virtual_top) = super::super::memory::kernel_high_alias(physical_top) else {
+        let Some(virtual_top) = address::physical_to_kernel_virtual(physical_top) else {
             crate::klog_error!("计算内核栈高地址时溢出");
             super::stop_forever();
         };
