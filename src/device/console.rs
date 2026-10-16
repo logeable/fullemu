@@ -11,14 +11,10 @@ pub(crate) fn initialize(region: MmioRegion) {
     CONSOLE_DEVICE.initialize(region);
 }
 
-fn active_device() -> &'static dyn ConsoleDevice {
-    &CONSOLE_DEVICE
-}
-
 /// 阻塞等待并读取一个控制台输入字节。
 pub(crate) fn read_byte() -> u8 {
     loop {
-        if let Some(byte) = active_device().try_read_byte() {
+        if let Some(byte) = CONSOLE_DEVICE.try_read_byte() {
             return byte;
         }
         core::hint::spin_loop();
@@ -27,17 +23,17 @@ pub(crate) fn read_byte() -> u8 {
 
 /// 若控制台已有输入字节则读取，否则立即返回。
 pub(crate) fn try_read_byte() -> Option<u8> {
-    active_device().try_read_byte()
+    CONSOLE_DEVICE.try_read_byte()
 }
 
 /// 返回当前控制台设备寄存器所在的物理地址范围。
 pub(crate) fn mmio_region() -> MmioRegion {
-    active_device().mmio_region()
+    CONSOLE_DEVICE.mmio_region()
 }
 
 /// 输出一个字节，并将换行符转换为终端常用的 CRLF。
 pub(crate) fn write_byte(byte: u8) {
-    write_byte_to(active_device(), byte);
+    write_byte_to(&CONSOLE_DEVICE, byte);
 }
 
 fn write_byte_to(device: &dyn ConsoleDevice, byte: u8) {
@@ -49,7 +45,7 @@ fn write_byte_to(device: &dyn ConsoleDevice, byte: u8) {
 
 /// 使用 Rust 核心库的格式化能力输出内容，不申请堆内存。
 pub(crate) fn write_fmt(arguments: fmt::Arguments<'_>) {
-    let mut writer = ConsoleWriter(active_device());
+    let mut writer = ConsoleWriter(&CONSOLE_DEVICE);
     let _ = fmt::Write::write_fmt(&mut writer, arguments);
 }
 

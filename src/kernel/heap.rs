@@ -297,11 +297,6 @@ impl Heap {
     }
 }
 
-fn initialize_kernel_heap(backing: PhysicalFrameRun) -> Result<(), HeapError> {
-    // 安全性：堆只在启动阶段初始化，此时尚未开启 S-mode 定时器中断。
-    unsafe { (*core::ptr::addr_of_mut!(KERNEL_HEAP)).initialize(backing) }
-}
-
 fn heap_region() -> (usize, usize) {
     // 安全性：调用方在堆初始化完成后读取不可变区域边界。
     let heap = unsafe { &*core::ptr::addr_of!(KERNEL_HEAP) };
@@ -409,7 +404,8 @@ impl HeapError {
 pub(super) fn initialize() -> Result<(), HeapError> {
     let backing = frame_allocator::allocate_zeroed_run(KERNEL_HEAP_FRAME_COUNT)
         .map_err(HeapError::FrameAllocation)?;
-    initialize_kernel_heap(backing)
+    // 安全性：堆只在启动阶段初始化，此时尚未开启 S-mode 定时器中断。
+    unsafe { (*core::ptr::addr_of_mut!(KERNEL_HEAP)).initialize(backing) }
 }
 
 /// 检查对齐、释放、地址复用和相邻空闲块合并。
