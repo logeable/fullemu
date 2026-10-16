@@ -23,7 +23,7 @@ pub(super) fn create_address_space(
     kernel_layout: KernelMemoryLayout,
     user_stack: &UserStackMapping<'_>,
     kernel_stack: KernelStackMapping,
-    user_image: UserImageMapping,
+    user_image: UserImageMapping<'_>,
 ) -> Result<(), PageTableError> {
     validate_kernel_layout(kernel_layout)?;
     validate_user_mappings(kernel_layout, user_stack, user_image)?;
@@ -71,7 +71,7 @@ pub(super) fn create_address_space(
 fn validate_user_mappings(
     kernel_layout: KernelMemoryLayout,
     user_stack: &UserStackMapping<'_>,
-    user_image: UserImageMapping,
+    user_image: UserImageMapping<'_>,
 ) -> Result<(), PageTableError> {
     let kernel_end = align_up_to_page(
         kernel_layout
@@ -95,6 +95,16 @@ fn validate_user_mappings(
         return Err(PageTableError::InvalidRange);
     }
 
+    let image_size = user_image
+        .frames
+        .len()
+        .checked_mul(PAGE_SIZE)
+        .ok_or(PageTableError::InvalidRange)?;
+    let image_end = user_image
+        .virtual_start
+        .checked_add(image_size)
+        .ok_or(PageTableError::InvalidRange)?;
+
     for (page_index, frame) in user_stack.frames.iter().enumerate() {
         let physical_address = frame.start_address();
         if !is_page_aligned(physical_address)
@@ -103,9 +113,6 @@ fn validate_user_mappings(
             return Err(PageTableError::InvalidRange);
         }
         let page_virtual_start = user_stack.virtual_start + page_index * PAGE_SIZE;
-        let Some(image_end) = user_image.virtual_start.checked_add(user_image.size) else {
-            return Err(PageTableError::InvalidRange);
-        };
         if ranges_overlap(
             page_virtual_start,
             page_virtual_start + PAGE_SIZE,
@@ -116,22 +123,22 @@ fn validate_user_mappings(
         }
     }
 
-    let Some(virtual_end) = user_image.virtual_start.checked_add(user_image.size) else {
-        return Err(PageTableError::InvalidRange);
-    };
-    let Some(physical_end) = user_image.physical_start.checked_add(user_image.size) else {
-        return Err(PageTableError::InvalidRange);
-    };
     if !is_page_aligned(user_image.virtual_start)
-        || !is_page_aligned(user_image.physical_start)
-        || user_image.size == 0
-        || !is_page_aligned(user_image.size)
-        || user_image.physical_start < kernel_end
-        || virtual_end > super::address::SV39_USER_ADDRESS_END_EXCLUSIVE
-        || virtual_end <= user_image.virtual_start
-        || physical_end <= user_image.physical_start
+        || user_image.frames.is_empty()
+        || image_end > super::address::SV39_USER_ADDRESS_END_EXCLUSIVE
+        || image_end <= user_image.virtual_start
     {
         return Err(PageTableError::InvalidRange);
+    }
+
+    for frame in user_image.frames {
+        let physical_address = frame.start_address();
+        if !is_page_aligned(physical_address)
+            || physical_address < kernel_end
+            || !crate::kernel::frame_allocator::is_allocated_frame_address(physical_address)
+        {
+            return Err(PageTableError::InvalidRange);
+        }
     }
 
     for memory in crate::kernel::frame_allocator::physical_memory_regions()
@@ -145,7 +152,7 @@ fn validate_user_mappings(
             .ok_or(PageTableError::InvalidRange)?;
         if ranges_overlap(
             user_image.virtual_start,
-            virtual_end,
+            image_end,
             memory_start,
             memory_end,
         ) {
@@ -161,7 +168,7 @@ fn populate_address_space(
     kernel_layout: KernelMemoryLayout,
     user_stack: &UserStackMapping<'_>,
     kernel_stack: KernelStackMapping,
-    user_image: UserImageMapping,
+    user_image: UserImageMapping<'_>,
 ) -> Result<(), PageTableError> {
     // FDT 描述的 RAM 映射到高半区直接映射窗口；Rust 指针使用虚拟地址，页表项仍记录物理地址。
     for memory in crate::kernel::frame_allocator::physical_memory_regions()
@@ -193,15 +200,13 @@ fn populate_address_space(
     map_kernel_stack(root_table, kernel_layout.boot_stack)?;
     map_kernel_stack(root_table, kernel_stack)?;
 
-    let mut image_offset = 0;
-    while image_offset < user_image.size {
+    for (page_index, frame) in user_image.frames.iter().enumerate() {
         map_page(
             root_table,
-            user_image.virtual_start + image_offset,
-            user_image.physical_start + image_offset,
+            user_image.virtual_start + page_index * PAGE_SIZE,
+            frame.start_address(),
             PTE_READ | PTE_WRITE | PTE_EXECUTE | PTE_USER,
         )?;
-        image_offset += PAGE_SIZE;
     }
 
     for (page_index, frame) in user_stack.frames.iter().enumerate() {

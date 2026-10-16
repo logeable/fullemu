@@ -5,7 +5,6 @@ use std::path::{Path, PathBuf};
 const IMAGE_MANIFEST_ENV: &str = "FULLEMU_USER_IMAGE_MANIFEST";
 const BOOT_PROGRAM_ENV: &str = "FULLEMU_BOOT_PROGRAM";
 const BOOT_MODE_ENV: &str = "FULLEMU_BOOT_MODE";
-const MAX_USER_PROGRAMS: usize = 8;
 
 fn main() {
     println!("cargo:rustc-link-arg-bin=fullemu=-Tlinker.ld");
@@ -82,10 +81,6 @@ fn generate_catalog(manifest_path: &Path, output_directory: &Path) -> String {
         {
             panic!("用户程序镜像清单中出现重复名称：{name}");
         }
-        if entries.len() == MAX_USER_PROGRAMS {
-            panic!("最多支持同时驻留 {MAX_USER_PROGRAMS} 个用户程序");
-        }
-
         let relative_image_path = Path::new(fields[1]);
         let image_path = if relative_image_path.is_absolute() {
             relative_image_path.to_path_buf()

@@ -101,13 +101,6 @@ SECTIONS
     __kernel_main_load = LOADADDR(.text) + (kernel_main - ADDR(.text));
     __supervisor_trap_entry_load = LOADADDR(.text) + (supervisor_trap_entry - ADDR(.text));
 
-    /* 为最多 8 个用户程序各预留一个 64 KiB 固定物理镜像槽位。 */
-    __user_program_load_start = 0x80400000;
-    __user_program_load_end = 0x80480000;
-    __user_program_load_virtual_start = __user_program_load_start + KERNEL_VIRTUAL_OFFSET;
-    __user_program_load_virtual_end = __user_program_load_end + KERNEL_VIRTUAL_OFFSET;
-
-    ASSERT(__kernel_load_end <= __user_program_load_start, "内核物理映像与用户程序加载区重叠")
     ASSERT(__kernel_start < 0xffffffe000000000, "内核高地址超出 Sv39 高半区范围")
     ASSERT(__boot_stack_end > __boot_stack_start, "启动栈必须非空")
 

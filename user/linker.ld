@@ -1,4 +1,4 @@
-/* 所有用户程序链接到同一虚拟入口，内核页表将其映射到各自物理镜像槽位。 */
+/* 所有用户程序链接到同一虚拟入口，内核页表将其映射到各自拥有的物理页帧。 */
 OUTPUT_ARCH(riscv)
 ENTRY(_start)
 
@@ -34,8 +34,6 @@ SECTIONS
     __user_program_end = .;
 
     ASSERT(_start == __user_image_base, "用户程序入口必须位于镜像起始地址")
-    ASSERT(__user_program_end <= __user_image_base + 0x10000, "用户程序超过 64 KiB 加载槽位")
-
     /DISCARD/ : {
         *(.eh_frame .eh_frame.*)
     }

@@ -13,8 +13,6 @@ static mut FRAME_ALLOCATOR: FrameAllocator = FrameAllocator::empty();
 
 extern "C" {
     static __kernel_load_end_virtual: u8;
-    static __user_program_load_virtual_start: u8;
-    static __user_program_load_virtual_end: u8;
 }
 
 /// 表示页池中的一个物理页帧。
@@ -111,23 +109,10 @@ impl FrameAllocator {
         let kernel_end = super::memory::address::kernel_virtual_to_physical(core::ptr::addr_of!(
             __kernel_load_end_virtual
         ) as usize);
-        let program_start = super::memory::address::kernel_virtual_to_physical(
-            core::ptr::addr_of!(__user_program_load_virtual_start) as usize,
-        );
-        let program_end = super::memory::address::kernel_virtual_to_physical(core::ptr::addr_of!(
-            __user_program_load_virtual_end
-        ) as usize);
-
         self.copy_and_sort_memory_regions(memory_info.memory_regions());
         for memory_index in 0..self.memory_region_count {
             let memory = self.memory_regions[memory_index];
-            self.append_usable_frames_from_region(
-                memory,
-                memory_info,
-                kernel_end,
-                program_start,
-                program_end,
-            )?;
+            self.append_usable_frames_from_region(memory, memory_info, kernel_end)?;
         }
 
         if self.managed_range_count == 0 {
@@ -173,8 +158,6 @@ impl FrameAllocator {
         memory: PhysicalMemoryRegion,
         memory_info: &FdtMemoryInfo,
         kernel_end: usize,
-        program_start: usize,
-        program_end: usize,
     ) -> Result<(), FrameError> {
         let memory_start =
             usize::try_from(memory.start).map_err(|_| FrameError::InvalidMemoryRange)?;
@@ -198,8 +181,7 @@ impl FrameAllocator {
                 start: frame_start as u64,
                 size: PAGE_SIZE as u64,
             };
-            let overlaps_program = frame_start < program_end && program_start < frame_end;
-            if !overlaps_program && memory_info.contains_unreserved_ram_region(frame_region) {
+            if memory_info.contains_unreserved_ram_region(frame_region) {
                 self.append_managed_frame(frame_start)?;
             }
             frame_start = frame_end;

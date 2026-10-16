@@ -48,15 +48,14 @@ impl KernelStack {
     pub(super) fn top(&self) -> usize {
         let physical_top = self.physical_top();
         let Some(virtual_top) = address::physical_to_kernel_virtual(physical_top) else {
-            crate::klog_error!("计算内核栈高地址时溢出");
-            super::stop_forever();
+            panic!("计算内核栈高地址时溢出");
         };
         virtual_top
     }
 
     pub(super) fn physical_top(&self) -> usize {
         let Some(backing) = self.backing.as_ref() else {
-            super::stop_forever();
+            panic!("任务内核栈的页帧 backing 已被释放");
         };
         backing.start_address() + backing.size()
     }
@@ -74,8 +73,7 @@ impl Drop for KernelStack {
     fn drop(&mut self) {
         if let Some(backing) = self.backing.take() {
             if let Err(error) = frame_allocator::deallocate_run(backing) {
-                crate::klog_error!("释放任务内核栈页帧失败：{}", error.description());
-                super::stop_forever();
+                panic!("释放任务内核栈页帧失败：{}", error.description());
             }
         }
     }
@@ -123,8 +121,7 @@ impl Drop for UserStack {
     fn drop(&mut self) {
         while let Some(frame) = self.frames.pop() {
             if let Err(error) = frame_allocator::deallocate_frame(frame) {
-                crate::klog_error!("释放任务用户栈页帧失败：{}", error.description());
-                super::stop_forever();
+                panic!("释放任务用户栈页帧失败：{}", error.description());
             }
         }
     }

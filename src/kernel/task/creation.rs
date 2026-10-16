@@ -3,13 +3,12 @@
 use crate::arch::riscv64::trap::TrapFrame;
 
 use super::super::memory::{KernelMemoryLayout, KernelSectionRange, KernelStackMapping};
-use super::{stack::StackError, KernelStack, Task, TaskId, TaskState, UserStack, MAX_USER_TASKS};
+use super::{stack::StackError, KernelStack, Task, TaskId, TaskState, UserStack};
 
 /// 单任务创建失败的阶段和原因。
 pub(super) enum TaskCreationError {
-    TaskLimitReached,
     TaskMetadataAllocation,
-    ProgramMissing(usize),
+    ProgramMissing,
     ProgramLoad(super::super::user_program::UserProgramLoadError),
     UserStack(StackError),
     KernelStack(StackError),
@@ -21,33 +20,13 @@ impl TaskCreationError {
     /// 返回适合启动错误日志的简要说明。
     pub(super) fn description(&self) -> &'static str {
         match self {
-            Self::TaskLimitReached => "已达到固定任务记录上限",
             Self::TaskMetadataAllocation => "无法为任务记录预留内核堆空间",
-            Self::ProgramMissing(_) => "用户程序索引不存在",
+            Self::ProgramMissing => "用户程序索引不存在",
             Self::ProgramLoad(error) => error.description(),
             Self::UserStack(error) => error.description(),
             Self::KernelStack(error) => error.description(),
             Self::ProgramRangeOverflow => "用户程序地址范围溢出",
             Self::AddressSpace(error) => error.description(),
-        }
-    }
-
-    /// 输出包含任务索引和子系统原因的诊断。
-    pub(super) fn report(&self, program_index: usize) {
-        match self {
-            Self::ProgramMissing(index) => {
-                crate::klog_error!("用户程序索引不存在：{index}");
-            }
-            Self::ProgramLoad(error) => {
-                crate::klog_error!(
-                    "用户程序 {} 加载失败：{}（镜像 {} 字节，加载槽位 {} 字节）",
-                    error.program_name,
-                    error.description(),
-                    error.image_size,
-                    error.capacity
-                );
-            }
-            _ => crate::klog_error!("任务 {} 创建失败：{}", program_index, self.description()),
         }
     }
 }
@@ -61,9 +40,6 @@ fn create_task_inner(program_index: usize) -> Result<TaskId, TaskCreationError> 
     let task_id = {
         // 安全性：任务只能在单 hart 的启动或陷入路径创建；当前 S-mode 陷入不会嵌套修改任务表。
         let tasks = unsafe { &mut *core::ptr::addr_of_mut!(super::TASKS) };
-        if tasks.len() >= MAX_USER_TASKS {
-            return Err(TaskCreationError::TaskLimitReached);
-        }
         tasks
             .try_reserve(1)
             .map_err(|_| TaskCreationError::TaskMetadataAllocation)?;
@@ -74,7 +50,7 @@ fn create_task_inner(program_index: usize) -> Result<TaskId, TaskCreationError> 
         .map_err(TaskCreationError::ProgramLoad)?
     {
         Some(program) => program,
-        None => return Err(TaskCreationError::ProgramMissing(program_index)),
+        None => return Err(TaskCreationError::ProgramMissing),
     };
     let user_stack = UserStack::allocate().map_err(TaskCreationError::UserStack)?;
     let kernel_stack = KernelStack::allocate().map_err(TaskCreationError::KernelStack)?;
@@ -98,8 +74,7 @@ fn create_task_inner(program_index: usize) -> Result<TaskId, TaskCreationError> 
     };
     let user_image_mapping = super::super::memory::UserImageMapping {
         virtual_start: program.virtual_start,
-        physical_start: program.slot_start,
-        size: program.slot_end - program.slot_start,
+        frames: program.frames(),
     };
     let kernel_layout = kernel_memory_layout();
 

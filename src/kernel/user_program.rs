@@ -1,6 +1,10 @@
-//! 管理同时驻留的用户程序镜像，并复制到各自固定的物理加载槽位。
+//! 从构建清单装载用户程序，并由页帧分配器管理镜像 backing。
 
-const USER_PROGRAM_SLOT_SIZE: usize = 64 * 1024;
+use alloc::vec::Vec;
+
+use super::frame_allocator::{self, FrameError, PhysicalFrame};
+use super::memory::{address, page::PAGE_SIZE};
+
 const USER_PROGRAM_VIRTUAL_BASE: usize = 0x4000_0000;
 
 struct UserProgramImage {
@@ -8,20 +12,9 @@ struct UserProgramImage {
     bytes: &'static [u8],
 }
 
-struct ProgramSlot {
-    physical_start: usize,
-    physical_end: usize,
-    virtual_start: usize,
-}
-
 include!(concat!(env!("OUT_DIR"), "/user_program_catalog.rs"));
 
-extern "C" {
-    static __user_program_load_virtual_start: u8;
-    static __user_program_load_virtual_end: u8;
-}
-
-/// 已复制到内存中的用户程序入口和镜像信息。
+/// 已装入物理页帧、可映射到任务地址空间的用户程序。
 pub(super) struct LoadedUserProgram {
     /// 用户程序在构建清单中的名称。
     pub(super) name: &'static str,
@@ -29,29 +22,42 @@ pub(super) struct LoadedUserProgram {
     pub(super) entry: usize,
     /// 用户程序链接时使用的固定虚拟起始地址。
     pub(super) virtual_start: usize,
-    /// 用户程序固定加载槽位的物理起始地址。
-    pub(super) slot_start: usize,
-    /// 用户程序固定加载槽位的物理结束地址。
-    pub(super) slot_end: usize,
-    /// 从独立构建产物复制的字节数。
+    /// 镜像在用户虚拟地址空间中实际占用的字节数。
     pub(super) image_size: usize,
+    frames: Vec<PhysicalFrame>,
 }
 
-/// 固定加载区容量不足时返回该错误。
-pub(super) struct UserProgramLoadError {
-    /// 无法装入的用户程序名称。
-    pub(super) program_name: &'static str,
-    /// 用户程序镜像实际长度。
-    pub(super) image_size: usize,
-    /// 链接脚本预留的加载区长度。
-    pub(super) capacity: usize,
-    description: &'static str,
+impl LoadedUserProgram {
+    pub(super) fn frames(&self) -> &[PhysicalFrame] {
+        &self.frames
+    }
+}
+
+impl Drop for LoadedUserProgram {
+    fn drop(&mut self) {
+        while let Some(frame) = self.frames.pop() {
+            if let Err(error) = frame_allocator::deallocate_frame(frame) {
+                panic!("释放用户程序镜像页帧失败：{}", error.description());
+            }
+        }
+    }
+}
+
+/// 描述用户程序装载失败的阶段和原因。
+pub(super) enum UserProgramLoadError {
+    Frame(FrameError),
+    MetadataAllocation,
+    AddressRangeOverflow,
 }
 
 impl UserProgramLoadError {
-    /// 返回用于启动诊断的错误说明。
+    /// 返回用于任务创建诊断的简要说明。
     pub(super) fn description(&self) -> &'static str {
-        self.description
+        match self {
+            Self::Frame(error) => error.description(),
+            Self::MetadataAllocation => "无法为用户程序镜像页帧分配内核堆空间",
+            Self::AddressRangeOverflow => "用户程序镜像地址范围溢出",
+        }
     }
 }
 
@@ -67,91 +73,80 @@ pub(super) fn count() -> usize {
     USER_PROGRAMS.len()
 }
 
-/// 将指定程序装入独立槽位；索引超出清单时表示没有该程序。
+/// 将指定程序复制到新分配的物理页帧；索引超出清单时表示没有该程序。
 pub(super) fn load(index: usize) -> Result<Option<LoadedUserProgram>, UserProgramLoadError> {
     let Some(program) = USER_PROGRAMS.get(index) else {
         return Ok(None);
     };
-
-    let slot = validated_program_slot(index, program)?;
-
-    // 安全性：链接器保证加载区位于内核映像之后且落在 QEMU RAM 内；
-    // 编译期嵌入的源镜像与目标物理槽位不重叠，镜像长度和槽位边界已在复制前检查。
-    unsafe {
-        core::ptr::write_bytes(slot.virtual_start as *mut u8, 0, USER_PROGRAM_SLOT_SIZE);
-        core::ptr::copy_nonoverlapping(
-            program.bytes.as_ptr(),
-            slot.virtual_start as *mut u8,
-            program.bytes.len(),
-        );
-        core::arch::asm!("fence.i", options(nostack));
+    let image_end = USER_PROGRAM_VIRTUAL_BASE
+        .checked_add(program.bytes.len())
+        .ok_or(UserProgramLoadError::AddressRangeOverflow)?;
+    if program.bytes.is_empty() || image_end > address::SV39_USER_ADDRESS_END_EXCLUSIVE {
+        return Err(UserProgramLoadError::AddressRangeOverflow);
     }
+    let frame_count = program
+        .bytes
+        .len()
+        .checked_add(PAGE_SIZE - 1)
+        .ok_or(UserProgramLoadError::AddressRangeOverflow)?
+        / PAGE_SIZE;
+    if frame_count == 0 {
+        return Err(UserProgramLoadError::AddressRangeOverflow);
+    }
+    let mut frames = Vec::new();
+    frames
+        .try_reserve_exact(frame_count)
+        .map_err(|_| UserProgramLoadError::MetadataAllocation)?;
+
+    for _ in 0..frame_count {
+        match frame_allocator::allocate_zeroed_frame() {
+            Ok(frame) => frames.push(frame),
+            Err(error) => {
+                release_frames(&mut frames);
+                return Err(UserProgramLoadError::Frame(error));
+            }
+        }
+    }
+
+    copy_image_to_frames(program.bytes, &frames);
 
     Ok(Some(LoadedUserProgram {
         name: program.name,
         entry: USER_PROGRAM_VIRTUAL_BASE,
         virtual_start: USER_PROGRAM_VIRTUAL_BASE,
-        slot_start: slot.physical_start,
-        slot_end: slot.physical_end,
         image_size: program.bytes.len(),
+        frames,
     }))
 }
 
-fn validated_program_slot(
-    index: usize,
-    program: &UserProgramImage,
-) -> Result<ProgramSlot, UserProgramLoadError> {
-    // 链接器将这两个符号定义为加载区首尾地址，而非存放数据的变量。
-    let load_virtual_start = core::ptr::addr_of!(__user_program_load_virtual_start) as usize;
-    let load_virtual_end = core::ptr::addr_of!(__user_program_load_virtual_end) as usize;
-    let load_start = super::memory::address::kernel_virtual_to_physical(load_virtual_start);
-    let load_end = super::memory::address::kernel_virtual_to_physical(load_virtual_end);
-    let reserved_capacity = load_end - load_start;
-    let capacity = USER_PROGRAM_SLOT_SIZE;
-    let Some(slot_offset) = index.checked_mul(USER_PROGRAM_SLOT_SIZE) else {
-        return Err(UserProgramLoadError {
-            program_name: program.name,
-            image_size: program.bytes.len(),
-            capacity: 0,
-            description: "用户程序槽位地址计算溢出",
-        });
-    };
-    let Some(slot_start) = load_start.checked_add(slot_offset) else {
-        return Err(UserProgramLoadError {
-            program_name: program.name,
-            image_size: program.bytes.len(),
-            capacity: 0,
-            description: "用户程序槽位地址计算溢出",
-        });
-    };
-    let Some(slot_end) = slot_start.checked_add(capacity) else {
-        return Err(UserProgramLoadError {
-            program_name: program.name,
-            image_size: program.bytes.len(),
-            capacity: 0,
-            description: "用户程序槽位结束地址计算溢出",
-        });
-    };
-
-    if program.bytes.len() > capacity || slot_end > load_end || reserved_capacity < capacity {
-        return Err(UserProgramLoadError {
-            program_name: program.name,
-            image_size: program.bytes.len(),
-            capacity: core::cmp::min(capacity, reserved_capacity.saturating_sub(slot_offset)),
-            description: "用户程序镜像超过固定加载槽位容量",
-        });
+fn copy_image_to_frames(bytes: &[u8], frames: &[PhysicalFrame]) {
+    let mut copied_bytes = 0;
+    for frame in frames {
+        let Some(virtual_address) = address::physical_to_kernel_virtual(frame.start_address())
+        else {
+            panic!("用户程序镜像页帧无法映射到内核地址");
+        };
+        let bytes_in_frame = core::cmp::min(PAGE_SIZE, bytes.len() - copied_bytes);
+        if bytes_in_frame > 0 {
+            // 安全性：目标页由当前装载器独占，且已映射到内核高半区；源切片长度已限制在单页内。
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    bytes.as_ptr().add(copied_bytes),
+                    virtual_address as *mut u8,
+                    bytes_in_frame,
+                );
+            }
+            copied_bytes += bytes_in_frame;
+        }
     }
-    let Some(slot_virtual_start) = load_virtual_start.checked_add(slot_offset) else {
-        return Err(UserProgramLoadError {
-            program_name: program.name,
-            image_size: program.bytes.len(),
-            capacity,
-            description: "用户程序槽位虚拟地址计算溢出",
-        });
-    };
-    Ok(ProgramSlot {
-        physical_start: slot_start,
-        physical_end: slot_end,
-        virtual_start: slot_virtual_start,
-    })
+    // 安全性：只同步本 hart 刚复制到新分配页帧中的可执行指令。
+    unsafe { core::arch::asm!("fence.i", options(nostack)) };
+}
+
+fn release_frames(frames: &mut Vec<PhysicalFrame>) {
+    while let Some(frame) = frames.pop() {
+        if let Err(error) = frame_allocator::deallocate_frame(frame) {
+            panic!("回滚用户程序镜像页帧失败：{}", error.description());
+        }
+    }
 }

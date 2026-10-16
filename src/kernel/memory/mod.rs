@@ -14,7 +14,7 @@ pub(super) fn create_address_space(
     kernel_layout: KernelMemoryLayout,
     user_stack: &UserStackMapping<'_>,
     kernel_stack: KernelStackMapping,
-    user_image: UserImageMapping,
+    user_image: UserImageMapping<'_>,
 ) -> Result<(), PageTableError> {
     address_space::create_address_space(
         address_space_index,
@@ -60,12 +60,11 @@ pub(super) unsafe fn write_user_value<T: Copy>(address: usize, value: T) {
     unsafe { user_access::write_user_value(address, value) }
 }
 
-/// 描述某个任务中用户程序虚拟区域到其独立物理镜像槽位的映射。
+/// 描述某个任务中用户程序虚拟区域到其独占物理页帧的映射。
 #[derive(Clone, Copy)]
-pub(super) struct UserImageMapping {
+pub(super) struct UserImageMapping<'a> {
     pub(super) virtual_start: usize,
-    pub(super) physical_start: usize,
-    pub(super) size: usize,
+    pub(super) frames: &'a [crate::kernel::frame_allocator::PhysicalFrame],
 }
 
 /// 描述需要分别设置页表权限的内核链接段范围。

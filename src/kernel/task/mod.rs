@@ -8,7 +8,6 @@ mod stack;
 
 use stack::{KernelStack, UserStack};
 
-const MAX_USER_TASKS: usize = 8;
 const BOOT_PROGRAM_NAME: &str = match option_env!("FULLEMU_BOOT_PROGRAM") {
     Some(name) => name,
     None => "shell",
@@ -57,33 +56,36 @@ static mut PENDING_KERNEL_STACK_RELEASE: Option<usize> = None;
 /// 装入构建配置指定的入口用户程序并开始运行。
 pub(super) fn run_boot_program() -> ! {
     let Some(program_index) = super::user_program::find_index(BOOT_PROGRAM_NAME) else {
-        crate::klog_error!("用户程序清单中没有入口程序：{BOOT_PROGRAM_NAME}");
-        stop_forever();
+        panic!("用户程序清单中没有入口程序：{BOOT_PROGRAM_NAME}");
     };
 
-    start_programs(&[program_index]);
+    let mut program_indices = Vec::new();
+    if program_indices.try_reserve_exact(1).is_err() {
+        panic!("无法为入口程序索引分配内核堆空间");
+    }
+    program_indices.push(program_index);
+    start_programs(program_indices);
 }
 
 /// 同时装入并调度构建清单中的全部程序。
 pub(super) fn run_batch_programs() -> ! {
     let program_count = super::user_program::count();
-    if program_count == 0 || program_count > MAX_USER_TASKS {
-        crate::klog_error!("批处理程序数量无效：{program_count}");
-        stop_forever();
+    if program_count == 0 {
+        panic!("批处理程序清单为空");
     }
 
-    let mut program_indices = [0; MAX_USER_TASKS];
-    for (program_index, slot) in program_indices.iter_mut().take(program_count).enumerate() {
-        *slot = program_index;
+    let mut program_indices = Vec::new();
+    if program_indices.try_reserve_exact(program_count).is_err() {
+        panic!("无法为批处理程序索引分配内核堆空间");
     }
+    program_indices.extend(0..program_count);
 
-    start_programs(&program_indices[..program_count]);
+    start_programs(program_indices);
 }
 
-fn start_programs(program_indices: &[usize]) -> ! {
-    if program_indices.is_empty() || program_indices.len() > MAX_USER_TASKS {
-        crate::klog_error!("用户任务数量无效：{}", program_indices.len());
-        stop_forever();
+fn start_programs(program_indices: Vec<usize>) -> ! {
+    if program_indices.is_empty() {
+        panic!("启动任务列表不能为空");
     }
 
     // 安全性：启动页表仍保持活动；新建任务页表会映射内核高半区、启动栈及 RAM 恒等区。
@@ -96,46 +98,47 @@ fn start_programs(program_indices: &[usize]) -> ! {
         // 安全性：任务容器只在启动路径初始化；此时 S-mode 中断尚未开启。
         let tasks = unsafe { &mut *core::ptr::addr_of_mut!(TASKS) };
         if !tasks.is_empty() {
-            crate::klog_error!("用户任务容器已经初始化");
-            stop_forever();
+            panic!("用户任务容器已经初始化");
         }
     }
 
+    let program_count = program_indices.len();
     for program_index in program_indices.iter().copied() {
         if let Err(error) = creation::create_task(program_index) {
-            error.report(program_index);
-            stop_forever();
+            panic!(
+                "用户任务 {} 创建失败：{}",
+                program_index,
+                error.description()
+            );
         }
     }
+    drop(program_indices);
 
-    let mut kernel_stacks = [super::memory::KernelStackMapping {
-        virtual_start: 0,
-        physical_start: 0,
-        size: 0,
-    }; MAX_USER_TASKS];
+    let mut kernel_stacks = Vec::new();
+    if kernel_stacks.try_reserve_exact(program_count).is_err() {
+        panic!("无法为共享内核栈映射分配内核堆空间");
+    }
     // 安全性：任务创建已完成且启动中断仍关闭；每个内核栈的页帧所有权由任务记录持有。
     let tasks = unsafe { &*core::ptr::addr_of!(TASKS) };
-    for (task, mapping) in tasks.iter().zip(kernel_stacks.iter_mut()) {
+    for task in tasks.iter() {
         let Some(stack) = task.kernel_stack.as_ref() else {
-            crate::klog_error!("任务 {} 的内核栈不存在", task.id.index());
-            stop_forever();
+            panic!("任务 {} 的内核栈不存在", task.id.index());
         };
         let range = stack.range();
-        *mapping = super::memory::KernelStackMapping {
+        kernel_stacks.push(super::memory::KernelStackMapping {
             virtual_start: range.0,
             physical_start: stack.physical_start(),
             size: range.1 - range.0,
-        };
+        });
     }
-    if let Err(error) = super::memory::map_kernel_stacks(&kernel_stacks[..tasks.len()]) {
-        crate::klog_error!("映射共享内核栈失败：{}", error.description());
-        stop_forever();
+    if let Err(error) = super::memory::map_kernel_stacks(&kernel_stacks) {
+        panic!("映射共享内核栈失败：{}", error.description());
     }
+    drop(kernel_stacks);
 
     set_task_state(0, TaskState::Running);
     if let Err(error) = super::memory::activate_address_space(0) {
-        crate::klog_error!("无法激活首个任务地址空间：{}", error.description());
-        stop_forever();
+        panic!("无法激活首个任务地址空间：{}", error.description());
     }
 
     let trap_entry = crate::arch::riscv64::trap::supervisor_trap_entry_address();
@@ -147,12 +150,9 @@ fn start_programs(program_indices: &[usize]) -> ! {
     super::memory::log_address_spaces();
     crate::klog_info!("已启用 Sv39 用户/内核页权限边界");
     crate::klog_info!("S-mode 陷入入口位于内核高半区：{trap_entry:#018x}");
-    crate::klog_info!(
-        "启动 {} 个用户任务；定时器中断保持调度响应",
-        program_indices.len()
-    );
+    crate::klog_info!("启动 {} 个用户任务；定时器中断保持调度响应", program_count);
 
-    arm_next_timer_or_stop();
+    arm_next_timer();
     crate::arch::riscv64::interrupt::enable_supervisor_timer();
 
     let first_frame = saved_frame_pointer(0);
@@ -173,7 +173,7 @@ pub extern "C" fn supervisor_trap_handler(frame: *mut TrapFrame) -> *mut TrapFra
     crate::klog_trace!("任务 {} 进入 trap handler：原因={cause:?}", current_index);
 
     if cause == TrapCause::Interrupt(InterruptCause::SupervisorTimer) {
-        arm_next_timer_or_stop();
+        arm_next_timer();
 
         // S-mode 中断目前不会在内核临界路径中嵌套；若未来启用嵌套，保留原帧直接返回。
         if frame.status & SSTATUS_SPP != 0 {
@@ -194,10 +194,9 @@ pub extern "C" fn supervisor_trap_handler(frame: *mut TrapFrame) -> *mut TrapFra
             frame.registers[11],
             frame.registers[12],
         ];
-        let task = task_record_or_stop(current_index);
+        let task = task_record_or_panic(current_index);
         let Some(stack_range) = user_stack_range(current_index) else {
-            crate::klog_error!("任务 {} 的用户栈不存在", current_index);
-            stop_forever();
+            panic!("任务 {} 的用户栈不存在", current_index);
         };
         let syscall_context =
             super::syscall::SyscallContext::new(current_index, task.program_range, stack_range);
@@ -223,28 +222,30 @@ pub extern "C" fn supervisor_trap_handler(frame: *mut TrapFrame) -> *mut TrapFra
         }
     }
 
-    crate::klog_error!(
-        "用户任务 {} 陷入：原因={cause:?}，scause={:#018x}，sepc={:#018x}，stval={:#018x}",
-        current_index,
-        frame.cause,
-        frame.exception_pc,
-        frame.trap_value
-    );
-
     if frame.status & SSTATUS_SPP == 0 {
+        crate::klog_error!(
+            "用户任务 {} 陷入：原因={cause:?}，scause={:#018x}，sepc={:#018x}，stval={:#018x}",
+            current_index,
+            frame.cause,
+            frame.exception_pc,
+            frame.trap_value
+        );
         save_current_frame(current_index, frame);
         set_task_state(current_index, TaskState::Exited);
         crate::klog_warn!("用户任务 {} 因异常终止", current_index);
         return schedule_next(current_index);
     }
 
-    stop_forever()
+    panic!(
+        "S-mode 陷入：任务 {}，原因={cause:?}，scause={:#018x}，sepc={:#018x}，stval={:#018x}",
+        current_index, frame.cause, frame.exception_pc, frame.trap_value
+    )
 }
 
 fn schedule_next(previous_index: usize) -> *mut TrapFrame {
     let Some(next_index) = find_next_ready_task(previous_index) else {
         crate::klog_info!("所有用户任务均已退出，共运行 {} 个任务", task_count());
-        stop_forever();
+        idle_forever();
     };
 
     set_task_state(next_index, TaskState::Running);
@@ -254,12 +255,11 @@ fn schedule_next(previous_index: usize) -> *mut TrapFrame {
     }
 
     if let Err(error) = super::memory::activate_address_space(next_index) {
-        crate::klog_error!(
+        panic!(
             "切换到任务 {} 的地址空间失败：{}",
             next_index,
             error.description()
         );
-        stop_forever();
     }
 
     if previous_index != next_index && task_state(previous_index) == TaskState::Exited {
@@ -275,12 +275,11 @@ fn schedule_next(previous_index: usize) -> *mut TrapFrame {
                 );
             }
             Err(error) => {
-                crate::klog_error!(
+                panic!(
                     "回收任务 {} 的页表失败：{}",
                     previous_index,
                     error.description()
                 );
-                stop_forever();
             }
         }
     }
@@ -295,16 +294,14 @@ fn schedule_next(previous_index: usize) -> *mut TrapFrame {
     restore_user_frame(next_frame)
 }
 
-fn arm_next_timer_or_stop() {
+fn arm_next_timer() {
     let Some(deadline) = crate::arch::riscv64::sbi::read_time().checked_add(TIME_SLICE_TICKS)
     else {
-        crate::klog_error!("计算下一次定时器截止时间时溢出");
-        stop_forever();
+        panic!("计算下一次定时器截止时间时溢出");
     };
 
     if let Err(error) = crate::arch::riscv64::sbi::set_timer(deadline) {
-        crate::klog_error!("SBI 设置 supervisor 定时器失败：错误码 {}", error.0);
-        stop_forever();
+        panic!("SBI 设置 supervisor 定时器失败：错误码 {}", error.0);
     }
 }
 
@@ -325,8 +322,7 @@ fn task_kernel_stack_top(index: usize) -> usize {
         .get(index)
         .and_then(|task| task.kernel_stack.as_ref())
     else {
-        crate::klog_error!("任务 {} 的内核栈不存在", index);
-        stop_forever();
+        panic!("任务 {} 的内核栈不存在", index);
     };
     stack.top()
 }
@@ -339,13 +335,12 @@ fn restore_user_frame(frame: &mut TrapFrame) -> *mut TrapFrame {
 }
 
 fn saved_frame_pointer(index: usize) -> *mut TrapFrame {
-    task_record_or_stop(index).saved_frame_address as *mut TrapFrame
+    task_record_or_panic(index).saved_frame_address as *mut TrapFrame
 }
 
 fn save_current_frame(index: usize, frame: &mut TrapFrame) {
     let Some(task) = (unsafe { &mut *core::ptr::addr_of_mut!(TASKS) }).get_mut(index) else {
-        crate::klog_error!("无法保存不存在的任务 {} 的陷入帧", index);
-        stop_forever();
+        panic!("无法保存不存在的任务 {} 的陷入帧", index);
     };
     // 安全性：当前陷入帧由本 hart 独占，索引是正在运行的有效任务，且陷入处理不会嵌套调度。
     task.saved_frame_address = frame as *mut TrapFrame as usize;
@@ -362,13 +357,12 @@ fn task_count() -> usize {
 }
 
 fn task_state(index: usize) -> TaskState {
-    task_record_or_stop(index).state
+    task_record_or_panic(index).state
 }
 
 fn set_task_state(index: usize, state: TaskState) {
     let Some(task) = (unsafe { &mut *core::ptr::addr_of_mut!(TASKS) }).get_mut(index) else {
-        crate::klog_error!("无法更新不存在的任务 {} 的状态", index);
-        stop_forever();
+        panic!("无法更新不存在的任务 {} 的状态", index);
     };
     // 安全性：状态只在单 hart 启动或陷入路径更新；S-mode 陷入期间不会发生定时器重入。
     task.state = state;
@@ -381,15 +375,13 @@ struct TaskSnapshot {
     program_range: (usize, usize),
 }
 
-fn task_record_or_stop(index: usize) -> TaskSnapshot {
+fn task_record_or_panic(index: usize) -> TaskSnapshot {
     // 安全性：任务容器进入 U-mode 前构造完成，此后不增删记录；快照不暴露对容器元素的引用。
     let Some(task) = (unsafe { &*core::ptr::addr_of!(TASKS) }).get(index) else {
-        crate::klog_error!("任务索引越界：{}，任务数量={}", index, task_count());
-        stop_forever();
+        panic!("任务索引越界：{}，任务数量={}", index, task_count());
     };
     if task.id.index() != index {
-        crate::klog_error!("任务记录 ID 不匹配：索引={}，ID={}", index, task.id.index());
-        stop_forever();
+        panic!("任务记录 ID 不匹配：索引={}，ID={}", index, task.id.index());
     }
     TaskSnapshot {
         state: task.state,
@@ -410,24 +402,20 @@ fn user_stack_range(index: usize) -> Option<(usize, usize)> {
 fn release_user_stack(index: usize) {
     // 安全性：调用方已切换到其他地址空间并销毁旧页表，旧 U-mode 映射不再引用这些页帧。
     let Some(task) = (unsafe { &mut *core::ptr::addr_of_mut!(TASKS) }).get_mut(index) else {
-        crate::klog_error!("无法释放不存在任务 {} 的用户栈", index);
-        stop_forever();
+        panic!("无法释放不存在任务 {} 的用户栈", index);
     };
     if task.user_stack.take().is_none() {
-        crate::klog_error!("任务 {} 的用户栈已经释放", index);
-        stop_forever();
+        panic!("任务 {} 的用户栈已经释放", index);
     }
 }
 
 fn discard_loaded_program_reference(index: usize) {
-    // 安全性：调用方已切换到其他地址空间并销毁旧页表；这里只丢弃任务记录中的镜像描述，固定槽位仍由链接器预留。
+    // 安全性：调用方已切换到其他地址空间并销毁旧页表，镜像页不再被映射后才归还其页帧。
     let Some(task) = (unsafe { &mut *core::ptr::addr_of_mut!(TASKS) }).get_mut(index) else {
-        crate::klog_error!("无法释放不存在任务 {} 的程序镜像", index);
-        stop_forever();
+        panic!("无法释放不存在任务 {} 的程序镜像", index);
     };
     if task.program_image.take().is_none() {
-        crate::klog_error!("任务 {} 的程序镜像已经释放", index);
-        stop_forever();
+        panic!("任务 {} 的程序镜像已经释放", index);
     }
 }
 
@@ -436,8 +424,7 @@ fn defer_kernel_stack_release(index: usize) {
     unsafe {
         let pending = core::ptr::addr_of_mut!(PENDING_KERNEL_STACK_RELEASE);
         if core::ptr::read_volatile(pending).is_some() {
-            crate::klog_error!("已有尚未释放的任务内核栈");
-            stop_forever();
+            panic!("已有尚未释放的任务内核栈");
         }
         core::ptr::write_volatile(pending, Some(index));
     }
@@ -451,28 +438,25 @@ fn release_deferred_kernel_stack(current_index: usize) {
         return;
     };
     if pending_index == current_index {
-        crate::klog_error!("拒绝释放当前任务正在使用的内核栈");
-        stop_forever();
+        panic!("拒绝释放当前任务正在使用的内核栈");
     }
 
     // 安全性：pending_index 来自退出任务；当前陷入帧已在另一任务的栈上，故该栈不再活动。
     let Some(task) = (unsafe { &mut *core::ptr::addr_of_mut!(TASKS) }).get_mut(pending_index)
     else {
-        crate::klog_error!("待释放的内核栈所属任务 {} 不存在", pending_index);
-        stop_forever();
+        panic!("待释放的内核栈所属任务 {} 不存在", pending_index);
     };
     if task.kernel_stack.take().is_none() {
-        crate::klog_error!("任务 {} 的内核栈已经释放", pending_index);
-        stop_forever();
+        panic!("任务 {} 的内核栈已经释放", pending_index);
     }
     unsafe {
         core::ptr::write_volatile(core::ptr::addr_of_mut!(PENDING_KERNEL_STACK_RELEASE), None);
     }
 }
 
-fn stop_forever() -> ! {
+fn idle_forever() -> ! {
     loop {
-        // 安全性：当前没有可运行任务；WFI 让 hart 等待，不再恢复已退出或异常的任务。
+        // 安全性：所有用户任务均已退出；WFI 让 hart 等待，不再恢复已退出或异常的任务。
         unsafe { core::arch::asm!("wfi", options(nomem, nostack)) };
     }
 }
