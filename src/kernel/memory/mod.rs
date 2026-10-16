@@ -63,11 +63,15 @@ pub(super) struct KernelMemoryLayout {
     pub(super) bss: KernelSectionRange,
 }
 
-/// 描述一个内核链接段的虚拟地址范围，结束地址不包含在范围内。
+/// 描述一个内核段的虚拟范围及其对应的物理装载起点。
 #[derive(Clone, Copy)]
 pub(super) struct KernelSectionRange {
-    pub(super) start: usize,
-    pub(super) end: usize,
+    /// 段在运行时使用的虚拟地址，必须按页对齐。
+    pub(super) virtual_start: usize,
+    /// 段字节在 RAM 中的物理装载起点，必须按页对齐。
+    pub(super) physical_start: usize,
+    /// 段有效内容的字节数；页表映射会向上覆盖至整页。
+    pub(super) size: usize,
 }
 
 /// 描述一个任务的用户栈虚拟起点及其拥有的物理页帧。

@@ -18,6 +18,8 @@ make run
 
 若 QEMU 可执行文件不在 PATH，可运行 `make run QEMU=/path/to/qemu-system-riscv64`。也可以单独运行 `make build-user` 构建用户程序。
 
+查看内核 ELF 的启动入口和可加载段地址，可运行 `make inspect-kernel-elf`。该检查用于核对高半区迁移前的链接与加载基线，不会改变内核运行地址。
+
 ## 代码与阶段说明
 
 - [模块职责与依赖](docs/architecture.md) 说明当前内核模块边界、依赖方向和后续架构重构工作。

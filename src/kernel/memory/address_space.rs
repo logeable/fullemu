@@ -13,6 +13,9 @@ use super::{
 
 static mut ADDRESS_SPACES: Vec<Option<usize>> = Vec::new();
 
+// 当前内核仍链接在物理地址；本阶段把同一内核页额外映射到这个 Sv39 高半区基址之上。
+const KERNEL_VIRTUAL_BASE: usize = 0xffff_ffc0_0000_0000;
+
 /// 为一个任务建立独立页表；失败时归还本次创建的页表树。
 ///
 /// `address_space_index` 必须等于当前已成功创建的地址空间数量。这样成功创建的任务
@@ -24,7 +27,13 @@ pub(super) fn create_address_space(
     user_image: UserImageMapping,
 ) -> Result<(), PageTableError> {
     validate_kernel_layout(kernel_layout)?;
-    let kernel_end = align_up(kernel_layout.bss.end)?;
+    let kernel_end = align_up(
+        kernel_layout
+            .bss
+            .physical_start
+            .checked_add(kernel_layout.bss.size)
+            .ok_or(PageTableError::InvalidRange)?,
+    )?;
 
     let Some(stack_size) = user_stack.frames.len().checked_mul(PAGE_SIZE) else {
         return Err(PageTableError::InvalidRange);
@@ -154,6 +163,12 @@ fn populate_address_space(
     map_kernel_section(root_table, kernel_layout.data, PTE_READ | PTE_WRITE)?;
     map_kernel_section(root_table, kernel_layout.bss, PTE_READ | PTE_WRITE)?;
 
+    // 低地址映射供当前代码继续运行；高地址别名映射同一批物理页，供后续迁移阶段使用。
+    map_kernel_section_alias(root_table, kernel_layout.text, PTE_READ | PTE_EXECUTE)?;
+    map_kernel_section_alias(root_table, kernel_layout.rodata, PTE_READ)?;
+    map_kernel_section_alias(root_table, kernel_layout.data, PTE_READ | PTE_WRITE)?;
+    map_kernel_section_alias(root_table, kernel_layout.bss, PTE_READ | PTE_WRITE)?;
+
     let mut image_offset = 0;
     while image_offset < user_image.size {
         map_page(
@@ -194,15 +209,20 @@ fn populate_address_space(
 fn validate_kernel_layout(layout: KernelMemoryLayout) -> Result<(), PageTableError> {
     let sections = [layout.text, layout.rodata, layout.data, layout.bss];
     for section in sections {
-        if section.start & PAGE_MASK != 0 || section.end < section.start {
+        let mapped_size = align_up(section.size)?;
+        if section.virtual_start & PAGE_MASK != 0
+            || section.physical_start & PAGE_MASK != 0
+            || section.size == 0
+            || section.virtual_start.checked_add(mapped_size).is_none()
+            || section.physical_start.checked_add(mapped_size).is_none()
+        {
             return Err(PageTableError::InvalidRange);
         }
     }
 
-    if align_up(layout.text.end)? != layout.rodata.start
-        || align_up(layout.rodata.end)? != layout.data.start
-        || align_up(layout.data.end)? != layout.bss.start
-        || layout.bss.end <= layout.text.start
+    if align_up(layout.text.virtual_start + layout.text.size)? != layout.rodata.virtual_start
+        || align_up(layout.rodata.virtual_start + layout.rodata.size)? != layout.data.virtual_start
+        || align_up(layout.data.virtual_start + layout.data.size)? != layout.bss.virtual_start
     {
         return Err(PageTableError::InvalidRange);
     }
@@ -215,11 +235,48 @@ fn map_kernel_section(
     section: KernelSectionRange,
     permissions: usize,
 ) -> Result<(), PageTableError> {
-    let mut page = section.start;
-    let end = align_up(section.end)?;
-    while page < end {
-        map_page(root_table, page, page, permissions)?;
-        page = page
+    let mapping_size = align_up(section.size)?;
+    let mut offset = 0;
+    while offset < mapping_size {
+        let virtual_address = section
+            .virtual_start
+            .checked_add(offset)
+            .ok_or(PageTableError::InvalidRange)?;
+        let physical_address = section
+            .physical_start
+            .checked_add(offset)
+            .ok_or(PageTableError::InvalidRange)?;
+        map_page(root_table, virtual_address, physical_address, permissions)?;
+        offset = offset
+            .checked_add(PAGE_SIZE)
+            .ok_or(PageTableError::InvalidRange)?;
+    }
+    Ok(())
+}
+
+fn map_kernel_section_alias(
+    root_table: *mut PageTable,
+    section: KernelSectionRange,
+    permissions: usize,
+) -> Result<(), PageTableError> {
+    let mapping_size = align_up(section.size)?;
+    let mut offset = 0;
+    while offset < mapping_size {
+        let physical_page = section
+            .physical_start
+            .checked_add(offset)
+            .ok_or(PageTableError::InvalidRange)?;
+        let virtual_address = KERNEL_VIRTUAL_BASE
+            .checked_add(physical_page)
+            .ok_or(PageTableError::InvalidRange)?;
+        let section_virtual_address = section
+            .virtual_start
+            .checked_add(offset)
+            .ok_or(PageTableError::InvalidRange)?;
+        if virtual_address != section_virtual_address {
+            map_page(root_table, virtual_address, physical_page, permissions)?;
+        }
+        offset = offset
             .checked_add(PAGE_SIZE)
             .ok_or(PageTableError::InvalidRange)?;
     }

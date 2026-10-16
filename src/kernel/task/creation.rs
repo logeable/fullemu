@@ -95,22 +95,31 @@ fn create_task_inner(program_index: usize) -> Result<TaskId, TaskCreationError> 
         physical_start: program.slot_start,
         size: program.slot_end - program.slot_start,
     };
+    // 当前 linker.ld 仍规定 VMA=LMA；分别填充两个字段，避免后续迁移继续隐含这一假设。
     let kernel_layout = super::super::memory::KernelMemoryLayout {
         text: super::super::memory::KernelSectionRange {
-            start: core::ptr::addr_of!(super::__text_start) as usize,
-            end: core::ptr::addr_of!(super::__text_end) as usize,
+            virtual_start: core::ptr::addr_of!(super::__text_start) as usize,
+            physical_start: core::ptr::addr_of!(super::__text_start) as usize,
+            size: (core::ptr::addr_of!(super::__text_end) as usize)
+                - (core::ptr::addr_of!(super::__text_start) as usize),
         },
         rodata: super::super::memory::KernelSectionRange {
-            start: core::ptr::addr_of!(super::__rodata_start) as usize,
-            end: core::ptr::addr_of!(super::__rodata_end) as usize,
+            virtual_start: core::ptr::addr_of!(super::__rodata_start) as usize,
+            physical_start: core::ptr::addr_of!(super::__rodata_start) as usize,
+            size: (core::ptr::addr_of!(super::__rodata_end) as usize)
+                - (core::ptr::addr_of!(super::__rodata_start) as usize),
         },
         data: super::super::memory::KernelSectionRange {
-            start: core::ptr::addr_of!(super::__data_start) as usize,
-            end: core::ptr::addr_of!(super::__data_end) as usize,
+            virtual_start: core::ptr::addr_of!(super::__data_start) as usize,
+            physical_start: core::ptr::addr_of!(super::__data_start) as usize,
+            size: (core::ptr::addr_of!(super::__data_end) as usize)
+                - (core::ptr::addr_of!(super::__data_start) as usize),
         },
         bss: super::super::memory::KernelSectionRange {
-            start: core::ptr::addr_of!(super::__bss_start) as usize,
-            end: core::ptr::addr_of!(super::__bss_end) as usize,
+            virtual_start: core::ptr::addr_of!(super::__bss_start) as usize,
+            physical_start: core::ptr::addr_of!(super::__bss_start) as usize,
+            size: (core::ptr::addr_of!(super::__bss_end) as usize)
+                - (core::ptr::addr_of!(super::__bss_start) as usize),
         },
     };
 

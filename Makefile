@@ -1,6 +1,8 @@
 CARGO ?= cargo
 QEMU ?= qemu-system-riscv64
 OBJCOPY ?= rust-objcopy
+READOBJ ?= rust-readobj
+PYTHON ?= python3
 LOG_LEVEL ?= info
 BOOT_PROGRAM ?= shell
 BOOT_MODE ?= shell
@@ -17,7 +19,7 @@ USER_BIN_NAMES := $(filter-out $(BATCH_EXCLUDED_BINS),$(USER_BIN_NAMES))
 endif
 USER_BIN_FLAGS := $(foreach bin,$(USER_BIN_NAMES),--bin $(bin))
 
-.PHONY: all build build-kernel build-user run test-fdt clean fmt fmt-check
+.PHONY: all build build-kernel build-user inspect-kernel-elf run test-fdt clean fmt fmt-check
 
 all: build
 
@@ -39,6 +41,10 @@ build-user:
 		printf '%s %s\n' "$$program_name" "$$program_image" >> "$$manifest_tmp"; \
 	done; \
 	mv "$$manifest_tmp" "$(USER_IMAGE_MANIFEST)"
+
+# 检查内核 ELF 的入口和 PT_LOAD 段；本阶段确认仍采用低地址恒等加载。
+inspect-kernel-elf: build
+	$(PYTHON) scripts/check_kernel_elf.py "$(KERNEL)" "$(READOBJ)"
 
 run: build
 	QEMU="$(QEMU)" ./scripts/run-qemu.sh "$(KERNEL)"
