@@ -1,13 +1,15 @@
-//! 将单个用户程序及其运行资源组成一项任务。
+//! 将用户程序镜像、栈和地址空间组合成一个完整进程对象。
 
 use crate::arch::riscv64::trap::TrapFrame;
 
 use super::super::memory::{KernelMemoryLayout, KernelSectionRange, KernelStackMapping};
-use super::{stack::StackError, KernelStack, Task, TaskId, TaskState, UserStack};
+use super::{
+    stack::StackError, KernelStack, Process, ProcessId, ProcessResources, ProcessState, UserStack,
+};
 
-/// 单任务创建失败的阶段和原因。
-pub(super) enum TaskCreationError {
-    TaskMetadataAllocation,
+/// 单进程创建失败的阶段和原因。
+pub(super) enum ProcessCreationError {
+    ProcessMetadataAllocation,
     ProgramMissing,
     ProgramLoad(super::super::user_program::UserProgramLoadError),
     UserStack(StackError),
@@ -16,11 +18,11 @@ pub(super) enum TaskCreationError {
     AddressSpace(super::super::memory::PageTableError),
 }
 
-impl TaskCreationError {
+impl ProcessCreationError {
     /// 返回适合启动错误日志的简要说明。
     pub(super) fn description(&self) -> &'static str {
         match self {
-            Self::TaskMetadataAllocation => "无法为任务记录预留内核堆空间",
+            Self::ProcessMetadataAllocation => "无法为进程记录预留内核堆空间",
             Self::ProgramMissing => "用户程序索引不存在",
             Self::ProgramLoad(error) => error.description(),
             Self::UserStack(error) => error.description(),
@@ -31,33 +33,33 @@ impl TaskCreationError {
     }
 }
 
-/// 创建并追加一个任务；失败时局部所有者自动回收栈，页表由地址空间模块回滚。
-pub(super) fn create_task(program_index: usize) -> Result<TaskId, TaskCreationError> {
-    create_task_inner(program_index)
+/// 创建并追加一个进程；失败时局部所有者自动回收栈，页表由地址空间模块回滚。
+pub(super) fn create_process(program_index: usize) -> Result<ProcessId, ProcessCreationError> {
+    create_process_inner(program_index)
 }
 
-fn create_task_inner(program_index: usize) -> Result<TaskId, TaskCreationError> {
-    let task_id = {
-        // 安全性：任务只能在单 hart 的启动或陷入路径创建；当前 S-mode 陷入不会嵌套修改任务表。
-        let tasks = unsafe { &mut *core::ptr::addr_of_mut!(super::TASKS) };
-        tasks
+fn create_process_inner(program_index: usize) -> Result<ProcessId, ProcessCreationError> {
+    let process_id = {
+        // 安全性：进程只能在单 hart 的启动或陷入路径创建；当前 S-mode 陷入不会嵌套修改进程表。
+        let processes = unsafe { &mut *core::ptr::addr_of_mut!(super::PROCESSES) };
+        processes
             .try_reserve(1)
-            .map_err(|_| TaskCreationError::TaskMetadataAllocation)?;
-        TaskId::from_index(tasks.len())
+            .map_err(|_| ProcessCreationError::ProcessMetadataAllocation)?;
+        ProcessId::from_index(processes.len())
     };
 
     let program = match super::super::user_program::load(program_index)
-        .map_err(TaskCreationError::ProgramLoad)?
+        .map_err(ProcessCreationError::ProgramLoad)?
     {
         Some(program) => program,
-        None => return Err(TaskCreationError::ProgramMissing),
+        None => return Err(ProcessCreationError::ProgramMissing),
     };
-    let user_stack = UserStack::allocate().map_err(TaskCreationError::UserStack)?;
-    let kernel_stack = KernelStack::allocate().map_err(TaskCreationError::KernelStack)?;
+    let user_stack = UserStack::allocate().map_err(ProcessCreationError::UserStack)?;
+    let kernel_stack = KernelStack::allocate().map_err(ProcessCreationError::KernelStack)?;
     let program_end = program
         .virtual_start
         .checked_add(program.image_size)
-        .ok_or(TaskCreationError::ProgramRangeOverflow)?;
+        .ok_or(ProcessCreationError::ProgramRangeOverflow)?;
 
     let user_stack_range = user_stack.range();
     let kernel_stack_range = kernel_stack.range();
@@ -78,16 +80,15 @@ fn create_task_inner(program_index: usize) -> Result<TaskId, TaskCreationError> 
     };
     let kernel_layout = kernel_memory_layout();
 
-    super::super::memory::create_address_space(
-        task_id.index(),
+    let address_space = super::super::memory::create_address_space(
         kernel_layout,
         &user_stack_mapping,
         kernel_stack_mapping,
         user_image_mapping,
     )
-    .map_err(TaskCreationError::AddressSpace)?;
+    .map_err(ProcessCreationError::AddressSpace)?;
 
-    // 安全性：陷入帧写入本任务独占内核栈的高半区直接映射；该物理页已分配且保持映射。
+    // 安全性：陷入帧写入本进程独占内核栈的高半区直接映射；该物理页已分配且保持映射。
     unsafe {
         core::ptr::write(initial_frame_address as *mut TrapFrame, initial_frame);
     }
@@ -95,22 +96,27 @@ fn create_task_inner(program_index: usize) -> Result<TaskId, TaskCreationError> 
     let program_name = program.name;
     let program_entry = program.entry;
     let image_size = program.image_size;
-    // 安全性：任务表容量已在资源分配前预留；追加不再申请内存，且只有全部资源准备成功后才发布任务记录。
+    // 安全性：进程表容量已在资源分配前预留；追加不再申请内存，且只有全部资源准备成功后才发布进程记录。
     unsafe {
-        (&mut *core::ptr::addr_of_mut!(super::TASKS)).push(Task {
-            id: task_id,
-            state: TaskState::Ready,
-            saved_frame_address: initial_frame_address,
-            program_range: (program.virtual_start, program_end),
-            program_image: Some(program),
-            user_stack: Some(user_stack),
-            kernel_stack: Some(kernel_stack),
+        (&mut *core::ptr::addr_of_mut!(super::PROCESSES)).push(Process {
+            id: process_id,
+            parent_id: None,
+            state: ProcessState::Ready,
+            exit_status: None,
+            resources: Some(ProcessResources {
+                address_space,
+                saved_frame_address: initial_frame_address,
+                program_range: (program.virtual_start, program_end),
+                program_image: program,
+                user_stack,
+                kernel_stack,
+            }),
         });
     }
 
     crate::klog_info!(
-        "用户任务已创建：任务={}，程序={}，入口 {:#018x}，镜像 {} 字节；用户栈虚拟={:#018x}..{:#018x}，内核栈高地址={:#018x}..{:#018x}",
-        task_id.index(),
+        "用户进程已创建：进程={}，程序={}，入口 {:#018x}，镜像 {} 字节；用户栈虚拟={:#018x}..{:#018x}，内核栈高地址={:#018x}..{:#018x}",
+        process_id.index(),
         program_name,
         program_entry,
         image_size,
@@ -119,7 +125,7 @@ fn create_task_inner(program_index: usize) -> Result<TaskId, TaskCreationError> 
         kernel_stack_range.0,
         kernel_stack_range.1
     );
-    Ok(task_id)
+    Ok(process_id)
 }
 
 /// 从链接器符号组装高半区内核段及其物理装载范围。

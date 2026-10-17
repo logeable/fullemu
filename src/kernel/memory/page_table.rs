@@ -96,8 +96,22 @@ pub(super) fn activate(root_physical_address: usize) -> Result<(), PageTableErro
         return Err(PageTableError::InvalidRootTable);
     }
 
+    activate_root(root_physical_address)
+}
+
+pub(super) fn activate_boot_address_space() -> Result<(), PageTableError> {
+    let boot_root_virtual_address = core::ptr::addr_of!(__boot_page_table_virtual_start) as usize;
+    let root_physical_address =
+        super::address::kernel_virtual_to_physical(boot_root_virtual_address);
+    if root_physical_address == 0 || !is_page_aligned(root_physical_address) {
+        return Err(PageTableError::InvalidRootTable);
+    }
+    activate_root(root_physical_address)
+}
+
+fn activate_root(root_physical_address: usize) -> Result<(), PageTableError> {
     let satp_value = (SATP_SV39_MODE << SATP_MODE_SHIFT) | (root_physical_address >> 12);
-    // 安全性：根页表来自已分配页帧；新旧页表都映射高半区内核代码、直接映射 RAM 及共享内核栈。
+    // 安全性：启动页表位于内核静态存储区，进程页表根来自已分配页帧；切换前后的页表都映射当前高半区内核代码与 RAM 直接映射区。
     unsafe {
         core::arch::asm!(
             "csrw satp, {value}",
@@ -121,6 +135,10 @@ pub(super) fn activate(root_physical_address: usize) -> Result<(), PageTableErro
     }
 
     Ok(())
+}
+
+extern "C" {
+    static __boot_page_table_virtual_start: u8;
 }
 
 pub(super) fn active_root_address() -> usize {

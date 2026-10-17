@@ -105,15 +105,15 @@ supervisor_trap_entry:
     la      gp, __global_pointer$
     .option pop
 
-    /* C ABI 第一个参数 a0 传入陷入帧指针；处理器返回所选任务的陷入帧指针。 */
+    /* C ABI 第一个参数 a0 传入当前陷入帧指针；处理器返回调度器选定的陷入帧指针。 */
     mv      a0, sp
     call    supervisor_trap_handler
 
-    /* 返回值是下一任务的陷入帧；从该任务自己的栈恢复寄存器，允许切换任务。 */
+    /* 返回值是下一进程的陷入帧；从该进程自己的栈恢复寄存器，完成进程切换。 */
     mv      sp, a0
 .Lrestore_trap_frame:
     /*
-     * sp 指向待恢复任务的 TrapFrame。先恢复 sepc 和 sstatus，供最后的 sret 使用；
+     * sp 指向待恢复进程的 TrapFrame。先恢复 sepc 和 sstatus，供最后的 sret 使用；
      * sret 才会依据 SPP 选择返回特权级，并依据 SPIE 恢复全局中断状态。
      */
     ld      t0, 256(sp)
@@ -158,11 +158,23 @@ supervisor_trap_entry:
 
     .size supervisor_trap_entry, . - supervisor_trap_entry
 
-    .globl riscv64_start_first_task
-    .type riscv64_start_first_task, @function
-riscv64_start_first_task:
-    /* a0 指向预先构造的首个任务 TrapFrame；复用同一恢复路径并由 sret 首次进入任务。 */
+    .globl riscv64_start_first_process
+    .type riscv64_start_first_process, @function
+riscv64_start_first_process:
+    /* a0 指向预先构造的首个进程 TrapFrame；复用同一恢复路径并由 sret 首次进入用户态。 */
     mv      sp, a0
     j       .Lrestore_trap_frame
 
-    .size riscv64_start_first_task, . - riscv64_start_first_task
+    .size riscv64_start_first_process, . - riscv64_start_first_process
+
+    .globl riscv64_call_on_stack
+    .type riscv64_call_on_stack, @function
+riscv64_call_on_stack:
+    /* a0 是新栈顶，a1 是不返回的续接函数，a2 是传给续接函数的参数。 */
+    mv      t0, a1
+    mv      sp, a0
+    andi    sp, sp, -16
+    mv      a0, a2
+    jr      t0
+
+    .size riscv64_call_on_stack, . - riscv64_call_on_stack

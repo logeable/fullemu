@@ -30,7 +30,9 @@ SECTIONS
     . = ALIGN(4096);
     __boot_bss_start = .;
     .boot.bss (NOLOAD) : {
+        __boot_page_table_start = .;
         KEEP(*(.bss.boot_page_table))
+        __boot_page_table_end = .;
         . = ALIGN(16);
         __boot_stack_start = .;
         KEEP(*(.bss.boot_stack))
@@ -40,6 +42,7 @@ SECTIONS
     __boot_bss_end = .;
     __boot_bss_virtual_start = __boot_bss_start + KERNEL_VIRTUAL_OFFSET;
     __boot_bss_virtual_end = __boot_bss_end + KERNEL_VIRTUAL_OFFSET;
+    __boot_page_table_virtual_start = __boot_page_table_start + KERNEL_VIRTUAL_OFFSET;
     boot_stack_top = __boot_stack_end;
     __boot_stack_virtual_start = __boot_stack_start + KERNEL_VIRTUAL_OFFSET;
     __boot_stack_virtual_end = __boot_stack_end + KERNEL_VIRTUAL_OFFSET;

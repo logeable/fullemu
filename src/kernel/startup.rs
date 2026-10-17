@@ -1,4 +1,4 @@
-//! 串接平台启动信息读取、内核子系统初始化和用户任务入口选择。
+//! 串接平台启动信息读取、内核子系统初始化和用户进程入口选择。
 
 use core::fmt;
 
@@ -44,7 +44,7 @@ extern "C" {
     static __bss_end: u8;
 }
 
-/// 按固定顺序初始化内核，并根据构建配置启动用户任务。
+/// 按固定顺序初始化内核，并根据构建配置启动用户进程。
 pub(crate) fn run(hart_id: usize, device_tree_physical_address: usize) -> ! {
     crate::kernel::clock::initialize();
 
@@ -176,8 +176,8 @@ pub(crate) fn run(hart_id: usize, device_tree_physical_address: usize) -> ! {
     }
 
     match env!("FULLEMU_BOOT_MODE") {
-        "shell" => crate::kernel::task::run_boot_program(),
-        "batch" => crate::kernel::task::run_batch_programs(),
+        "shell" => crate::kernel::process::run_boot_program(),
+        "batch" => crate::kernel::process::run_batch_programs(),
         _ => unreachable!("build.rs 已验证启动模式"),
     }
 }

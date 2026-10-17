@@ -1,6 +1,4 @@
-//! 管理任务地址空间根页表的创建、切换、遍历校验和销毁。
-
-use alloc::vec::Vec;
+//! 管理进程地址空间根页表的创建、切换、遍历校验和销毁。
 
 use super::page::{align_down_to_page, align_up_to_page, is_page_aligned, PAGE_SIZE};
 use super::page_table::{
@@ -12,32 +10,15 @@ use super::{
     UserStackMapping,
 };
 
-static mut ADDRESS_SPACES: Vec<Option<usize>> = Vec::new();
-
-/// 为一个任务建立独立页表；失败时归还本次创建的页表树。
-///
-/// `address_space_index` 必须等于当前已成功创建的地址空间数量。这样成功创建的任务
-/// 地址空间按稳定索引追加，失败的创建不会留下空槽或消耗索引。
+/// 为一个进程建立独立页表；失败时归还本次创建的页表树。
 pub(super) fn create_address_space(
-    address_space_index: usize,
     kernel_layout: KernelMemoryLayout,
     user_stack: &UserStackMapping<'_>,
     kernel_stack: KernelStackMapping,
     user_image: UserImageMapping<'_>,
-) -> Result<(), PageTableError> {
+) -> Result<AddressSpace, PageTableError> {
     validate_kernel_layout(kernel_layout)?;
     validate_user_mappings(kernel_layout, user_stack, user_image)?;
-
-    {
-        // 安全性：地址空间创建只在单 hart 的启动或陷入路径执行；S-mode 定时器陷入期间不会并发修改该容器。
-        let address_spaces = unsafe { &mut *core::ptr::addr_of_mut!(ADDRESS_SPACES) };
-        if address_space_index != address_spaces.len() {
-            return Err(PageTableError::AddressSpaceIdOutOfOrder);
-        }
-        address_spaces
-            .try_reserve(1)
-            .map_err(|_| PageTableError::AddressSpaceMetadataAllocation)?;
-    }
 
     let root_frame = crate::kernel::frame_allocator::allocate_zeroed_frame()
         .map_err(PageTableError::FrameAllocation)?;
@@ -63,9 +44,8 @@ pub(super) fn create_address_space(
         return Err(error);
     }
 
-    // 安全性：容器容量已预留；只有页表树完整建立后才发布根地址，单 hart 不会并发观察中间状态。
-    unsafe { (&mut *core::ptr::addr_of_mut!(ADDRESS_SPACES)).push(Some(root_address)) };
-    Ok(())
+    // 安全性：完整页表树的根页帧所有权由返回的地址空间对象独占。
+    Ok(AddressSpace { root_address })
 }
 
 fn validate_user_mappings(
@@ -196,7 +176,7 @@ fn populate_address_space(
     map_kernel_section(root_table, kernel_layout.data, PTE_READ | PTE_WRITE)?;
     map_kernel_section(root_table, kernel_layout.bss, PTE_READ | PTE_WRITE)?;
 
-    // 首个任务地址空间激活前，启动 Rust 调用链仍在引导栈上；映射引导栈和当前任务栈。
+    // 首个进程地址空间激活前，启动 Rust 调用链仍在引导栈上；映射引导栈和当前进程栈。
     map_kernel_stack(root_table, kernel_layout.boot_stack)?;
     map_kernel_stack(root_table, kernel_stack)?;
 
@@ -290,17 +270,14 @@ fn map_kernel_section(
     Ok(())
 }
 
-/// 让每张任务页表都能访问调度切换期间可能仍在使用的任一内核栈。
-pub(super) fn map_kernel_stacks(stacks: &[KernelStackMapping]) -> Result<(), PageTableError> {
-    for address_space_index in 0..address_space_count() {
-        let root_address =
-            address_space_root(address_space_index).ok_or(PageTableError::UnknownAddressSpace)?;
-        let root_virtual_address = super::address::physical_to_kernel_virtual(root_address)
-            .ok_or(PageTableError::InvalidRange)?;
-        let root_table = root_virtual_address as *mut PageTable;
-        for stack in stacks {
-            map_kernel_stack(root_table, *stack)?;
-        }
+/// 让一个进程页表能访问调度切换期间可能仍在使用的任一内核栈。
+pub(super) fn map_kernel_stacks(
+    address_space: &mut AddressSpace,
+    stacks: &[KernelStackMapping],
+) -> Result<(), PageTableError> {
+    let root_table = address_space.root_table()?;
+    for stack in stacks {
+        map_kernel_stack(root_table, *stack)?;
     }
     Ok(())
 }
@@ -341,19 +318,21 @@ fn rollback_page_table_tree(root_address: usize) -> Result<(), PageTableError> {
     Ok(())
 }
 
-/// 切换到指定任务的 Sv39 根页表。
-pub(super) fn activate_address_space(address_space_index: usize) -> Result<(), PageTableError> {
-    let root_address =
-        address_space_root(address_space_index).ok_or(PageTableError::UnknownAddressSpace)?;
-    activate(root_address)
+/// 切换到指定进程的 Sv39 根页表。
+pub(super) fn activate_address_space(address_space: &AddressSpace) -> Result<(), PageTableError> {
+    activate(address_space.root_address)
+}
+
+/// 切换到启动阶段保留的内核页表，以便最后一个进程退出后安全回收其页表。
+pub(super) fn activate_boot_address_space() -> Result<(), PageTableError> {
+    super::page_table::activate_boot_address_space()
 }
 
 /// 销毁一个非当前地址空间，并归还它拥有的根页表和中间页表页。
 ///
 /// 返回归还的页表页数。叶子映射指向的内核、用户栈和程序镜像页不会释放。
-pub(super) fn destroy_address_space(address_space_index: usize) -> Result<usize, PageTableError> {
-    let root_address =
-        address_space_root(address_space_index).ok_or(PageTableError::UnknownAddressSpace)?;
+pub(super) fn destroy_address_space(address_space: AddressSpace) -> Result<usize, PageTableError> {
+    let root_address = address_space.root_address;
     if root_address == active_root_address() {
         return Err(PageTableError::ActiveAddressSpace);
     }
@@ -365,9 +344,26 @@ pub(super) fn destroy_address_space(address_space_index: usize) -> Result<usize,
         return Err(PageTableError::PageTableCountMismatch);
     }
 
-    // 安全性：根页表树已完整释放；清空容器槽位避免后续误激活已归还的根页帧。
-    set_address_space_root(address_space_index, None)?;
     Ok(released_page_count)
+}
+
+/// 持有一棵已建立、且尚未销毁的 Sv39 页表树。
+/// 独占一个进程的 Sv39 页表树；必须先切离，再显式销毁以归还页表页。
+#[must_use = "地址空间对象代表独占的页表树所有权，必须在切离后显式销毁"]
+pub struct AddressSpace {
+    root_address: usize,
+}
+
+impl AddressSpace {
+    pub(super) const fn root_address(&self) -> usize {
+        self.root_address
+    }
+
+    fn root_table(&mut self) -> Result<*mut PageTable, PageTableError> {
+        let virtual_address = super::address::physical_to_kernel_virtual(self.root_address)
+            .ok_or(PageTableError::InvalidRootTable)?;
+        Ok(virtual_address as *mut PageTable)
+    }
 }
 
 fn validate_page_table_tree(table_address: usize, level: usize) -> Result<usize, PageTableError> {
@@ -426,33 +422,6 @@ fn release_page_table_tree(table_address: usize, level: usize) -> Result<usize, 
     crate::kernel::frame_allocator::deallocate_frame(frame)
         .map_err(PageTableError::FrameDeallocation)?;
     Ok(released_page_count)
-}
-
-pub(super) fn address_space_count() -> usize {
-    // 安全性：调用位于启动期或 S-mode 陷入处理路径；单 hart 定时器不会在读取期间重入修改容器。
-    unsafe { (&*core::ptr::addr_of!(ADDRESS_SPACES)).len() }
-}
-
-pub(super) fn address_space_root(address_space_index: usize) -> Option<usize> {
-    // 安全性：调用位于启动期或 S-mode 陷入处理路径；单 hart 定时器不会在读取期间重入修改容器。
-    unsafe {
-        (&*core::ptr::addr_of!(ADDRESS_SPACES))
-            .get(address_space_index)
-            .copied()
-            .flatten()
-    }
-}
-
-fn set_address_space_root(
-    address_space_index: usize,
-    root_address: Option<usize>,
-) -> Result<(), PageTableError> {
-    // 安全性：调用位于启动期或 S-mode 陷入处理路径；单 hart 定时器不会在写入期间重入修改容器。
-    let address_space = unsafe { &mut *core::ptr::addr_of_mut!(ADDRESS_SPACES) }
-        .get_mut(address_space_index)
-        .ok_or(PageTableError::UnknownAddressSpace)?;
-    *address_space = root_address;
-    Ok(())
 }
 
 fn ranges_overlap(

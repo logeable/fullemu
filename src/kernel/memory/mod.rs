@@ -1,5 +1,5 @@
 //! 管理 Sv39 地址空间及其对内核其他子系统提供的窄接口。
-//! 地址空间创建和页表操作由子模块实现；任务仍拥有用户栈和程序镜像等映射目标。
+//! 地址空间创建和页表操作由子模块实现；进程仍拥有用户栈和程序镜像等映射目标。
 
 pub(super) mod address;
 mod address_space;
@@ -8,36 +8,39 @@ mod page_table;
 mod page_table_log;
 mod user_access;
 
-/// 为单个任务建立独立地址空间；失败时不保留部分页表。
+pub(super) use address_space::AddressSpace;
+
+/// 为单个进程建立独立地址空间；失败时不保留部分页表。
 pub(super) fn create_address_space(
-    address_space_index: usize,
     kernel_layout: KernelMemoryLayout,
     user_stack: &UserStackMapping<'_>,
     kernel_stack: KernelStackMapping,
     user_image: UserImageMapping<'_>,
+) -> Result<AddressSpace, PageTableError> {
+    address_space::create_address_space(kernel_layout, user_stack, kernel_stack, user_image)
+}
+
+/// 切换到指定进程的 Sv39 根页表。
+pub(super) fn activate_address_space(address_space: &AddressSpace) -> Result<(), PageTableError> {
+    address_space::activate_address_space(address_space)
+}
+
+/// 在一个进程地址空间中映射共享的 S-mode 内核栈集合。
+pub(super) fn map_kernel_stacks(
+    address_space: &mut AddressSpace,
+    stacks: &[KernelStackMapping],
 ) -> Result<(), PageTableError> {
-    address_space::create_address_space(
-        address_space_index,
-        kernel_layout,
-        user_stack,
-        kernel_stack,
-        user_image,
-    )
+    address_space::map_kernel_stacks(address_space, stacks)
 }
 
-/// 切换到指定任务的 Sv39 根页表。
-pub(super) fn activate_address_space(address_space_index: usize) -> Result<(), PageTableError> {
-    address_space::activate_address_space(address_space_index)
-}
-
-/// 在全部任务地址空间中映射共享的 S-mode 内核栈集合。
-pub(super) fn map_kernel_stacks(stacks: &[KernelStackMapping]) -> Result<(), PageTableError> {
-    address_space::map_kernel_stacks(stacks)
+/// 切换到内核启动页表，供最后一个进程退出后的回收路径使用。
+pub(super) fn activate_boot_address_space() -> Result<(), PageTableError> {
+    address_space::activate_boot_address_space()
 }
 
 /// 销毁非活动地址空间，并返回释放的页表页数。
-pub(super) fn destroy_address_space(address_space_index: usize) -> Result<usize, PageTableError> {
-    address_space::destroy_address_space(address_space_index)
+pub(super) fn destroy_address_space(address_space: AddressSpace) -> Result<usize, PageTableError> {
+    address_space::destroy_address_space(address_space)
 }
 
 /// 在调用方已验证的用户地址范围内读取一个字节。
@@ -60,7 +63,7 @@ pub(super) unsafe fn write_user_value<T: Copy>(address: usize, value: T) {
     unsafe { user_access::write_user_value(address, value) }
 }
 
-/// 描述某个任务中用户程序虚拟区域到其独占物理页帧的映射。
+/// 描述某个进程中用户程序虚拟区域到其独占物理页帧的映射。
 #[derive(Clone, Copy)]
 pub(super) struct UserImageMapping<'a> {
     pub(super) virtual_start: usize,
@@ -88,13 +91,13 @@ pub(super) struct KernelSectionRange {
     pub(super) size: usize,
 }
 
-/// 描述一个任务的用户栈虚拟起点及其拥有的物理页帧。
+/// 描述一个进程的用户栈虚拟起点及其拥有的物理页帧。
 pub(super) struct UserStackMapping<'a> {
     pub(super) virtual_start: usize,
     pub(super) frames: &'a [crate::kernel::frame_allocator::PhysicalFrame],
 }
 
-/// 描述任务内核栈的高地址虚拟范围及其连续物理 backing。
+/// 描述进程内核栈的高地址虚拟范围及其连续物理 backing。
 #[derive(Clone, Copy)]
 pub(super) struct KernelStackMapping {
     pub(super) virtual_start: usize,
@@ -102,9 +105,9 @@ pub(super) struct KernelStackMapping {
     pub(super) size: usize,
 }
 
-/// 以调试日志输出各任务页表中的映射范围。
-pub(super) fn log_address_spaces() {
-    page_table_log::log_address_spaces();
+/// 以调试日志输出一个进程页表中的映射范围。
+pub(super) fn log_address_space(process_id: usize, address_space: &AddressSpace) {
+    page_table_log::log_address_space(process_id, address_space);
 }
 
 /// 描述 Sv39 页表初始化失败的原因。
@@ -122,16 +125,10 @@ pub(super) enum PageTableError {
     PageTableCountMismatch,
     /// 页表页归还给物理页帧分配器时失败。
     FrameDeallocation(crate::kernel::frame_allocator::FrameError),
-    /// 调度器请求了尚未初始化的地址空间。
-    UnknownAddressSpace,
     /// 本实验只建立 4 KiB 叶子映射，却遇到大页叶子项。
     UnexpectedSuperpage,
     /// 根页表没有按 4 KiB 对齐。
     InvalidRootTable,
-    /// 地址空间记录的堆内存分配失败。
-    AddressSpaceMetadataAllocation,
-    /// 地址空间必须按从零开始的连续索引创建。
-    AddressSpaceIdOutOfOrder,
     /// 建立地址空间失败，且部分页表无法安全回滚。
     RollbackFailed,
     /// 当前硬件没有接受 Sv39 模式。
@@ -148,11 +145,8 @@ impl PageTableError {
             Self::ActiveAddressSpace => "不能销毁当前活动地址空间",
             Self::PageTableCountMismatch => "地址空间销毁前后页表页数量不一致",
             Self::FrameDeallocation(error) => error.description(),
-            Self::UnknownAddressSpace => "任务地址空间尚未初始化",
             Self::UnexpectedSuperpage => "页表中出现本阶段未支持的大页映射",
             Self::InvalidRootTable => "根页表地址为零、未按 4 KiB 对齐或不属于已分配页帧",
-            Self::AddressSpaceMetadataAllocation => "无法为地址空间记录分配内核堆内存",
-            Self::AddressSpaceIdOutOfOrder => "地址空间 ID 未按顺序追加",
             Self::RollbackFailed => "地址空间创建失败且页表回滚失败",
             Self::Sv39Unavailable => "硬件没有接受 Sv39 satp 模式",
         }

@@ -1,6 +1,6 @@
-//! 管理任务内核栈和用户栈的页帧所有权。
+//! 管理进程内核栈和用户栈的页帧所有权。
 //!
-//! 内核栈要求物理页连续，并由每张任务页表映射到内核高半区；用户栈逐页映射，物理页可以分散。
+//! 内核栈要求物理页连续，并由每张进程页表映射到内核高半区；用户栈逐页映射，物理页可以分散。
 
 use alloc::vec::Vec;
 
@@ -12,7 +12,7 @@ const KERNEL_STACK_SIZE: usize = 16 * 1024;
 const USER_STACK_TOP: usize = address::SV39_USER_ADDRESS_END_EXCLUSIVE - PAGE_SIZE;
 const STACK_PAGE_COUNT: usize = USER_STACK_SIZE / PAGE_SIZE;
 
-/// 描述任务栈页帧分配失败。
+/// 描述进程栈页帧分配失败。
 pub(super) enum StackError {
     Frame(FrameError),
     MetadataAllocation,
@@ -55,7 +55,7 @@ impl KernelStack {
 
     pub(super) fn physical_top(&self) -> usize {
         let Some(backing) = self.backing.as_ref() else {
-            panic!("任务内核栈的页帧 backing 已被释放");
+            panic!("进程内核栈的页帧 backing 已被释放");
         };
         backing.start_address() + backing.size()
     }
@@ -73,7 +73,7 @@ impl Drop for KernelStack {
     fn drop(&mut self) {
         if let Some(backing) = self.backing.take() {
             if let Err(error) = frame_allocator::deallocate_run(backing) {
-                panic!("释放任务内核栈页帧失败：{}", error.description());
+                panic!("释放进程内核栈页帧失败：{}", error.description());
             }
         }
     }
@@ -121,7 +121,7 @@ impl Drop for UserStack {
     fn drop(&mut self) {
         while let Some(frame) = self.frames.pop() {
             if let Err(error) = frame_allocator::deallocate_frame(frame) {
-                panic!("释放任务用户栈页帧失败：{}", error.description());
+                panic!("释放进程用户栈页帧失败：{}", error.description());
             }
         }
     }

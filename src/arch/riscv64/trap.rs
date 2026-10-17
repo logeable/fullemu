@@ -1,4 +1,4 @@
-//! 保存异步陷入现场，并从选定的任务陷入帧恢复执行。
+//! 保存异步陷入现场，并从调度器选定的执行上下文恢复执行。
 
 /// 解码后的 RISC-V 陷入原因。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -112,7 +112,7 @@ pub struct TrapFrame {
 const _: () = assert!(core::mem::size_of::<TrapFrame>() == 288);
 
 impl TrapFrame {
-    /// 为首次运行的内核任务构造一个可由 `sret` 恢复的陷入帧。
+    /// 为首次运行的用户进程构造一个可由 `sret` 恢复的陷入帧。
     #[allow(dead_code)]
     pub fn for_entry(entry: extern "C" fn() -> !, stack_pointer: usize) -> Self {
         Self::for_privilege(entry as usize, stack_pointer, true)
@@ -139,7 +139,12 @@ impl TrapFrame {
 }
 
 extern "C" {
-    fn riscv64_start_first_task(frame: *const TrapFrame) -> !;
+    fn riscv64_start_first_process(frame: *const TrapFrame) -> !;
+    fn riscv64_call_on_stack(
+        stack_top: usize,
+        continuation: extern "C" fn(usize) -> !,
+        argument: usize,
+    ) -> !;
     fn supervisor_trap_entry();
 }
 
@@ -154,7 +159,7 @@ pub fn supervisor_trap_entry_address() -> usize {
 ///
 /// `entry` 必须至少按 4 字节对齐，并且在当前及之后使用的每个地址空间中都映射为可执行页。
 pub unsafe fn set_supervisor_trap_vector(entry: usize) {
-    // 安全性：调用方保证入口在当前和后续任务页表中均为有效的可执行映射。
+    // 安全性：调用方保证入口在当前和后续进程页表中均为有效的可执行映射。
     unsafe {
         core::arch::asm!(
             "csrw stvec, {entry}",
@@ -164,15 +169,30 @@ pub unsafe fn set_supervisor_trap_vector(entry: usize) {
     }
 }
 
-/// 从预先构造的陷入帧启动首个任务。
+/// 从预先构造的陷入帧启动首个用户进程。
 ///
 /// # Safety
 ///
-/// `frame` 必须指向按 16 字节对齐且在任务生命周期内有效的完整 `TrapFrame`；
-/// 其中 `registers[2]` 必须是对应任务可写栈的有效栈顶，入口必须不返回。
-pub unsafe fn start_first_task(frame: *const TrapFrame) -> ! {
-    // 安全性：调用方保证陷入帧与任务栈有效；汇编按 `TrapFrame` 的固定布局恢复它。
-    unsafe { riscv64_start_first_task(frame) }
+/// `frame` 必须指向按 16 字节对齐且在进程生命周期内有效的完整 `TrapFrame`；
+/// 其中 `registers[2]` 必须是对应进程可写栈的有效栈顶，入口必须不返回。
+pub unsafe fn start_first_process(frame: *const TrapFrame) -> ! {
+    // 安全性：调用方保证陷入帧与进程栈有效；汇编按 `TrapFrame` 的固定布局恢复它。
+    unsafe { riscv64_start_first_process(frame) }
+}
+
+/// 放弃当前栈，在指定的内核栈上继续执行不返回的函数。
+///
+/// # Safety
+///
+/// `stack_top` 必须是有效、可写且至少按 16 字节对齐的 S-mode 栈顶；
+/// `continuation` 必须不返回，并且其代码和所需数据在当前页表中保持映射。
+pub unsafe fn call_on_stack(
+    stack_top: usize,
+    continuation: extern "C" fn(usize) -> !,
+    argument: usize,
+) -> ! {
+    // 安全性：调用方保证新栈在当前地址空间中有效，续接函数也不会返回旧栈。
+    unsafe { riscv64_call_on_stack(stack_top, continuation, argument) }
 }
 
 /// 设置 U-mode 陷入时要切换到的 S-mode 栈顶。

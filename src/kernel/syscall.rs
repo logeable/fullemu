@@ -37,34 +37,34 @@ impl LinuxErrno {
     }
 }
 
-/// 表示系统调用返回用户态，或结束当前用户任务。
+/// 表示系统调用返回用户态、让出 CPU，或结束当前用户进程。
 pub(super) enum SyscallOutcome {
     /// 将结果写入 `a0` 后恢复用户上下文。
     Return(isize),
-    /// 当前任务调用 `exit`；Linux 对外可观察的正常退出码只有低 8 位。
+    /// 当前进程调用 `exit`；Linux 对外可观察的正常退出码只有低 8 位。
     Exit(u8),
-    /// 当前任务主动让出 CPU，调度器运行另一个就绪任务。
+    /// 当前进程主动让出 CPU，调度器运行另一个就绪进程。
     Yield,
 }
 
 /// 记录一次系统调用允许访问的用户程序和用户栈范围。
 ///
-/// 调度器在分发前从当前任务构造该值；syscall 层据此检查用户指针，不反向查询任务表。
+/// 调度器在分发前从当前进程构造该值；syscall 层据此检查用户指针，不反向查询进程表。
 #[derive(Clone, Copy)]
 pub(super) struct SyscallContext {
-    task_index: usize,
+    process_id: usize,
     program_range: (usize, usize),
     stack_range: (usize, usize),
 }
 
 impl SyscallContext {
     pub(super) const fn new(
-        task_index: usize,
+        process_id: usize,
         program_range: (usize, usize),
         stack_range: (usize, usize),
     ) -> Self {
         Self {
-            task_index,
+            process_id,
             program_range,
             stack_range,
         }
@@ -80,7 +80,7 @@ impl SyscallContext {
     }
 }
 
-/// 按 Linux RISC-V syscall ABI 分发调用，并描述返回或任务退出结果。
+/// 按 Linux RISC-V syscall ABI 分发调用，并描述返回或进程退出结果。
 pub(super) fn dispatch(
     context: SyscallContext,
     number: usize,
@@ -130,7 +130,7 @@ fn read(
             byte
         };
 
-        // 安全性：前面的范围检查保证该字节位于当前任务已映射的可写用户栈内。
+        // 安全性：前面的范围检查保证该字节位于当前进程已映射的可写用户栈内。
         unsafe {
             super::memory::write_user_value(buffer_address + bytes_read, byte);
         }
@@ -156,15 +156,15 @@ fn write(
 
     if !context.contains_program_or_stack_buffer(buffer_address, count) {
         crate::klog_trace!(
-            "拒绝任务 {} 的 write 缓冲区：地址={:#018x}，长度={}",
-            context.task_index,
+            "拒绝进程 {} 的 write 缓冲区：地址={:#018x}，长度={}",
+            context.process_id,
             buffer_address,
             count
         );
         return LinuxErrno::Fault.return_value();
     }
 
-    // 安全性：范围检查保证待读字节位于当前任务已映射的镜像或栈内。
+    // 安全性：范围检查保证待读字节位于当前进程已映射的镜像或栈内。
     for offset in 0..count {
         // 安全性：完整缓冲区已验证，单字节读取期间由 memory 模块短暂开启 SUM。
         let byte = unsafe { super::memory::read_user_byte(buffer_address + offset) };
@@ -192,7 +192,7 @@ fn clock_gettime(context: SyscallContext, clock_id: usize, timespec_address: usi
         seconds: time.seconds as i64,
         nanoseconds: time.nanoseconds as i64,
     };
-    // 安全性：对齐检查和栈范围检查保证目标是当前任务已映射的完整可写 timespec。
+    // 安全性：对齐检查和栈范围检查保证目标是当前进程已映射的完整可写 timespec。
     unsafe {
         super::memory::write_user_value(timespec_address, timespec);
     }
