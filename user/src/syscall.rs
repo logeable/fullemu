@@ -5,9 +5,12 @@ const LINUX_READ_SYSCALL: usize = 63;
 const LINUX_CLOCK_GETTIME_SYSCALL: usize = 113;
 const LINUX_EXIT_SYSCALL: usize = 93;
 const LINUX_CLONE_SYSCALL: usize = 220;
+const LINUX_EXECVE_SYSCALL: usize = 221;
 const LINUX_WAIT4_SYSCALL: usize = 260;
 const LINUX_SIGCHLD: usize = 17;
 const CLOCK_MONOTONIC: usize = 1;
+const EXEC_PATH_BUFFER_SIZE: usize = 128;
+const LINUX_ENAMETOOLONG: isize = 36;
 
 /// Linux RISC-V 64 位 ABI 的单调时间结构。
 #[repr(C)]
@@ -126,6 +129,30 @@ pub fn fork() -> isize {
             in("a3") 0usize,
             in("a4") 0usize,
             in("a7") LINUX_CLONE_SYSCALL,
+            options(nostack)
+        );
+    }
+
+    result
+}
+
+/// 替换当前进程为 `/bin/<程序名>` 中的嵌入式程序；成功后不返回，失败返回负的 Linux errno。
+pub fn exec(program_path: &str) -> isize {
+    if program_path.len() >= EXEC_PATH_BUFFER_SIZE {
+        return -LINUX_ENAMETOOLONG;
+    }
+    let mut path = [0u8; EXEC_PATH_BUFFER_SIZE];
+    path[..program_path.len()].copy_from_slice(program_path.as_bytes());
+
+    let mut result = path.as_mut_ptr() as isize;
+    // 安全性：路径缓冲区在 ecall 期间位于当前用户栈且以 NUL 结尾；本封装只传空 argv 和 envp。
+    unsafe {
+        core::arch::asm!(
+            "ecall",
+            inlateout("a0") result,
+            in("a1") 0usize,
+            in("a2") 0usize,
+            in("a7") LINUX_EXECVE_SYSCALL,
             options(nostack)
         );
     }

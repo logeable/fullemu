@@ -122,7 +122,7 @@ pub(super) fn create_process(program_index: usize) -> Result<ProcessId, ProcessC
         });
     }
 
-    crate::klog_info!(
+    crate::klog_debug!(
         "用户进程已创建：PID={}，程序={}，入口 {:#018x}，镜像 {} 字节；用户栈虚拟={:#018x}..{:#018x}，内核栈高地址={:#018x}..{:#018x}",
         process_id.linux_pid(),
         program_name,

@@ -4,6 +4,7 @@ use crate::arch::riscv64::trap::TrapFrame;
 use alloc::vec::Vec;
 
 mod creation;
+pub(super) mod exec;
 pub(super) mod exit;
 pub(super) mod fork;
 mod stack;
@@ -194,8 +195,8 @@ fn start_programs(program_indices: Vec<usize>) -> ! {
     }
 
     log_process_address_spaces();
-    crate::klog_info!("已启用 Sv39 用户/内核页权限边界");
-    crate::klog_info!("S-mode 陷入入口位于内核高半区：{trap_entry:#018x}");
+    crate::klog_debug!("已启用 Sv39 用户/内核页权限边界");
+    crate::klog_debug!("S-mode 陷入入口位于内核高半区：{trap_entry:#018x}");
     crate::klog_info!("启动 {} 个用户进程；定时器中断保持调度响应", program_count);
 
     arm_next_timer();
@@ -489,7 +490,7 @@ fn reap_process_resources(index: usize, defer_kernel_stack: bool) {
     if process.parent_id.is_none() || process.wait_collected {
         process.state = ProcessState::Reaped;
     }
-    crate::klog_info!(
+    crate::klog_debug!(
         "已回收进程 PID={} 的运行资源：父进程 PID={:?}，退出状态={:?}，释放 {} 个页表页",
         process_id.linux_pid(),
         parent_id.map(ProcessId::linux_pid),

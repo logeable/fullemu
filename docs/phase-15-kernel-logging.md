@@ -11,7 +11,7 @@
 - 日志格式为 `[LEVEL time=秒.微秒s module::path] message`，使用 `core::fmt` 同步写入 UART，不申请堆内存，也不引入第三方依赖。每条通过级别过滤的日志读取一次 RISC-V `time` 计数器，避免被过滤的日志产生额外计时读取。
 - 显示时间由单调递增的硬件时间计数换算而来，不是调度器周期 tick，也不是日历时间。当前按 QEMU `virt` 的 `timebase-frequency=10 MHz` 换算为秒和微秒；时间起点由平台计数器决定，不代表操作系统启动时刻。日志前缀不输出原始计数值。
 - 日志阈值通过编译时环境变量 `FULLEMU_LOG_LEVEL` 选择，级别为 `off`、`error`、`warn`、`info`、`debug`、`trace`；未设置时默认使用 `info`。较高级别自动包含较低级别，例如 `debug` 同时保留错误、警告和信息日志；未识别的值按 `info` 处理。
-- 启动摘要、致命错误、U-mode 启动/退出和未处理陷入已改为使用日志。FDT 头部与内存范围使用 `Debug`，结构节点与属性使用 `Trace`；属性日志包含原始十六进制字节，方便区分文本、cell 和其他二进制值。默认启动不显示这些明细；指定 `LOG_LEVEL=debug` 或 `LOG_LEVEL=trace` 可重新查看。关闭 Trace 时不会为属性诊断额外遍历结构块。用户 `write` 始终输出不带内核前缀的原始字节。
+- `Info` 用于简洁的启动和系统状态摘要；内核段范围、平台地址、自检成功、进程创建/复制/映像替换/正常退出及资源回收等高频或细节记录使用 `Debug`。致命错误与异常终止仍使用 `Error`/`Warn`。FDT 头部与内存范围使用 `Debug`，结构节点与属性使用 `Trace`；属性日志包含原始十六进制字节，方便区分文本、cell 和其他二进制值。默认 `Info` 启动不显示这些明细；指定 `LOG_LEVEL=debug` 或 `LOG_LEVEL=trace` 可重新查看。关闭 Trace 时不会为属性诊断额外遍历结构块。用户 `write` 始终输出不带内核前缀的原始字节。
 
 ## 暂不实现
 
@@ -34,7 +34,7 @@ Makefile 构建可通过 `LOG_LEVEL` 指定阈值，例如 `make LOG_LEVEL=debug
 FULLEMU_LOG_LEVEL=debug cargo build --release --target riscv64gc-unknown-none-elf
 ```
 
-QEMU 串口应出现所选阈值允许的日志级别，用户程序的 `write` 文本不应出现日志前缀。默认 `Info` 构建隐藏 FDT 明细；使用 `debug` 可查看 FDT 头部和内存范围，使用 `trace` 还可查看结构节点与属性。当前用户程序正常调用 `exit`，所以未处理陷入日志不会出现在正常启动路径中。
+QEMU 串口应出现所选阈值允许的日志级别，用户程序的 `write` 文本不应出现日志前缀。默认 `Info` 构建只保留启动和运行摘要；使用 `debug` 可查看内核段范围、进程生命周期、分配器自检结果及 FDT 头部/内存范围，使用 `trace` 还可查看结构节点与属性。用户程序正常调用 `exit` 时不会输出内核生命周期日志；未处理陷入仍会显示错误信息。
 
 ## 后续连接
 

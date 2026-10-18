@@ -440,7 +440,7 @@ pub(super) fn check_allocator() -> Result<(), HeapError> {
         return Err(HeapError::DemoDidNotCoalesce);
     }
 
-    crate::klog_info!(
+    crate::klog_debug!(
         "内核堆自检通过：区域起始={heap_start:#018x}，容量={} 字节；对齐、释放、复用和空闲块合并均符合预期",
         KERNEL_HEAP_SIZE
     );
@@ -481,7 +481,7 @@ pub(super) fn check_global_allocator() -> Result<(), HeapError> {
         return Err(HeapError::ContainerDidNotRelease);
     }
 
-    crate::klog_info!(
+    crate::klog_debug!(
         "全局分配器自检通过：Vec 元素={}，容量={}，扩容次数={}，空闲字节={} -> {} -> {}",
         final_length,
         final_capacity,

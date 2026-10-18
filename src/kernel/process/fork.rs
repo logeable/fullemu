@@ -114,7 +114,7 @@ fn create_child_process(
         });
     }
 
-    crate::klog_info!(
+    crate::klog_debug!(
         "fork 创建子进程：父进程 PID={}，子进程 PID={}，程序={}，用户栈={:#018x}..{:#018x}，内核栈={:#018x}..{:#018x}",
         parent_id.linux_pid(),
         child_id.linux_pid(),

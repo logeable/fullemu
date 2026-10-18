@@ -100,9 +100,9 @@ fn log_boot_information(
 ) {
     log_kernel_sections();
     crate::klog_info!("fullemu 已在 QEMU virt (RISC-V) 启动");
-    crate::klog_info!("启动 hart：{hart_id:#018x}");
-    crate::klog_info!("设备树物理地址：{device_tree_physical_address:#018x}");
-    crate::klog_info!(
+    crate::klog_debug!("启动 hart：{hart_id:#018x}");
+    crate::klog_debug!("设备树物理地址：{device_tree_physical_address:#018x}");
+    crate::klog_debug!(
         "FDT UART：寄存器范围={:#018x}..{:#018x}",
         uart_region.start,
         uart_region.start + uart_region.size
@@ -261,7 +261,7 @@ fn log_kernel_sections() {
 }
 
 fn log_kernel_range(name: &str, start: usize, end: usize) {
-    crate::klog_info!(
+    crate::klog_debug!(
         "内核范围 {}：{:#018x}..{:#018x}，大小={} 字节",
         name,
         start,

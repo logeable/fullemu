@@ -500,7 +500,7 @@ pub(super) fn check_allocation() -> Result<(), FrameError> {
         return Err(FrameError::UnexpectedFreeCount);
     }
 
-    crate::klog_info!(
+    crate::klog_debug!(
         "物理页帧分配器自检通过：可用页数={}，页大小={} 字节；对齐、独立分配、脏页清零、释放复用和完整归还均符合预期",
         initial_free_count,
         PAGE_SIZE

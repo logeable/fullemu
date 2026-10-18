@@ -9,6 +9,7 @@ const LINUX_CLOCK_GETTIME_SYSCALL: usize = 113;
 const LINUX_EXIT_SYSCALL: usize = 93;
 const LINUX_SCHED_YIELD_SYSCALL: usize = 124;
 const LINUX_CLONE_SYSCALL: usize = 220;
+const LINUX_EXECVE_SYSCALL: usize = 221;
 const LINUX_WAIT4_SYSCALL: usize = 260;
 const LINUX_SIGCHLD: usize = 17;
 const LINUX_WNOHANG: usize = 1;
@@ -16,6 +17,7 @@ const STDIN_FILE_DESCRIPTOR: usize = 0;
 const STDOUT_FILE_DESCRIPTOR: usize = 1;
 const STDERR_FILE_DESCRIPTOR: usize = 2;
 const CLOCK_MONOTONIC: usize = 1;
+const MAX_EXEC_PATH_LENGTH: usize = 128;
 
 /// Linux RISC-V 64 位 ABI 的 `timespec` 内存布局。
 #[repr(C)]
@@ -33,9 +35,12 @@ enum LinuxErrno {
     Again = 11,
     BadFileDescriptor = 9,
     Child = 10,
+    NoEntry = 2,
     NoMemory = 12,
     InvalidArgument = 22,
     Fault = 14,
+    NameTooLong = 36,
+    ExecFormat = 8,
     NoSystemCall = 38,
 }
 
@@ -104,9 +109,63 @@ pub(super) fn handle_user_environment_call(frame: &mut TrapFrame) -> *mut TrapFr
             super::process::yield_current_process()
         }
         LINUX_CLONE_SYSCALL => fork(arguments, frame),
+        LINUX_EXECVE_SYSCALL => execve(context, arguments, frame),
         LINUX_WAIT4_SYSCALL => wait4(context, arguments, frame),
         _ => return_to_user(frame, LinuxErrno::NoSystemCall.return_value()),
     }
+}
+
+fn execve(context: SyscallContext, arguments: [usize; 5], frame: &mut TrapFrame) -> *mut TrapFrame {
+    if arguments[1] != 0 || arguments[2] != 0 {
+        return return_to_user(frame, LinuxErrno::InvalidArgument.return_value());
+    }
+
+    let mut path = [0u8; MAX_EXEC_PATH_LENGTH];
+    let path_length = match copy_exec_path(context, arguments[0], &mut path) {
+        Ok(length) => length,
+        Err(error) => return return_to_user(frame, error.return_value()),
+    };
+    let path = &path[..path_length];
+    let Some(program_name) = path.strip_prefix(b"/bin/") else {
+        return return_to_user(frame, LinuxErrno::NoEntry.return_value());
+    };
+    let Ok(program_name) = core::str::from_utf8(program_name) else {
+        return return_to_user(frame, LinuxErrno::NoEntry.return_value());
+    };
+    let Some(program_index) = super::user_program::find_index(program_name) else {
+        return return_to_user(frame, LinuxErrno::NoEntry.return_value());
+    };
+
+    match super::process::exec::replace_current_process(program_index, frame) {
+        Ok(()) => super::process::resume_user(frame),
+        Err(super::process::exec::ExecError::Resources) => {
+            return_to_user(frame, LinuxErrno::NoMemory.return_value())
+        }
+        Err(super::process::exec::ExecError::InvalidImage) => {
+            return_to_user(frame, LinuxErrno::ExecFormat.return_value())
+        }
+    }
+}
+
+fn copy_exec_path(
+    context: SyscallContext,
+    address: usize,
+    destination: &mut [u8; MAX_EXEC_PATH_LENGTH],
+) -> Result<usize, LinuxErrno> {
+    for (offset, byte) in destination.iter_mut().enumerate() {
+        let Some(user_address) = address.checked_add(offset) else {
+            return Err(LinuxErrno::Fault);
+        };
+        if !context.contains_program_or_stack_buffer(user_address, 1) {
+            return Err(LinuxErrno::Fault);
+        }
+        // 安全性：逐字节验证该地址属于当前进程的程序段或用户栈，再从当前地址空间读取。
+        *byte = unsafe { super::memory::user_access::read_user_byte(user_address) };
+        if *byte == 0 {
+            return Ok(offset);
+        }
+    }
+    Err(LinuxErrno::NameTooLong)
 }
 
 fn fork(arguments: [usize; 5], frame: &mut TrapFrame) -> *mut TrapFrame {
