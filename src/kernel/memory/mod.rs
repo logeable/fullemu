@@ -10,6 +10,13 @@ pub(super) mod user_access;
 
 pub(super) use address_space::AddressSpace;
 
+/// 描述当前进程中允许 syscall 访问的用户镜像与用户栈范围。
+#[derive(Clone, Copy)]
+pub(super) struct UserMemoryRanges {
+    pub(super) program: (usize, usize),
+    pub(super) stack: (usize, usize),
+}
+
 /// 将一张独占物理页帧的内容复制到另一张独占页帧。
 pub(super) fn copy_frame(
     source: &crate::kernel::frame_allocator::PhysicalFrame,

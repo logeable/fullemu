@@ -1,5 +1,6 @@
 //! 实现当前内核支持的最小 Linux RISC-V 系统调用集合。
 
+use crate::arch::riscv64::trap::TrapFrame;
 use crate::device::console;
 
 const LINUX_WRITE_SYSCALL: usize = 64;
@@ -44,103 +45,93 @@ impl LinuxErrno {
     }
 }
 
-/// 表示系统调用返回用户态、让出 CPU，或结束当前用户进程。
-pub(super) enum SyscallOutcome {
-    /// 将结果写入 `a0` 后恢复用户上下文。
-    Return(isize),
-    /// 当前进程调用 `exit`；Linux 对外可观察的正常退出码只有低 8 位。
-    Exit(u8),
-    /// 当前进程主动让出 CPU，调度器运行另一个就绪进程。
-    Yield,
-    /// 以独立地址空间复制当前进程；父进程和子进程分别返回 PID 和 0。
-    Fork,
-    /// 等待一个指定子进程或任意子进程。
-    Wait(WaitRequest),
-}
-
-/// 已通过 syscall 参数检查的 `wait4` 请求。
+/// 记录当前进程的身份及 syscall 可访问的用户内存范围。
 #[derive(Clone, Copy)]
-pub(super) struct WaitRequest {
-    pub(super) pid: i32,
-    pub(super) status_address: Option<usize>,
-    pub(super) no_hang: bool,
-}
-
-/// 记录一次系统调用允许访问的用户程序和用户栈范围。
-///
-/// 调度器在分发前从当前进程构造该值；syscall 层据此检查用户指针，不反向查询进程表。
-#[derive(Clone, Copy)]
-pub(super) struct SyscallContext {
+struct SyscallContext {
     process_id: usize,
-    program_range: (usize, usize),
-    stack_range: (usize, usize),
+    user_memory: super::memory::UserMemoryRanges,
 }
 
 impl SyscallContext {
-    pub(super) const fn new(
-        process_id: usize,
-        program_range: (usize, usize),
-        stack_range: (usize, usize),
-    ) -> Self {
+    const fn new(process_id: usize, user_memory: super::memory::UserMemoryRanges) -> Self {
         Self {
             process_id,
-            program_range,
-            stack_range,
+            user_memory,
         }
     }
 
     fn contains_stack_buffer(self, address: usize, length: usize) -> bool {
-        contains_range(self.stack_range, address, length)
+        contains_range(self.user_memory.stack, address, length)
     }
 
     fn contains_program_or_stack_buffer(self, address: usize, length: usize) -> bool {
-        contains_range(self.program_range, address, length)
-            || contains_range(self.stack_range, address, length)
+        contains_range(self.user_memory.program, address, length)
+            || contains_range(self.user_memory.stack, address, length)
     }
 }
 
-/// 按 Linux RISC-V syscall ABI 分发调用，并描述返回或进程退出结果。
-pub(super) fn dispatch(
-    context: SyscallContext,
-    number: usize,
-    arguments: [usize; 5],
-) -> SyscallOutcome {
+/// 处理来自 U-mode 的环境调用，并协调 syscall 使用的内核资源。
+pub(super) fn handle_user_environment_call(frame: &mut TrapFrame) -> *mut TrapFrame {
+    let number = frame.registers[17];
+    let arguments = [
+        frame.registers[10],
+        frame.registers[11],
+        frame.registers[12],
+        frame.registers[13],
+        frame.registers[14],
+    ];
+    let context = SyscallContext::new(
+        super::process::current_linux_pid() as usize,
+        super::process::current_user_memory_ranges(),
+    );
+
     match number {
-        LINUX_READ_SYSCALL => {
-            SyscallOutcome::Return(read(context, arguments[0], arguments[1], arguments[2]))
-        }
-        LINUX_WRITE_SYSCALL => {
-            SyscallOutcome::Return(write(context, arguments[0], arguments[1], arguments[2]))
-        }
+        LINUX_READ_SYSCALL => return_to_user(
+            frame,
+            read(context, arguments[0], arguments[1], arguments[2]),
+        ),
+        LINUX_WRITE_SYSCALL => return_to_user(
+            frame,
+            write(context, arguments[0], arguments[1], arguments[2]),
+        ),
         LINUX_CLOCK_GETTIME_SYSCALL => {
-            SyscallOutcome::Return(clock_gettime(context, arguments[0], arguments[1]))
+            return_to_user(frame, clock_gettime(context, arguments[0], arguments[1]))
         }
-        LINUX_EXIT_SYSCALL => SyscallOutcome::Exit(arguments[0] as i32 as u8),
-        LINUX_SCHED_YIELD_SYSCALL => SyscallOutcome::Yield,
-        LINUX_CLONE_SYSCALL => clone(arguments),
-        LINUX_WAIT4_SYSCALL => wait4(context, arguments),
-        _ => SyscallOutcome::Return(LinuxErrno::NoSystemCall.return_value()),
+        LINUX_EXIT_SYSCALL => super::process::exit_current_process(arguments[0] as i32 as u8),
+        LINUX_SCHED_YIELD_SYSCALL => {
+            frame.registers[10] = 0;
+            advance_system_call(frame);
+            super::process::yield_current_process()
+        }
+        LINUX_CLONE_SYSCALL => fork(arguments, frame),
+        LINUX_WAIT4_SYSCALL => wait4(context, arguments, frame),
+        _ => return_to_user(frame, LinuxErrno::NoSystemCall.return_value()),
     }
 }
 
-fn clone(arguments: [usize; 5]) -> SyscallOutcome {
-    if arguments[0] == LINUX_SIGCHLD && arguments[1..].iter().all(|argument| *argument == 0) {
-        SyscallOutcome::Fork
-    } else {
-        SyscallOutcome::Return(LinuxErrno::InvalidArgument.return_value())
+fn fork(arguments: [usize; 5], frame: &mut TrapFrame) -> *mut TrapFrame {
+    if arguments[0] != LINUX_SIGCHLD || arguments[1..].iter().any(|argument| *argument != 0) {
+        return return_to_user(frame, LinuxErrno::InvalidArgument.return_value());
     }
+
+    let result = match super::process::fork_current_process(frame) {
+        Ok(child_pid) => child_pid as isize,
+        Err(super::process::ForkError::Resources) => process_creation_error(),
+        Err(super::process::ForkError::ProcessIdExhausted) => process_id_exhaustion_error(),
+    };
+    return_to_user(frame, result)
 }
 
-fn wait4(context: SyscallContext, arguments: [usize; 5]) -> SyscallOutcome {
+fn wait4(context: SyscallContext, arguments: [usize; 5], frame: &mut TrapFrame) -> *mut TrapFrame {
     let pid = arguments[0] as isize;
     let Ok(pid) = i32::try_from(pid) else {
-        return SyscallOutcome::Return(LinuxErrno::InvalidArgument.return_value());
+        return return_to_user(frame, LinuxErrno::InvalidArgument.return_value());
     };
     if (pid <= 0 && pid != -1)
         || (arguments[2] != 0 && arguments[2] != LINUX_WNOHANG)
         || arguments[3] != 0
     {
-        return SyscallOutcome::Return(LinuxErrno::InvalidArgument.return_value());
+        return return_to_user(frame, LinuxErrno::InvalidArgument.return_value());
     }
 
     let status_address = if arguments[1] == 0 {
@@ -150,30 +141,43 @@ fn wait4(context: SyscallContext, arguments: [usize; 5]) -> SyscallOutcome {
         if address % core::mem::align_of::<i32>() != 0
             || !context.contains_program_or_stack_buffer(address, core::mem::size_of::<i32>())
         {
-            return SyscallOutcome::Return(LinuxErrno::Fault.return_value());
+            return return_to_user(frame, LinuxErrno::Fault.return_value());
         }
         Some(address)
     };
 
-    SyscallOutcome::Wait(WaitRequest {
-        pid,
-        status_address,
-        no_hang: arguments[2] == LINUX_WNOHANG,
-    })
+    match super::process::wait_for_child(pid, status_address, arguments[2] == LINUX_WNOHANG) {
+        super::process::WaitDecision::Return(result) => return_to_user(frame, result),
+        super::process::WaitDecision::Block => {
+            advance_system_call(frame);
+            super::process::schedule_blocked_process()
+        }
+        super::process::WaitDecision::NoChild => return_to_user(frame, no_child_process_error()),
+    }
+}
+
+fn return_to_user(frame: &mut TrapFrame, result: isize) -> *mut TrapFrame {
+    frame.registers[10] = result as usize;
+    advance_system_call(frame);
+    super::process::resume_user(frame)
+}
+
+fn advance_system_call(frame: &mut TrapFrame) {
+    frame.exception_pc += 4;
 }
 
 /// 将不支持的等待目标转换为 Linux `ECHILD`。
-pub(super) const fn no_child_process_error() -> isize {
+const fn no_child_process_error() -> isize {
     LinuxErrno::Child.return_value()
 }
 
 /// 将进程创建资源不足转换为 Linux `ENOMEM`。
-pub(super) const fn process_creation_error() -> isize {
+const fn process_creation_error() -> isize {
     LinuxErrno::NoMemory.return_value()
 }
 
 /// 将 Linux PID 耗尽转换为 `EAGAIN`。
-pub(super) const fn process_id_exhaustion_error() -> isize {
+const fn process_id_exhaustion_error() -> isize {
     LinuxErrno::Again.return_value()
 }
 
@@ -242,9 +246,7 @@ fn write(
     // 安全性：范围检查保证待读字节位于当前进程已映射的镜像或栈内。
     for offset in 0..count {
         // 安全性：完整缓冲区已验证，单字节读取期间由 memory 模块短暂开启 SUM。
-        let byte = unsafe {
-            super::memory::user_access::read_user_byte(buffer_address + offset)
-        };
+        let byte = unsafe { super::memory::user_access::read_user_byte(buffer_address + offset) };
         console::write_byte(byte);
     }
 

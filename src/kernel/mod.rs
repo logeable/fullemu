@@ -10,4 +10,5 @@ pub(crate) mod memory;
 pub mod process;
 pub(crate) mod startup;
 mod syscall;
+mod trap_handler;
 mod user_program;

@@ -10,7 +10,7 @@
 | `src/device_tree` | 校验和遍历 FDT，并在无堆阶段提取内存及早期控制台初始化所需的平台数据 | Rust 核心库 |
 | `src/device` | 定义内核使用的设备接口，并提供由启动数据配置的 NS16550 UART 控制台驱动 | QEMU `virt` 的设备 binding 与寄存器约定 |
 | `src/arch/riscv64` | 提供低地址启动跳板与早期 Sv39 页表初始化、陷入帧、SBI 和定时器等 RISC-V 机制 | RISC-V 寄存器与固件调用约定 |
-| `src/kernel` | 提供分配器、Sv39 地址空间、进程管理、系统调用、日志和用户程序加载策略 | `arch::riscv64` 机制、`device` 接口及 `device_tree` 数据 |
+| `src/kernel` | 提供启动编排、陷入协调、分配器、Sv39 地址空间、进程管理、系统调用、日志和用户程序加载策略 | `arch::riscv64` 机制、`device` 接口及 `device_tree` 数据 |
 | `kernel::startup` | 解析 FDT 启动信息并配置 UART，先初始化页帧分配器，再由它提供堆后备页，运行启动自检并选择启动模式 | `device_tree`、`device`、分配器、进程和架构初始化接口 |
 | `user/` | 独立构建的用户态运行库和示例程序 | Linux RISC-V syscall 约定及用户程序自身逻辑 |
 
@@ -27,11 +27,12 @@
 | `kernel::memory::page_table` | 编码 Sv39 页表项、建立 4 KiB 映射并激活根页表 | 只管理页表机制；地址空间生命周期由 `address_space` 决定 |
 | `kernel::memory::page_table_log` | 遍历现有页表并把映射合并成诊断日志 | 只读页表；不创建或释放映射 |
 | `kernel::memory::user_access` | 在短暂设置 `sstatus.SUM` 的窗口内访问已验证的用户地址 | 只执行单次内存读写；范围校验由 syscall 调用路径负责 |
-| `kernel::process` | 编排进程创建、用户态陷入、轮转调度和退出资源回收 | 持有追加式 `Vec<Process>` 与稳定 `ProcessId`；每个进程独占 `ProcessResources`，包含地址空间、镜像和两种栈；陷入帧固定保存在内核栈顶下方，由栈布局推导地址 |
+| `kernel::trap_handler` | 接收架构陷入现场并分类陷入原因，将用户环境调用转交给 syscall 层 | 依赖 `arch::riscv64::trap`、`syscall` 和 `process`；不直接访问进程表、页表或设备 |
+| `kernel::process` | 管理进程创建、状态转换、轮转调度和退出资源回收 | 持有追加式 `Vec<Process>` 与稳定 `ProcessId`；每个进程独占 `ProcessResources`，包含地址空间、镜像和两种栈；陷入帧固定保存在内核栈顶下方，由栈布局推导地址；不依赖 syscall ABI |
 | `kernel::process::creation` | 按顺序准备进程镜像、用户栈、内核栈和独立地址空间，全部成功后发布进程对象 | 从链接器符号读取内核各段范围并组装 `KernelMemoryLayout` 传给 memory；使用局部资源所有者实现失败回滚，页表就绪前不发布进程 |
 | `kernel::process::wait` | 管理父子关系、阻塞等待、退出状态写回和子进程资源回收 | 按稳定 `ProcessId` 匹配子进程；只在父进程地址空间中写入已校验的 wait 状态 |
 | `kernel::process::stack` | 分配进程内核栈和用户栈的页帧，并在资源销毁时归还 | 内核栈需要连续页帧并映射到高半区；`KernelStack` 提供固定位置的陷入帧地址；每张进程页表映射所有可能仍在使用的内核栈，以支持切换期间继续运行；用户栈允许离散页帧；不决定调度策略 |
-| `kernel::syscall` | 将 Linux RISC-V syscall 编号和参数转换为当前内核行为 | 负责 ABI 参数与返回值；调用内存、时钟和控制台能力 |
+| `kernel::syscall` | 将 Linux RISC-V syscall 转换为内核行为，并协调所需子系统完成调用 | 负责 ABI 参数、用户指针范围验证和 Linux 错误码；通过窄接口调用进程、内存、时钟和控制台能力，不直接访问进程表 |
 | `kernel::user_program` | 校验构建生成的清单并装载原始用户镜像 | 镜像字节嵌入内核构建产物；运行时从页帧分配器取得镜像页，`LoadedUserProgram` 持有并释放这些页帧；当前统一入口地址就是镜像 `virtual_start`，将来 ELF 加载器提供独立入口时再单独建模 |
 | `kernel::clock` | 提供内核启动后的单调时间值 | 读取架构计时源并转换成内核时间值，不定义用户 ABI 布局 |
 | `kernel::logging` | 过滤并格式化内核诊断记录 | 通过 `device::console` 输出，并读取平台计时源 |
@@ -52,16 +53,17 @@
 | `UserImageMapping`、`UserStackMapping` | `kernel::memory` | 描述地址空间初始化需要的映射输入；进程拥有镜像和栈，memory 只建立映射 |
 | `KernelMemoryLayout`、`KernelSectionRange` | `kernel::memory` | 描述链接器提供的内核各段虚拟和物理边界；memory 校验页对齐及顺序，并按段设置页权限 |
 | `KernelStack`、`UserStack`、`Process`、`ProcessState`、`ProcessId`、`ProcessResources` | `kernel::process` 及其 `stack` 子模块 | `Process` 持有身份、父进程、状态和退出码；`ProcessResources` 集中拥有可回收的地址空间、镜像和栈资源；陷入帧位于内核栈固定位置，不单独保存其地址 |
+| `UserMemoryRanges` | `kernel::memory` | 由进程管理提供给 syscall 上下文，描述当前用户镜像和用户栈的可访问虚拟地址范围，不包含 Linux ABI 语义 |
 | `TrapFrame`、`TaskContext` | `arch::riscv64::trap`、`arch::riscv64::context` | 布局必须与对应汇编偏移一致，属于架构现场机制，不属于调度策略 |
 | `MonotonicTime` | `kernel::clock` | 表示内核内部时钟读数，不暴露用户 ABI 布局 |
-| `LinuxTimespec`、`SyscallContext`、`SyscallOutcome`、`WaitRequest` | `kernel::syscall` | 将 Linux ABI 表示、用户访问范围和单次调用结果限制在 syscall 边界 |
+| `LinuxTimespec`、`SyscallContext` | `kernel::syscall` | 将 Linux ABI 时间布局和当前调用的用户内存访问范围限制在 syscall 边界；进程表用内部 `ProcessWaitRequest` 保存阻塞等待状态 |
 | `ConsoleDevice`、`MmioRegion` | `device` | 定义字节收发契约和设备寄存器范围；日志、syscall 和页表映射不依赖具体 UART 驱动 |
 
 内核子模块之间的协作接口优先采用父模块范围的可见性（`pub(super)`），仅当入口需要由 crate 根调用、宏展开需要访问，或类型确实构成稳定公共解析接口时才使用更宽可见性。这使调用关系可从模块树看出，并避免把内部资源令牌伪装成通用公共 API。
 
 ## 当前依赖关系
 
-箭头表示“左侧调用或使用右侧”。进程在 syscall 分发前提供本次调用可访问的用户地址范围，因此 syscall 不需要反向查询进程表。
+箭头表示“左侧调用或使用右侧”。陷入协调器只把用户环境调用转给 syscall 层；syscall 层取得当前用户内存范围，并按调用需要协调进程、内存、时钟或设备能力。进程模块不依赖 Linux syscall ABI。
 
 ```mermaid
 flowchart TD
@@ -72,19 +74,22 @@ flowchart TD
     Heap[heap 全局分配器] -->|连续物理页后备区| Frames
     Heap -->|后备页映射地址| Address[memory::address 地址换算]
     Startup --> Arch[arch RISC-V 机制]
-    Kernel --> Arch
     Kernel --> Device[device 控制台接口]
     Device --> Uart[device::uart16550]
+    ArchTrap[arch::riscv64::trap.S] --> TrapHandler[kernel::trap_handler 陷入协调]
+    TrapHandler --> Arch
+    TrapHandler --> Syscall[syscall Linux ABI]
+    TrapHandler --> Process[process 进程管理]
+    Syscall --> Process[process 进程管理]
     Memory[memory Sv39] --> Frames
     Memory --> Address
     Frames -->|清零页帧时换算虚拟地址| Address
     Memory -->|映射设备寄存器范围| Device
-    Process[process 管理] --> Memory
+    Process --> Memory
     Process --> Stack[process::stack]
     Stack --> Heap
     Stack --> Frames
     Process --> Program[user_program]
-    Process --> Syscall[syscall ABI]
     Syscall --> Memory
     Syscall --> Clock[clock]
     Syscall --> Device
@@ -95,6 +100,9 @@ flowchart TD
 ## 依赖约定
 
 - 架构模块提供机制，不决定批处理、进程选择或 Linux syscall 行为。
+- `trap_handler` 是运行时陷入路由层：架构汇编保存和恢复现场并调用陷入协调器；协调器识别原因，将 U-mode 环境调用交给 syscall 处理函数，将定时器与用户异常交给进程管理。它不持有进程状态或实现 syscall ABI。
+- `syscall` 是 Linux ABI 到内核能力的适配与协调层：它解码调用、校验参数，直接调用所需的进程、内存、时钟或设备接口，并负责返回值和用户现场推进。它不直接访问进程表或实现调度策略。
+- `process` 拥有进程状态、创建/退出生命周期和调度策略；它只提供内核语义接口，不解析 Linux syscall 编号、参数或 errno。
 - 页帧分配器管理物理页，不依赖堆、地址空间、进程或用户程序；其元数据使用固定容量区间表，避免堆初始化前的循环依赖。清零页帧时仅依赖 `memory::address` 的纯地址换算，不调用页表生命周期或地址空间接口。
 - `memory::address` 负责 Sv39 地址规则与内核地址换算，不验证映射是否已建立。调用方必须根据启动阶段和地址空间契约保证地址可访问；需要地址换算的内核模块直接调用该子模块，不通过 `memory` 增设纯转发函数。
 - `memory::page` 只依赖 Rust 核心整数运算，集中维护基础页大小和页对齐规则；堆对象对齐仍由 `kernel::heap` 按其任意对齐语义单独处理。
@@ -112,6 +120,8 @@ flowchart TD
 ## 本轮重构与后续边界
 
 早期阶段把原先混合用户态启动与栈生命周期的 `user_mode.rs` 移至进程管理模块，并将栈 backing 收拢到栈子模块；syscall 使用进程分发前提供的地址范围，不再反向查询进程表。页表机制保留在 `kernel::memory`，只读映射诊断拆到 `memory::page_table_log`。启动初始化从 `main.rs` 移入 `kernel::startup`，入口文件只保留 ABI 入口和 panic handler。这些拆分保留既有控制流和资源生命周期。
+
+本轮将导出的 `supervisor_trap_handler` 和运行时陷入路由移至 `kernel::trap_handler`，并明确 syscall 层的协调职责。陷入处理器把 U-mode 环境调用交给 `kernel::syscall`；syscall 直接调用进程、内存、时钟和设备接口，处理返回现场及进程控制，不再通过 `SyscallOutcome` 中转。`process` 不导入 syscall 类型，等待状态仍由进程内部的 `ProcessWaitRequest` 表示，并通过窄接口提供当前用户内存范围、fork、wait、退出、让出和定时器操作。汇编入口符号保持 `supervisor_trap_handler` 不变，因此不需要改变 `trap.S` 的调用约定。
 
 本轮将 `kernel::memory` 从单文件模块整理为 `memory/mod.rs` 目录模块，以便与已有的页表日志子模块共同组织后续内存职责。进程栈模块仍负责栈的页帧分配、所有权和释放；`memory` 仅接收栈映射描述并建立页表映射，避免把进程资源生命周期移入地址空间机制。
 

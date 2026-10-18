@@ -1,6 +1,6 @@
-//! 管理进程对象、用户态陷入、单 hart 调度和退出资源回收。
+//! 管理进程对象、单 hart 调度和退出资源回收。
 
-use crate::arch::riscv64::trap::{ExceptionCause, InterruptCause, TrapCause, TrapFrame};
+use crate::arch::riscv64::trap::{ExceptionCause, TrapCause, TrapFrame};
 use alloc::vec::Vec;
 
 mod creation;
@@ -74,9 +74,27 @@ struct Process {
     parent_id: Option<ProcessId>,
     state: ProcessState,
     exit_status: Option<ProcessExitStatus>,
-    wait_request: Option<super::syscall::WaitRequest>,
+    wait_request: Option<ProcessWaitRequest>,
     wait_collected: bool,
     resources: Option<ProcessResources>,
+}
+
+#[derive(Clone, Copy)]
+struct ProcessWaitRequest {
+    pid: i32,
+    status_address: Option<usize>,
+    no_hang: bool,
+}
+
+pub(super) enum ForkError {
+    Resources,
+    ProcessIdExhausted,
+}
+
+pub(super) enum WaitDecision {
+    Return(isize),
+    Block,
+    NoChild,
 }
 
 static mut PROCESSES: Vec<Process> = Vec::new();
@@ -206,131 +224,132 @@ fn start_programs(program_indices: Vec<usize>) -> ! {
     unsafe { crate::arch::riscv64::trap::start_first_process(first_frame) }
 }
 
-/// 处理系统调用并返回下一项进程应恢复的陷入帧。
-#[no_mangle]
-pub extern "C" fn supervisor_trap_handler(frame: *mut TrapFrame) -> *mut TrapFrame {
-    // 安全性：汇编入口已切换到当前进程的专用内核栈，并在那里构造完整陷入帧。
-    let frame = unsafe { &mut *frame };
+/// 处理定时器中断并选择下一个就绪进程。
+pub(super) fn handle_timer_interrupt(frame: &mut TrapFrame) -> *mut TrapFrame {
     let current_index = current_process_index();
-    release_deferred_kernel_stack(current_index);
-    let cause = TrapCause::decode(frame.cause);
-    crate::klog_trace!(
-        "进程 PID={} 进入 trap handler：原因={cause:?}",
-        process_id_at(current_index).linux_pid()
-    );
+    arm_next_timer();
 
-    if cause == TrapCause::Interrupt(InterruptCause::SupervisorTimer) {
-        arm_next_timer();
-
-        // S-mode 中断目前不会在内核临界路径中嵌套；若未来启用嵌套，保留原帧直接返回。
-        if frame.status & SSTATUS_SPP != 0 {
-            return frame;
-        }
-
-        set_process_state(current_index, ProcessState::Ready);
-        return schedule_next(current_index);
+    // S-mode 中断目前不会在内核临界路径中嵌套；若未来启用嵌套，保留原帧直接返回。
+    if frame.status & SSTATUS_SPP != 0 {
+        return frame;
     }
 
-    if cause == TrapCause::Exception(ExceptionCause::UserEnvironmentCall)
-        && frame.status & SSTATUS_SPP == 0
-    {
-        let syscall_number = frame.registers[17];
-        let arguments = [
-            frame.registers[10],
-            frame.registers[11],
-            frame.registers[12],
-            frame.registers[13],
-            frame.registers[14],
-        ];
-        let process = process_record_or_panic(current_index);
-        let Some(stack_range) = user_stack_range(current_index) else {
-            panic!("进程 {} 的用户栈不存在", current_index);
-        };
-        let syscall_context =
-            super::syscall::SyscallContext::new(current_index, process.program_range, stack_range);
-        match super::syscall::dispatch(syscall_context, syscall_number, arguments) {
-            super::syscall::SyscallOutcome::Return(result) => {
-                frame.registers[10] = result as usize;
-                frame.exception_pc += 4;
-                return restore_user_frame(frame);
-            }
-            super::syscall::SyscallOutcome::Yield => {
-                frame.registers[10] = 0;
-                frame.exception_pc += 4;
-                set_process_state(current_index, ProcessState::Ready);
-                return schedule_next(current_index);
-            }
-            super::syscall::SyscallOutcome::Fork => {
-                frame.registers[10] = match creation::fork_process(current_index, frame) {
-                    Ok(child_id) => child_id.linux_pid() as usize,
-                    Err(error) => {
-                        crate::klog_warn!(
-                            "进程 PID={} fork 失败：{}",
-                            process_id_at(current_index).linux_pid(),
-                            error.description()
-                        );
-                        let error_number = if error.is_pid_exhausted() {
-                            super::syscall::process_id_exhaustion_error()
-                        } else {
-                            super::syscall::process_creation_error()
-                        };
-                        error_number as usize
-                    }
-                };
-                frame.exception_pc += 4;
-                return restore_user_frame(frame);
-            }
-            super::syscall::SyscallOutcome::Wait(request) => {
-                frame.exception_pc += 4;
-                match wait::wait_for_child(current_index, request) {
-                    wait::WaitDecision::Return(result) => {
-                        frame.registers[10] = result as usize;
-                        return restore_user_frame(frame);
-                    }
-                    wait::WaitDecision::Block => {
-                        return schedule_next(current_index);
-                    }
-                }
-            }
-            super::syscall::SyscallOutcome::Exit(status) => {
-                crate::klog_info!(
-                    "进程 PID={} 调用 exit 结束，状态码：{status}",
-                    process_id_at(current_index).linux_pid()
-                );
-                mark_process_exited(current_index, ProcessExitStatus::Code(status));
-                wait::notify_child_exit(current_index);
-                return schedule_next(current_index);
+    set_process_state(current_index, ProcessState::Ready);
+    schedule_next(current_index)
+}
+
+/// 在专用进程内核栈上完成陷入入口后的延迟资源释放。
+pub(super) fn prepare_trap() {
+    release_deferred_kernel_stack(current_process_index());
+}
+
+/// 返回当前进程的用户镜像与用户栈范围，供系统调用边界校验用户指针。
+pub(super) fn current_user_memory_ranges() -> super::memory::UserMemoryRanges {
+    let current_index = current_process_index();
+    let process = process_record_or_panic(current_index);
+    let stack_range = user_stack_range(current_index)
+        .unwrap_or_else(|| panic!("进程 {} 的用户栈不存在", current_index));
+    super::memory::UserMemoryRanges {
+        program: process.program_range,
+        stack: stack_range,
+    }
+}
+
+/// 复制当前进程并返回子进程 PID；错误分类交由上层转换为 ABI 错误码。
+pub(super) fn fork_current_process(frame: &TrapFrame) -> Result<i32, ForkError> {
+    let current_index = current_process_index();
+    match creation::fork_process(current_index, frame) {
+        Ok(child_id) => Ok(child_id.linux_pid()),
+        Err(error) => {
+            crate::klog_warn!(
+                "进程 PID={} fork 失败：{}",
+                process_id_at(current_index).linux_pid(),
+                error.description()
+            );
+            if error.is_pid_exhausted() {
+                Err(ForkError::ProcessIdExhausted)
+            } else {
+                Err(ForkError::Resources)
             }
         }
     }
+}
 
-    if frame.status & SSTATUS_SPP == 0 {
-        crate::klog_error!(
-            "用户进程 PID={} 陷入：原因={cause:?}，scause={:#018x}，sepc={:#018x}，stval={:#018x}",
-            process_id_at(current_index).linux_pid(),
-            frame.cause,
-            frame.exception_pc,
-            frame.trap_value
-        );
-        mark_process_exited(
-            current_index,
-            ProcessExitStatus::Signal(signal_for_trap(cause)),
-        );
-        wait::notify_child_exit(current_index);
-        crate::klog_warn!(
-            "用户进程 PID={} 因异常终止",
-            process_id_at(current_index).linux_pid()
-        );
-        return schedule_next(current_index);
-    }
-
-    panic!(
-        "S-mode 陷入：进程 PID={}，原因={cause:?}，scause={:#018x}，sepc={:#018x}，stval={:#018x}",
+/// 处理用户态异常并结束当前进程。
+pub(super) fn terminate_current_process(cause: TrapCause, frame: &TrapFrame) -> *mut TrapFrame {
+    let current_index = current_process_index();
+    crate::klog_error!(
+        "用户进程 PID={} 陷入：原因={cause:?}，scause={:#018x}，sepc={:#018x}，stval={:#018x}",
         process_id_at(current_index).linux_pid(),
         frame.cause,
         frame.exception_pc,
         frame.trap_value
-    )
+    );
+    mark_process_exited(
+        current_index,
+        ProcessExitStatus::Signal(signal_for_trap(cause)),
+    );
+    wait::notify_child_exit(current_index);
+    crate::klog_warn!(
+        "用户进程 PID={} 因异常终止",
+        process_id_at(current_index).linux_pid()
+    );
+    schedule_next(current_index)
+}
+
+/// 当前进程 PID，供陷入协调器生成上下文日志。
+pub(super) fn current_linux_pid() -> i32 {
+    process_id_at(current_process_index()).linux_pid()
+}
+
+/// 继续恢复给定用户现场。
+pub(super) fn resume_user(frame: &mut TrapFrame) -> *mut TrapFrame {
+    restore_user_frame(frame)
+}
+
+/// 让当前进程就绪并调度其他进程。
+pub(super) fn yield_current_process() -> *mut TrapFrame {
+    let current_index = current_process_index();
+    set_process_state(current_index, ProcessState::Ready);
+    schedule_next(current_index)
+}
+
+/// 退出当前进程，并调度其他就绪进程。
+pub(super) fn exit_current_process(status: u8) -> *mut TrapFrame {
+    let current_index = current_process_index();
+    crate::klog_info!(
+        "进程 PID={} 调用 exit 结束，状态码：{status}",
+        process_id_at(current_index).linux_pid()
+    );
+    mark_process_exited(current_index, ProcessExitStatus::Code(status));
+    wait::notify_child_exit(current_index);
+    schedule_next(current_index)
+}
+
+/// 按 syscall 已验证的参数等待子进程。
+pub(super) fn wait_for_child(
+    pid: i32,
+    status_address: Option<usize>,
+    no_hang: bool,
+) -> WaitDecision {
+    let current_index = current_process_index();
+    match wait::wait_for_child(
+        current_index,
+        ProcessWaitRequest {
+            pid,
+            status_address,
+            no_hang,
+        },
+    ) {
+        wait::WaitDecision::Return(result) => WaitDecision::Return(result),
+        wait::WaitDecision::Block => WaitDecision::Block,
+        wait::WaitDecision::NoChild => WaitDecision::NoChild,
+    }
+}
+
+/// 当前进程已进入等待状态后，调度其他就绪进程。
+pub(super) fn schedule_blocked_process() -> *mut TrapFrame {
+    schedule_next(current_process_index())
 }
 
 fn schedule_next(previous_index: usize) -> *mut TrapFrame {
