@@ -106,17 +106,21 @@ fn validate_user_mappings(
 
     if !is_page_aligned(user_image.virtual_start)
         || user_image.frames.is_empty()
+        || user_image.page_permissions.len() != user_image.frames.len()
         || image_end > super::address::SV39_USER_ADDRESS_END_EXCLUSIVE
         || image_end <= user_image.virtual_start
     {
         return Err(PageTableError::InvalidRange);
     }
 
-    for frame in user_image.frames {
+    for (page_index, frame) in user_image.frames.iter().enumerate() {
         let physical_address = frame.start_address();
+        let permissions = user_image.page_permissions[page_index];
         if !is_page_aligned(physical_address)
             || physical_address < kernel_end
             || !crate::kernel::frame_allocator::is_allocated_frame_address(physical_address)
+            || !permissions.readable
+            || (permissions.writable && permissions.executable)
         {
             return Err(PageTableError::InvalidRange);
         }
@@ -182,11 +186,12 @@ fn populate_address_space(
     map_kernel_stack(root_table, kernel_stack)?;
 
     for (page_index, frame) in user_image.frames.iter().enumerate() {
+        let permissions = user_image.page_permissions[page_index];
         map_page(
             root_table,
             user_image.virtual_start + page_index * PAGE_SIZE,
             frame.start_address(),
-            PTE_READ | PTE_WRITE | PTE_EXECUTE | PTE_USER,
+            user_page_table_permissions(permissions),
         )?;
     }
 
@@ -215,6 +220,20 @@ fn populate_address_space(
     }
 
     Ok(())
+}
+
+fn user_page_table_permissions(permissions: super::UserImagePermissions) -> usize {
+    let mut page_table_permissions = PTE_USER;
+    if permissions.readable {
+        page_table_permissions |= PTE_READ;
+    }
+    if permissions.writable {
+        page_table_permissions |= PTE_WRITE;
+    }
+    if permissions.executable {
+        page_table_permissions |= PTE_EXECUTE;
+    }
+    page_table_permissions
 }
 
 fn validate_kernel_layout(layout: KernelMemoryLayout) -> Result<(), PageTableError> {

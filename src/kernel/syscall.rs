@@ -73,6 +73,13 @@ impl SyscallContext {
         contains_range(self.user_memory.program, address, length)
             || contains_range(self.user_memory.stack, address, length)
     }
+
+    fn contains_writable_program_or_stack_buffer(self, address: usize, length: usize) -> bool {
+        self.user_memory
+            .writable_program
+            .is_some_and(|range| contains_range(range, address, length))
+            || contains_range(self.user_memory.stack, address, length)
+    }
 }
 
 /// 处理来自 U-mode 的环境调用，并协调 syscall 使用的内核资源。
@@ -198,7 +205,8 @@ fn wait4(context: SyscallContext, arguments: [usize; 5], frame: &mut TrapFrame) 
     } else {
         let address = arguments[1];
         if address % core::mem::align_of::<i32>() != 0
-            || !context.contains_program_or_stack_buffer(address, core::mem::size_of::<i32>())
+            || !context
+                .contains_writable_program_or_stack_buffer(address, core::mem::size_of::<i32>())
         {
             return return_to_user(frame, LinuxErrno::Fault.return_value());
         }

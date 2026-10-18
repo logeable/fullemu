@@ -1,27 +1,36 @@
-/* 所有用户程序链接到同一虚拟入口，内核页表将其映射到各自拥有的物理页帧。 */
+/* 所有用户程序从同一虚拟地址开始；段按页分开，避免不同权限内容共用一页。 */
 OUTPUT_ARCH(riscv)
 ENTRY(_start)
 
 PROVIDE(__user_image_base = 0x40000000);
 
+PHDRS
+{
+    text PT_LOAD FLAGS(5);
+    rodata PT_LOAD FLAGS(4);
+    data PT_LOAD FLAGS(6);
+}
+
 SECTIONS
 {
     . = __user_image_base;
 
-    .text : ALIGN(4) {
+    .text : ALIGN(4096) {
         KEEP(*(.text.entry))
         *(.text .text.*)
-    }
+        . = ALIGN(4096);
+    } :text
 
-    .rodata : ALIGN(8) {
+    .rodata : ALIGN(4096) {
         *(.rodata .rodata.*)
-    }
+        . = ALIGN(4096);
+    } :rodata
 
-    .data : ALIGN(8) {
+    .data : ALIGN(4096) {
         __data_start = .;
         *(.sdata .sdata.*)
         *(.data .data.*)
-    }
+    } :data
 
     __global_pointer$ = __data_start + 0x800;
 
@@ -29,7 +38,7 @@ SECTIONS
         *(.sbss .sbss.*)
         *(.bss .bss.*)
         *(COMMON)
-    }
+    } :data
 
     __user_program_end = .;
 

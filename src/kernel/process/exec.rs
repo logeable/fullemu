@@ -15,9 +15,12 @@ pub(in crate::kernel) fn replace_current_process(
     program_index: usize,
     frame: &mut TrapFrame,
 ) -> Result<(), ExecError> {
-    let program = super::super::user_program::load(program_index)
-        .map_err(|_| ExecError::Resources)?
-        .unwrap_or_else(|| panic!("exec 用户程序索引不存在：{program_index}"));
+    let program = match super::super::user_program::load(program_index) {
+        Ok(Some(program)) => program,
+        Ok(None) => panic!("exec 用户程序索引不存在：{program_index}"),
+        Err(error) if error.is_invalid_image() => return Err(ExecError::InvalidImage),
+        Err(_) => return Err(ExecError::Resources),
+    };
     let Some(program_end) = program.virtual_start.checked_add(program.image_size) else {
         return Err(ExecError::InvalidImage);
     };
@@ -52,6 +55,7 @@ pub(in crate::kernel) fn replace_current_process(
     let user_image_mapping = super::super::memory::UserImageMapping {
         virtual_start: program.virtual_start,
         frames: program.frames(),
+        page_permissions: program.page_permissions(),
     };
     let address_space = super::super::memory::address_space::create_address_space(
         super::creation::kernel_memory_layout(),
@@ -66,7 +70,7 @@ pub(in crate::kernel) fn replace_current_process(
         .unwrap_or_else(|error| panic!("exec 激活新地址空间失败：{}", error.description()));
 
     let program_range = (program.virtual_start, program_end);
-    let entry = program.virtual_start;
+    let entry = program.entry;
     let user_stack_top = user_stack.top();
     let (old_address_space, old_program_image, old_user_stack) = {
         let processes = unsafe { &mut *core::ptr::addr_of_mut!(PROCESSES) };

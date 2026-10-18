@@ -70,7 +70,7 @@ pub(super) fn create_process(program_index: usize) -> Result<ProcessId, ProcessC
 
     let user_stack_range = user_stack.range();
     let kernel_stack_range = kernel_stack.range();
-    let initial_frame = TrapFrame::for_user_entry(program.virtual_start, user_stack.top());
+    let initial_frame = TrapFrame::for_user_entry(program.entry, user_stack.top());
     let initial_frame_pointer = kernel_stack.trap_frame_pointer();
     let user_stack_mapping = super::super::memory::UserStackMapping {
         virtual_start: user_stack.start(),
@@ -84,6 +84,7 @@ pub(super) fn create_process(program_index: usize) -> Result<ProcessId, ProcessC
     let user_image_mapping = super::super::memory::UserImageMapping {
         virtual_start: program.virtual_start,
         frames: program.frames(),
+        page_permissions: program.page_permissions(),
     };
     let kernel_layout = kernel_memory_layout();
 
@@ -101,7 +102,7 @@ pub(super) fn create_process(program_index: usize) -> Result<ProcessId, ProcessC
     }
 
     let program_name = program.name;
-    let program_entry = program.virtual_start;
+    let program_entry = program.entry;
     let image_size = program.image_size;
     // 安全性：进程表容量已在资源分配前预留；追加不再申请内存，且只有全部资源准备成功后才发布进程记录。
     unsafe {

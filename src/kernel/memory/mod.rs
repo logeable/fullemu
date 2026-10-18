@@ -14,6 +14,7 @@ pub(super) use address_space::AddressSpace;
 #[derive(Clone, Copy)]
 pub(super) struct UserMemoryRanges {
     pub(super) program: (usize, usize),
+    pub(super) writable_program: Option<(usize, usize)>,
     pub(super) stack: (usize, usize),
 }
 
@@ -50,6 +51,15 @@ pub(super) fn copy_frame(
 pub(super) struct UserImageMapping<'a> {
     pub(super) virtual_start: usize,
     pub(super) frames: &'a [crate::kernel::frame_allocator::PhysicalFrame],
+    pub(super) page_permissions: &'a [UserImagePermissions],
+}
+
+/// 描述一个用户镜像页允许执行的访问类型。
+#[derive(Clone, Copy)]
+pub(super) struct UserImagePermissions {
+    pub(super) readable: bool,
+    pub(super) writable: bool,
+    pub(super) executable: bool,
 }
 
 /// 描述需要分别设置页表权限的内核链接段范围。

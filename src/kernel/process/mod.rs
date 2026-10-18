@@ -167,6 +167,7 @@ pub(super) fn current_user_memory_ranges() -> super::memory::UserMemoryRanges {
         .unwrap_or_else(|| panic!("进程 {} 的用户栈不存在", current_index));
     super::memory::UserMemoryRanges {
         program: process.program_range,
+        writable_program: process.writable_program_range,
         stack: stack_range,
     }
 }
@@ -342,6 +343,7 @@ fn set_process_state(index: usize, state: ProcessState) {
 #[derive(Clone, Copy)]
 struct ProcessSnapshot {
     program_range: (usize, usize),
+    writable_program_range: Option<(usize, usize)>,
 }
 
 fn process_record_or_panic(index: usize) -> ProcessSnapshot {
@@ -361,6 +363,7 @@ fn process_record_or_panic(index: usize) -> ProcessSnapshot {
     };
     ProcessSnapshot {
         program_range: resources.program_range,
+        writable_program_range: resources.program_image.writable_range(),
     }
 }
 

@@ -1,6 +1,5 @@
 CARGO ?= cargo
 QEMU ?= qemu-system-riscv64
-OBJCOPY ?= rust-objcopy
 READOBJ ?= rust-readobj
 PYTHON ?= python3
 LOG_LEVEL ?= info
@@ -40,9 +39,7 @@ build-user:
 	: > "$$manifest_tmp"; \
 	for program_name in $(USER_BIN_NAMES); do \
 		program_elf="$(USER_BUILD_DIR)/$$program_name"; \
-		program_image="$$program_elf.bin"; \
-		$(OBJCOPY) --strip-all -O binary "$$program_elf" "$$program_image"; \
-		printf '%s %s\n' "$$program_name" "$$program_image" >> "$$manifest_tmp"; \
+		printf '%s %s\n' "$$program_name" "$$program_elf" >> "$$manifest_tmp"; \
 	done; \
 	mv "$$manifest_tmp" "$(USER_IMAGE_MANIFEST)"
 

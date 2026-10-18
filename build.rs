@@ -93,18 +93,17 @@ fn generate_catalog(manifest_path: &Path, output_directory: &Path) -> String {
         if image_bytes.is_empty() {
             panic!("用户程序镜像不能为空：{}", image_path.display());
         }
-        let copied_image_path =
-            output_directory.join(format!("user_program_{}.bin", entries.len()));
-        fs::write(&copied_image_path, image_bytes).unwrap_or_else(|error| {
+        let copied_elf_path = output_directory.join(format!("user_program_{}.elf", entries.len()));
+        fs::write(&copied_elf_path, image_bytes).unwrap_or_else(|error| {
             panic!(
-                "无法复制用户程序镜像到 {}：{error}",
-                copied_image_path.display()
+                "无法复制用户程序 ELF 到 {}：{error}",
+                copied_elf_path.display()
             );
         });
         println!("cargo:rerun-if-changed={}", image_path.display());
 
         generated_catalog.push_str(&format!(
-            "    UserProgramImage {{ name: {name:?}, bytes: include_bytes!(concat!(env!(\"OUT_DIR\"), \"/user_program_{}.bin\")) }},\n",
+            "    UserProgramImage {{ name: {name:?}, elf_bytes: include_bytes!(concat!(env!(\"OUT_DIR\"), \"/user_program_{}.elf\")) }},\n",
             entries.len(),
         ));
         entries.push(name);

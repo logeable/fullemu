@@ -1,10 +1,10 @@
 # fullemu
 
-fullemu 是一个以可读性和教学为优先的 Rust 操作系统项目。当前实现从 QEMU RISC-V `virt` 平台启动，将独立构建的 no_std 用户程序作为原始镜像加载后进入 U-mode。内核默认启动用户态 `init`，由它启动并监督 shell；shell 支持输入、内置命令，以及通过 `fork`、`exec`、`wait` 前台运行嵌入式用户程序。内核通过 Sv39 建立用户进程与内核之间的页面权限边界，并实现 Linux RISC-V syscall 的有限子集。用户程序从共同虚拟入口运行，镜像页由进程单独持有。源码按内核职责和稳定概念组织，阶段编号只用于文档中的教学脉络。
+fullemu 是一个以可读性和教学为优先的 Rust 操作系统项目。当前实现从 QEMU RISC-V `virt` 平台启动，将独立构建的 no_std RV64 ELF 用户程序装入 U-mode。内核默认启动用户态 `init`，由它启动并监督 shell；shell 支持输入、内置命令，以及通过 `fork`、`exec`、`wait` 前台运行嵌入式用户程序。内核解析静态 `ET_EXEC` 的 `PT_LOAD` 段，为代码、只读数据和可写数据建立对应的 Sv39 权限，并实现 Linux RISC-V syscall 的有限子集。程序镜像页由进程单独持有。源码按内核职责和稳定概念组织，阶段编号只用于文档中的教学脉络。
 
 ## 快速开始
 
-需要 Rust 工具链、`riscv64gc-unknown-none-elf` target、`rust-objcopy`（由 `cargo-binutils` 提供）和带 RISC-V system emulation 的 QEMU：
+需要 Rust 工具链、`riscv64gc-unknown-none-elf` target 和带 RISC-V system emulation 的 QEMU：
 
 ```sh
 rustup target add riscv64gc-unknown-none-elf
@@ -14,7 +14,7 @@ make run
 
 内核默认启动 `init`，再由它启动 shell。可以通过 `make run BOOT_PROGRAM=fork_wait` 选择其他用户程序作为内核入口，便于直接运行单项实验。当前 shell 可通过输入程序名启动其他嵌入式用户程序；批量启动所有用户程序的旧 batch 模式已移除。
 
-`make build` 会先构建独立的 `user/` 程序，所有 bin 都通过同一链接脚本链接到共同虚拟地址 `0x40000000`，再把 ELF 转换为原始二进制并由内核复制到各自的固定物理槽位（当前从 `0x80400000` 开始）。`user/target/riscv64gc-unknown-none-elf/release/user-programs.manifest` 只记录程序名和镜像路径；共同虚拟基址由 `user/linker.ld` 与内核装载器约定，运行时页表将该地址映射到当前程序的物理槽位。以 `disabled-` 开头的 bin 源文件会被 `make build-user` 忽略；新增或移除其他 `user/src/bin/` 程序时，镜像清单会随 `make build-user` 更新。若只需编译不含用户程序的内核，可运行 `make build-kernel` 或直接运行 `cargo build --target riscv64gc-unknown-none-elf`。当前 syscall 仅实现上述 Linux ABI 的有限子集，不代表已兼容完整 Linux 用户态。按 `Ctrl-C` 结束 QEMU。
+`make build` 会先构建独立的 `user/` 程序，再由内核构建脚本把 ELF 文件嵌入内核。用户程序使用共同虚拟区域 `0x40000000`，链接脚本按页分离可执行代码、只读数据和可写数据；内核装载器解析 ELF 程序头并将各段复制到独立页帧。当前只支持静态 RV64 little-endian `ET_EXEC`，不支持动态链接、PIE、文件系统或命令行参数。`user/target/riscv64gc-unknown-none-elf/release/user-programs.manifest` 记录程序名和 ELF 路径。以 `disabled-` 开头的 bin 源文件会被 `make build-user` 忽略；新增或移除其他 `user/src/bin/` 程序时，镜像清单会随 `make build-user` 更新。若只需编译不含用户程序的内核，可运行 `make build-kernel` 或直接运行 `cargo build --target riscv64gc-unknown-none-elf`。当前 syscall 仅实现有限 Linux ABI 子集，不代表已兼容完整 Linux 用户态。按 `Ctrl-C` 结束 QEMU。
 
 若 QEMU 可执行文件不在 PATH，可运行 `make run QEMU=/path/to/qemu-system-riscv64`。也可以单独运行 `make build-user` 构建用户程序。
 
@@ -65,4 +65,7 @@ make run
 - [第 39 阶段：从链接器提供内核段装载地址](docs/phase-39-kernel-load-address-symbols.md) 让任务地址空间创建路径区分链接地址与物理装载位置。
 - [第 40 阶段：从高地址别名进入陷入入口](docs/phase-40-high-alias-trap-entry.md) 验证 syscall 与定时器陷入可从高地址进入内核。
 - [第 41 阶段：从低地址启动并在高半区运行内核](docs/phase-41-high-half-kernel-runtime.md) 在早期启用 Sv39，将 Rust 内核代码、全局数据和栈迁移到高半区 VMA。
+- [第 47 阶段：用户态 init 启动并监督 shell](docs/phase-47-user-init.md) 记录 PID 1 的用户态服务启动、shell 重启和孤儿进程回收。
+- [第 48 阶段：shell 前台执行嵌入式程序](docs/phase-48-shell-program-execution.md) 记录 shell 如何通过 fork、exec、wait 启动命令程序并返回提示符。
+- [第 49 阶段：嵌入式 RV64 ELF 装载](docs/phase-49-elf-loading.md) 记录静态 ELF 程序头校验、段复制、BSS 清零和按段权限建立用户映射。
 - [项目原则与代码规范](docs/development-principles.md) 是设计和协作规范。

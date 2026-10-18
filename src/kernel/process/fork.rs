@@ -73,6 +73,7 @@ fn create_child_process(
     let user_image_mapping = super::super::memory::UserImageMapping {
         virtual_start: program_image.virtual_start,
         frames: program_image.frames(),
+        page_permissions: program_image.page_permissions(),
     };
     let address_space = super::super::memory::address_space::create_address_space(
         creation::kernel_memory_layout(),
