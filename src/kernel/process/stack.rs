@@ -4,6 +4,7 @@
 
 use alloc::vec::Vec;
 
+use crate::arch::riscv64::trap::TrapFrame;
 use crate::kernel::frame_allocator::{self, FrameError, PhysicalFrame, PhysicalFrameRun};
 use crate::kernel::memory::{address, page::PAGE_SIZE};
 
@@ -51,6 +52,19 @@ impl KernelStack {
             panic!("计算内核栈高地址时溢出");
         };
         virtual_top
+    }
+
+    /// 返回固定放在内核栈顶部的陷入帧地址。
+    pub(super) fn trap_frame_pointer(&self) -> *mut TrapFrame {
+        let stack_top = self.top();
+        let stack_start = stack_top - KERNEL_STACK_SIZE;
+        let Some(frame_address) = stack_top.checked_sub(core::mem::size_of::<TrapFrame>()) else {
+            panic!("内核栈无法容纳陷入帧");
+        };
+        if frame_address < stack_start {
+            panic!("陷入帧超出内核栈范围");
+        }
+        frame_address as *mut TrapFrame
     }
 
     pub(super) fn physical_top(&self) -> usize {
@@ -114,6 +128,15 @@ impl UserStack {
 
     pub(super) fn frames(&self) -> &[PhysicalFrame] {
         &self.frames
+    }
+
+    /// 复制用户栈的页内容，保持父子进程相同的用户虚拟栈布局。
+    pub(super) fn duplicate(&self) -> Result<Self, StackError> {
+        let duplicate = Self::allocate()?;
+        for (source, destination) in self.frames.iter().zip(duplicate.frames.iter()) {
+            crate::kernel::memory::copy_frame(source, destination);
+        }
+        Ok(duplicate)
     }
 }
 

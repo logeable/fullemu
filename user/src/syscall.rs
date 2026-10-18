@@ -4,6 +4,9 @@ const LINUX_WRITE_SYSCALL: usize = 64;
 const LINUX_READ_SYSCALL: usize = 63;
 const LINUX_CLOCK_GETTIME_SYSCALL: usize = 113;
 const LINUX_EXIT_SYSCALL: usize = 93;
+const LINUX_CLONE_SYSCALL: usize = 220;
+const LINUX_WAIT4_SYSCALL: usize = 260;
+const LINUX_SIGCHLD: usize = 17;
 const CLOCK_MONOTONIC: usize = 1;
 
 /// Linux RISC-V 64 位 ABI 的单调时间结构。
@@ -107,4 +110,51 @@ pub fn sched_yield() -> isize {
     }
 
     result
+}
+
+/// 复制当前进程；父进程得到子进程 PID，子进程得到 0，失败时返回负的 Linux errno。
+pub fn fork() -> isize {
+    let mut result = LINUX_SIGCHLD as isize;
+
+    // 安全性：只请求带 SIGCHLD 退出通知的独立进程；其余 clone 参数按 fork 约定传零。
+    unsafe {
+        core::arch::asm!(
+            "ecall",
+            inlateout("a0") result,
+            in("a1") 0usize,
+            in("a2") 0usize,
+            in("a3") 0usize,
+            in("a4") 0usize,
+            in("a7") LINUX_CLONE_SYSCALL,
+            options(nostack)
+        );
+    }
+
+    result
+}
+
+/// 等待指定子进程或任意子进程，阻塞直到其退出并可选地取得 wait 状态。
+pub fn waitpid(pid: i32, status: Option<&mut i32>) -> isize {
+    let mut result = pid as isize;
+    let status_address = status.map_or(0, |status| status as *mut i32 as usize);
+
+    // 安全性：状态指针在调用期间指向当前用户栈中的可写 `i32`，其他参数符合 Linux wait4 ABI。
+    unsafe {
+        core::arch::asm!(
+            "ecall",
+            inlateout("a0") result,
+            in("a1") status_address,
+            in("a2") 0usize,
+            in("a3") 0usize,
+            in("a7") LINUX_WAIT4_SYSCALL,
+            options(nostack)
+        );
+    }
+
+    result
+}
+
+/// 等待任意一个子进程；这是 `waitpid(-1, status)` 的便捷封装。
+pub fn wait(status: Option<&mut i32>) -> isize {
+    waitpid(-1, status)
 }

@@ -5,6 +5,7 @@ use alloc::vec::Vec;
 
 mod creation;
 mod stack;
+mod wait;
 
 use stack::{KernelStack, UserStack};
 
@@ -21,7 +22,9 @@ const TIME_SLICE_TICKS: u64 = crate::arch::riscv64::sbi::QEMU_VIRT_TIMEBASE_FREQ
 enum ProcessState {
     Ready,
     Running,
+    Waiting,
     Exited,
+    Reaped,
 }
 
 /// 进程表中按创建顺序追加的稳定标识；本阶段不复用已退出进程的 ID。
@@ -37,11 +40,29 @@ impl ProcessId {
     const fn index(self) -> usize {
         self.0
     }
+
+    const fn linux_pid(self) -> i32 {
+        (self.0 + 1) as i32
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ProcessExitStatus {
+    Code(u8),
+    Signal(u8),
+}
+
+impl ProcessExitStatus {
+    const fn linux_wait_status(self) -> i32 {
+        match self {
+            Self::Code(code) => (code as i32) << 8,
+            Self::Signal(signal) => signal as i32,
+        }
+    }
 }
 
 struct ProcessResources {
     address_space: super::memory::AddressSpace,
-    saved_frame_address: usize,
     program_range: (usize, usize),
     program_image: super::user_program::LoadedUserProgram,
     user_stack: UserStack,
@@ -52,7 +73,9 @@ struct Process {
     id: ProcessId,
     parent_id: Option<ProcessId>,
     state: ProcessState,
-    exit_status: Option<u8>,
+    exit_status: Option<ProcessExitStatus>,
+    wait_request: Option<super::syscall::WaitRequest>,
+    wait_collected: bool,
     resources: Option<ProcessResources>,
 }
 
@@ -144,9 +167,10 @@ fn start_programs(program_indices: Vec<usize>) -> ! {
         let Some(resources) = process.resources.as_mut() else {
             panic!("进程 {} 的资源在启动时不存在", process.id.index());
         };
-        if let Err(error) =
-            super::memory::map_kernel_stacks(&mut resources.address_space, &kernel_stacks)
-        {
+        if let Err(error) = super::memory::address_space::map_kernel_stacks(
+            &mut resources.address_space,
+            &kernel_stacks,
+        ) {
             panic!(
                 "进程 {} 的内核栈映射失败：{}",
                 process.id.index(),
@@ -175,7 +199,7 @@ fn start_programs(program_indices: Vec<usize>) -> ! {
     arm_next_timer();
     crate::arch::riscv64::interrupt::enable_supervisor_timer();
 
-    let first_frame = saved_frame_pointer(0);
+    let first_frame = process_trap_frame_pointer(0);
     // 安全性：首个陷入帧、用户栈及内核栈页均由首个进程持有并保持有效。
     unsafe { crate::arch::riscv64::trap::set_user_kernel_stack(process_kernel_stack_top(0)) };
     // 安全性：首个陷入帧在对应进程整个生命周期内有效，入口不返回。
@@ -190,7 +214,10 @@ pub extern "C" fn supervisor_trap_handler(frame: *mut TrapFrame) -> *mut TrapFra
     let current_index = current_process_index();
     release_deferred_kernel_stack(current_index);
     let cause = TrapCause::decode(frame.cause);
-    crate::klog_trace!("进程 {} 进入 trap handler：原因={cause:?}", current_index);
+    crate::klog_trace!(
+        "进程 PID={} 进入 trap handler：原因={cause:?}",
+        process_id_at(current_index).linux_pid()
+    );
 
     if cause == TrapCause::Interrupt(InterruptCause::SupervisorTimer) {
         arm_next_timer();
@@ -200,7 +227,6 @@ pub extern "C" fn supervisor_trap_handler(frame: *mut TrapFrame) -> *mut TrapFra
             return frame;
         }
 
-        save_current_frame(current_index, frame);
         set_process_state(current_index, ProcessState::Ready);
         return schedule_next(current_index);
     }
@@ -213,6 +239,8 @@ pub extern "C" fn supervisor_trap_handler(frame: *mut TrapFrame) -> *mut TrapFra
             frame.registers[10],
             frame.registers[11],
             frame.registers[12],
+            frame.registers[13],
+            frame.registers[14],
         ];
         let process = process_record_or_panic(current_index);
         let Some(stack_range) = user_stack_range(current_index) else {
@@ -229,14 +257,48 @@ pub extern "C" fn supervisor_trap_handler(frame: *mut TrapFrame) -> *mut TrapFra
             super::syscall::SyscallOutcome::Yield => {
                 frame.registers[10] = 0;
                 frame.exception_pc += 4;
-                save_current_frame(current_index, frame);
                 set_process_state(current_index, ProcessState::Ready);
                 return schedule_next(current_index);
             }
+            super::syscall::SyscallOutcome::Fork => {
+                frame.registers[10] = match creation::fork_process(current_index, frame) {
+                    Ok(child_id) => child_id.linux_pid() as usize,
+                    Err(error) => {
+                        crate::klog_warn!(
+                            "进程 PID={} fork 失败：{}",
+                            process_id_at(current_index).linux_pid(),
+                            error.description()
+                        );
+                        let error_number = if error.is_pid_exhausted() {
+                            super::syscall::process_id_exhaustion_error()
+                        } else {
+                            super::syscall::process_creation_error()
+                        };
+                        error_number as usize
+                    }
+                };
+                frame.exception_pc += 4;
+                return restore_user_frame(frame);
+            }
+            super::syscall::SyscallOutcome::Wait(request) => {
+                frame.exception_pc += 4;
+                match wait::wait_for_child(current_index, request) {
+                    wait::WaitDecision::Return(result) => {
+                        frame.registers[10] = result as usize;
+                        return restore_user_frame(frame);
+                    }
+                    wait::WaitDecision::Block => {
+                        return schedule_next(current_index);
+                    }
+                }
+            }
             super::syscall::SyscallOutcome::Exit(status) => {
-                crate::klog_info!("进程 {} 调用 exit 结束，状态码：{status}", current_index);
-                save_current_frame(current_index, frame);
-                mark_process_exited(current_index, Some(status));
+                crate::klog_info!(
+                    "进程 PID={} 调用 exit 结束，状态码：{status}",
+                    process_id_at(current_index).linux_pid()
+                );
+                mark_process_exited(current_index, ProcessExitStatus::Code(status));
+                wait::notify_child_exit(current_index);
                 return schedule_next(current_index);
             }
         }
@@ -244,21 +306,30 @@ pub extern "C" fn supervisor_trap_handler(frame: *mut TrapFrame) -> *mut TrapFra
 
     if frame.status & SSTATUS_SPP == 0 {
         crate::klog_error!(
-            "用户进程 {} 陷入：原因={cause:?}，scause={:#018x}，sepc={:#018x}，stval={:#018x}",
-            current_index,
+            "用户进程 PID={} 陷入：原因={cause:?}，scause={:#018x}，sepc={:#018x}，stval={:#018x}",
+            process_id_at(current_index).linux_pid(),
             frame.cause,
             frame.exception_pc,
             frame.trap_value
         );
-        save_current_frame(current_index, frame);
-        mark_process_exited(current_index, None);
-        crate::klog_warn!("用户进程 {} 因异常终止", current_index);
+        mark_process_exited(
+            current_index,
+            ProcessExitStatus::Signal(signal_for_trap(cause)),
+        );
+        wait::notify_child_exit(current_index);
+        crate::klog_warn!(
+            "用户进程 PID={} 因异常终止",
+            process_id_at(current_index).linux_pid()
+        );
         return schedule_next(current_index);
     }
 
     panic!(
-        "S-mode 陷入：进程 {}，原因={cause:?}，scause={:#018x}，sepc={:#018x}，stval={:#018x}",
-        current_index, frame.cause, frame.exception_pc, frame.trap_value
+        "S-mode 陷入：进程 PID={}，原因={cause:?}，scause={:#018x}，sepc={:#018x}，stval={:#018x}",
+        process_id_at(current_index).linux_pid(),
+        frame.cause,
+        frame.exception_pc,
+        frame.trap_value
     )
 }
 
@@ -276,8 +347,8 @@ fn schedule_next(previous_index: usize) -> *mut TrapFrame {
 
     if let Err(error) = activate_process_address_space(next_index) {
         panic!(
-            "切换到进程 {} 的地址空间失败：{}",
-            next_index,
+            "切换到进程 PID={} 的地址空间失败：{}",
+            process_id_at(next_index).linux_pid(),
             error.description()
         );
     }
@@ -287,10 +358,14 @@ fn schedule_next(previous_index: usize) -> *mut TrapFrame {
     }
 
     if next_index != previous_index {
-        crate::klog_debug!("进程切换：{} -> {}", previous_index, next_index);
+        crate::klog_debug!(
+            "进程切换：PID {} -> PID {}",
+            process_id_at(previous_index).linux_pid(),
+            process_id_at(next_index).linux_pid()
+        );
     }
 
-    let next_frame = saved_frame_pointer(next_index);
+    let next_frame = process_trap_frame_pointer(next_index);
     // 安全性：调度器只返回初始化或先前 trap 保存的专属进程陷入帧。
     let next_frame = unsafe { &mut *next_frame };
     restore_user_frame(next_frame)
@@ -337,19 +412,23 @@ fn restore_user_frame(frame: &mut TrapFrame) -> *mut TrapFrame {
     frame as *mut TrapFrame
 }
 
-fn saved_frame_pointer(index: usize) -> *mut TrapFrame {
-    process_record_or_panic(index).saved_frame_address as *mut TrapFrame
-}
-
-fn save_current_frame(index: usize, frame: &mut TrapFrame) {
-    let Some(process) = (unsafe { &mut *core::ptr::addr_of_mut!(PROCESSES) }).get_mut(index) else {
-        panic!("无法保存不存在的进程 {} 的陷入帧", index);
-    };
-    let Some(resources) = process.resources.as_mut() else {
-        panic!("无法保存已释放进程 {} 的陷入帧", index);
-    };
-    // 安全性：当前陷入帧由本 hart 独占，索引是正在运行的有效进程，且陷入处理不会嵌套调度。
-    resources.saved_frame_address = frame as *mut TrapFrame as usize;
+fn process_trap_frame_pointer(index: usize) -> *mut TrapFrame {
+    let processes = unsafe { &*core::ptr::addr_of!(PROCESSES) };
+    let process = processes
+        .get(index)
+        .unwrap_or_else(|| panic!("进程陷入帧索引越界：{index}"));
+    if process.id.index() != index {
+        panic!(
+            "进程记录 ID 不匹配：索引={}，ID={}",
+            index,
+            process.id.index()
+        );
+    }
+    let resources = process
+        .resources
+        .as_ref()
+        .unwrap_or_else(|| panic!("进程 {} 的运行资源已经释放", index));
+    resources.kernel_stack.trap_frame_pointer()
 }
 
 fn current_process_index() -> usize {
@@ -360,6 +439,21 @@ fn current_process_index() -> usize {
 fn process_count() -> usize {
     // 安全性：进程容器在首次进入 U-mode 前完成初始化，此后长度保持不变。
     unsafe { (&*core::ptr::addr_of!(PROCESSES)).len() }
+}
+
+fn process_id_at(index: usize) -> ProcessId {
+    let processes = unsafe { &*core::ptr::addr_of!(PROCESSES) };
+    let process = processes
+        .get(index)
+        .unwrap_or_else(|| panic!("进程索引越界：{}，进程数量={}", index, processes.len()));
+    if process.id.index() != index {
+        panic!(
+            "进程记录 ID 不匹配：索引={}，ID={}",
+            index,
+            process.id.index()
+        );
+    }
+    process.id
 }
 
 fn process_state(index: usize) -> ProcessState {
@@ -385,17 +479,41 @@ fn set_process_state(index: usize, state: ProcessState) {
     process.state = state;
 }
 
-fn mark_process_exited(index: usize, exit_status: Option<u8>) {
-    let Some(process) = (unsafe { &mut *core::ptr::addr_of_mut!(PROCESSES) }).get_mut(index) else {
-        panic!("无法结束不存在的进程 {}", index);
+fn mark_process_exited(index: usize, exit_status: ProcessExitStatus) {
+    let process_id = {
+        let Some(process) = (unsafe { &mut *core::ptr::addr_of_mut!(PROCESSES) }).get_mut(index)
+        else {
+            panic!("无法结束不存在的进程 {}", index);
+        };
+        process.state = ProcessState::Exited;
+        process.exit_status = Some(exit_status);
+        process.wait_request = None;
+        process.id
     };
-    process.state = ProcessState::Exited;
-    process.exit_status = exit_status;
+    wait::orphan_children(process_id);
+}
+
+fn signal_for_trap(cause: TrapCause) -> u8 {
+    match cause {
+        TrapCause::Exception(ExceptionCause::IllegalInstruction) => 4,
+        TrapCause::Exception(ExceptionCause::Breakpoint) => 5,
+        TrapCause::Exception(
+            ExceptionCause::LoadAddressMisaligned | ExceptionCause::StoreAmoAddressMisaligned,
+        ) => 7,
+        TrapCause::Exception(
+            ExceptionCause::InstructionAccessFault
+            | ExceptionCause::LoadAccessFault
+            | ExceptionCause::StoreAmoAccessFault
+            | ExceptionCause::InstructionPageFault
+            | ExceptionCause::LoadPageFault
+            | ExceptionCause::StoreAmoPageFault,
+        ) => 11,
+        _ => 4,
+    }
 }
 
 #[derive(Clone, Copy)]
 struct ProcessSnapshot {
-    saved_frame_address: usize,
     program_range: (usize, usize),
 }
 
@@ -415,7 +533,6 @@ fn process_record_or_panic(index: usize) -> ProcessSnapshot {
         panic!("进程 {} 的运行资源已经释放", index);
     };
     ProcessSnapshot {
-        saved_frame_address: resources.saved_frame_address,
         program_range: resources.program_range,
     }
 }
@@ -439,7 +556,7 @@ fn activate_process_address_space(index: usize) -> Result<(), super::memory::Pag
         .as_ref()
         .unwrap_or_else(|| panic!("进程 {} 的运行资源已经释放", index))
         .address_space;
-    super::memory::activate_address_space(address_space)
+    super::memory::address_space::activate_address_space(address_space)
 }
 
 fn reap_process_resources(index: usize, defer_kernel_stack: bool) {
@@ -464,7 +581,7 @@ fn reap_process_resources(index: usize, defer_kernel_stack: bool) {
         kernel_stack,
         ..
     } = resources;
-    let released_page_count = super::memory::destroy_address_space(address_space)
+    let released_page_count = super::memory::address_space::destroy_address_space(address_space)
         .unwrap_or_else(|error| panic!("回收进程 {} 的页表失败：{}", index, error.description()));
     drop(program_image);
     drop(user_stack);
@@ -474,10 +591,13 @@ fn reap_process_resources(index: usize, defer_kernel_stack: bool) {
     } else {
         drop(kernel_stack);
     }
+    if process.parent_id.is_none() || process.wait_collected {
+        process.state = ProcessState::Reaped;
+    }
     crate::klog_info!(
-        "已回收进程 {} 的运行资源：父进程={:?}，退出码={:?}，释放 {} 个页表页",
-        process_id.index(),
-        parent_id,
+        "已回收进程 PID={} 的运行资源：父进程 PID={:?}，退出状态={:?}，释放 {} 个页表页",
+        process_id.linux_pid(),
+        parent_id.map(ProcessId::linux_pid),
         exit_status,
         released_page_count
     );
@@ -489,7 +609,10 @@ fn log_process_address_spaces() {
         let Some(resources) = process.resources.as_ref() else {
             continue;
         };
-        super::memory::log_address_space(process.id.index(), &resources.address_space);
+        super::memory::page_table_log::log_address_space(
+            process.id.index(),
+            &resources.address_space,
+        );
     }
 }
 
@@ -535,7 +658,7 @@ fn switch_to_reaper(process_index: usize) -> ! {
 }
 
 extern "C" fn reap_last_process_on_reaper_stack(process_index: usize) -> ! {
-    if let Err(error) = super::memory::activate_boot_address_space() {
+    if let Err(error) = super::memory::address_space::activate_boot_address_space() {
         panic!("切换到内核回收页表失败：{}", error.description());
     }
 

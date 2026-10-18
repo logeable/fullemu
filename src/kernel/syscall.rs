@@ -7,6 +7,10 @@ const LINUX_READ_SYSCALL: usize = 63;
 const LINUX_CLOCK_GETTIME_SYSCALL: usize = 113;
 const LINUX_EXIT_SYSCALL: usize = 93;
 const LINUX_SCHED_YIELD_SYSCALL: usize = 124;
+const LINUX_CLONE_SYSCALL: usize = 220;
+const LINUX_WAIT4_SYSCALL: usize = 260;
+const LINUX_SIGCHLD: usize = 17;
+const LINUX_WNOHANG: usize = 1;
 const STDIN_FILE_DESCRIPTOR: usize = 0;
 const STDOUT_FILE_DESCRIPTOR: usize = 1;
 const STDERR_FILE_DESCRIPTOR: usize = 2;
@@ -25,14 +29,17 @@ struct LinuxTimespec {
 #[derive(Clone, Copy)]
 #[repr(isize)]
 enum LinuxErrno {
+    Again = 11,
     BadFileDescriptor = 9,
+    Child = 10,
+    NoMemory = 12,
     InvalidArgument = 22,
     Fault = 14,
     NoSystemCall = 38,
 }
 
 impl LinuxErrno {
-    fn return_value(self) -> isize {
+    const fn return_value(self) -> isize {
         -(self as isize)
     }
 }
@@ -45,6 +52,18 @@ pub(super) enum SyscallOutcome {
     Exit(u8),
     /// 当前进程主动让出 CPU，调度器运行另一个就绪进程。
     Yield,
+    /// 以独立地址空间复制当前进程；父进程和子进程分别返回 PID 和 0。
+    Fork,
+    /// 等待一个指定子进程或任意子进程。
+    Wait(WaitRequest),
+}
+
+/// 已通过 syscall 参数检查的 `wait4` 请求。
+#[derive(Clone, Copy)]
+pub(super) struct WaitRequest {
+    pub(super) pid: i32,
+    pub(super) status_address: Option<usize>,
+    pub(super) no_hang: bool,
 }
 
 /// 记录一次系统调用允许访问的用户程序和用户栈范围。
@@ -84,7 +103,7 @@ impl SyscallContext {
 pub(super) fn dispatch(
     context: SyscallContext,
     number: usize,
-    arguments: [usize; 3],
+    arguments: [usize; 5],
 ) -> SyscallOutcome {
     match number {
         LINUX_READ_SYSCALL => {
@@ -98,8 +117,64 @@ pub(super) fn dispatch(
         }
         LINUX_EXIT_SYSCALL => SyscallOutcome::Exit(arguments[0] as i32 as u8),
         LINUX_SCHED_YIELD_SYSCALL => SyscallOutcome::Yield,
+        LINUX_CLONE_SYSCALL => clone(arguments),
+        LINUX_WAIT4_SYSCALL => wait4(context, arguments),
         _ => SyscallOutcome::Return(LinuxErrno::NoSystemCall.return_value()),
     }
+}
+
+fn clone(arguments: [usize; 5]) -> SyscallOutcome {
+    if arguments[0] == LINUX_SIGCHLD && arguments[1..].iter().all(|argument| *argument == 0) {
+        SyscallOutcome::Fork
+    } else {
+        SyscallOutcome::Return(LinuxErrno::InvalidArgument.return_value())
+    }
+}
+
+fn wait4(context: SyscallContext, arguments: [usize; 5]) -> SyscallOutcome {
+    let pid = arguments[0] as isize;
+    let Ok(pid) = i32::try_from(pid) else {
+        return SyscallOutcome::Return(LinuxErrno::InvalidArgument.return_value());
+    };
+    if (pid <= 0 && pid != -1)
+        || (arguments[2] != 0 && arguments[2] != LINUX_WNOHANG)
+        || arguments[3] != 0
+    {
+        return SyscallOutcome::Return(LinuxErrno::InvalidArgument.return_value());
+    }
+
+    let status_address = if arguments[1] == 0 {
+        None
+    } else {
+        let address = arguments[1];
+        if address % core::mem::align_of::<i32>() != 0
+            || !context.contains_program_or_stack_buffer(address, core::mem::size_of::<i32>())
+        {
+            return SyscallOutcome::Return(LinuxErrno::Fault.return_value());
+        }
+        Some(address)
+    };
+
+    SyscallOutcome::Wait(WaitRequest {
+        pid,
+        status_address,
+        no_hang: arguments[2] == LINUX_WNOHANG,
+    })
+}
+
+/// 将不支持的等待目标转换为 Linux `ECHILD`。
+pub(super) const fn no_child_process_error() -> isize {
+    LinuxErrno::Child.return_value()
+}
+
+/// 将进程创建资源不足转换为 Linux `ENOMEM`。
+pub(super) const fn process_creation_error() -> isize {
+    LinuxErrno::NoMemory.return_value()
+}
+
+/// 将 Linux PID 耗尽转换为 `EAGAIN`。
+pub(super) const fn process_id_exhaustion_error() -> isize {
+    LinuxErrno::Again.return_value()
 }
 
 fn read(
@@ -132,7 +207,7 @@ fn read(
 
         // 安全性：前面的范围检查保证该字节位于当前进程已映射的可写用户栈内。
         unsafe {
-            super::memory::write_user_value(buffer_address + bytes_read, byte);
+            super::memory::user_access::write_user_value(buffer_address + bytes_read, byte);
         }
         bytes_read += 1;
     }
@@ -167,7 +242,9 @@ fn write(
     // 安全性：范围检查保证待读字节位于当前进程已映射的镜像或栈内。
     for offset in 0..count {
         // 安全性：完整缓冲区已验证，单字节读取期间由 memory 模块短暂开启 SUM。
-        let byte = unsafe { super::memory::read_user_byte(buffer_address + offset) };
+        let byte = unsafe {
+            super::memory::user_access::read_user_byte(buffer_address + offset)
+        };
         console::write_byte(byte);
     }
 
@@ -194,7 +271,7 @@ fn clock_gettime(context: SyscallContext, clock_id: usize, timespec_address: usi
     };
     // 安全性：对齐检查和栈范围检查保证目标是当前进程已映射的完整可写 timespec。
     unsafe {
-        super::memory::write_user_value(timespec_address, timespec);
+        super::memory::user_access::write_user_value(timespec_address, timespec);
     }
 
     0

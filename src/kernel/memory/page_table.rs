@@ -99,7 +99,7 @@ pub(super) fn activate(root_physical_address: usize) -> Result<(), PageTableErro
     activate_root(root_physical_address)
 }
 
-pub(super) fn activate_boot_address_space() -> Result<(), PageTableError> {
+pub(in crate::kernel) fn activate_boot_address_space() -> Result<(), PageTableError> {
     let boot_root_virtual_address = core::ptr::addr_of!(__boot_page_table_virtual_start) as usize;
     let root_physical_address =
         super::address::kernel_virtual_to_physical(boot_root_virtual_address);

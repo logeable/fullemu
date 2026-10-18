@@ -2,6 +2,7 @@
 
 use core::fmt;
 
+use fullemu::device_tree::console_info::{FdtConsoleInfo, FdtDeviceRegisterRegion};
 use fullemu::device_tree::fdt::{FdtBlob, FdtHeader, FdtStructureEvent};
 use fullemu::device_tree::memory_info::FdtMemoryInfo;
 
@@ -25,59 +26,54 @@ impl StartupCheckError {
     }
 }
 
-extern "C" {
-    static __boot_virtual_start: u8;
-    static __boot_virtual_end: u8;
-    static __boot_bss_virtual_start: u8;
-    static __boot_bss_virtual_end: u8;
-    static __boot_stack_virtual_start: u8;
-    static __boot_stack_virtual_end: u8;
-    static __kernel_start: u8;
-    static __text_start: u8;
-    static __text_end: u8;
-    static __rodata_start: u8;
-    static __rodata_end: u8;
-    static __data_start: u8;
-    static __data_end: u8;
-    static __bss_start: u8;
-    static __bss_data_end: u8;
-    static __bss_end: u8;
-}
-
 /// 按固定顺序初始化内核，并根据构建配置启动用户进程。
 pub(crate) fn run(hart_id: usize, device_tree_physical_address: usize) -> ! {
     crate::kernel::clock::initialize();
 
+    let fdt = parse_device_tree(device_tree_physical_address);
+    let uart_region = initialize_console(&fdt);
+    log_boot_information(hart_id, device_tree_physical_address, &fdt, uart_region);
+
+    let memory_info = parse_and_log_memory_info(&fdt, device_tree_physical_address);
+    initialize_memory_subsystems(&memory_info);
+    log_device_tree_if_trace_enabled(&fdt);
+
+    start_configured_processes()
+}
+
+/// 将固件传入的 FDT 物理地址解析为只读视图。
+fn parse_device_tree(device_tree_physical_address: usize) -> FdtBlob<'static> {
     let Some(device_tree_virtual_address) =
         super::memory::address::physical_to_kernel_virtual(device_tree_physical_address)
     else {
         panic!("FDT 物理地址无法转换为内核高半区地址");
     };
 
-    // 安全性：OpenSBI 提供 FDT 物理地址，且启动页表将 QEMU RAM 映射到此高半区别名；解析器只读固定头部。
+    // 安全性：OpenSBI 提供有效的 FDT 物理地址，启动页表将其 RAM 映射到高半区别名；读取头部所需范围可访问。
     let fdt_header =
         match unsafe { FdtHeader::read_from_ptr(device_tree_virtual_address as *const u8) } {
             Ok(header) => header,
-            Err(error) => {
-                crate::klog_error!("FDT 头部无效：{}", error.description());
-                panic!("FDT 头部无效");
-            }
+            Err(error) => panic!("FDT 头部无效：{}", error.description()),
         };
 
-    // 安全性：高半区 FDT 别名可读，且头部已验证总长度至少覆盖所有声明区块。
-    let fdt_blob = unsafe {
+    // 安全性：FDT 位于固件交给内核的 RAM 中并保持只读；后续页帧初始化会排除 DTB 范围，因此该切片在内核生命周期内有效。头部已校验总长度。
+    let fdt_bytes = unsafe {
         core::slice::from_raw_parts(
             device_tree_virtual_address as *const u8,
             fdt_header.total_size as usize,
         )
     };
-    let fdt = match FdtBlob::parse(fdt_blob) {
+    match FdtBlob::parse(fdt_bytes) {
         Ok(fdt) => fdt,
-        Err(error) => report_fdt_blob_error(error),
-    };
-    let console_info = match fullemu::device_tree::console_info::FdtConsoleInfo::parse(&fdt) {
+        Err(error) => panic!("FDT 文件无效：{}", error.description()),
+    }
+}
+
+/// 解析 FDT 控制台信息并初始化 UART；此后启动日志才可输出到串口。
+fn initialize_console(fdt: &FdtBlob<'_>) -> FdtDeviceRegisterRegion {
+    let console_info = match FdtConsoleInfo::parse(fdt) {
         Ok(console_info) => console_info,
-        Err(error) => report_console_info_error(error),
+        Err(error) => panic!("FDT 控制台信息无效：{}", error.description()),
     };
     let uart_region = console_info.register_region();
     let uart_start = match usize::try_from(uart_region.start) {
@@ -92,7 +88,16 @@ pub(crate) fn run(hart_id: usize, device_tree_physical_address: usize) -> ! {
         start: uart_start,
         size: uart_size,
     });
+    uart_region
+}
 
+/// 输出启动平台信息和链接器提供的内核段范围。
+fn log_boot_information(
+    hart_id: usize,
+    device_tree_physical_address: usize,
+    fdt: &FdtBlob<'_>,
+    uart_region: FdtDeviceRegisterRegion,
+) {
     log_kernel_sections();
     crate::klog_info!("fullemu 已在 QEMU virt (RISC-V) 启动");
     crate::klog_info!("启动 hart：{hart_id:#018x}");
@@ -102,19 +107,28 @@ pub(crate) fn run(hart_id: usize, device_tree_physical_address: usize) -> ! {
         uart_region.start,
         uart_region.start + uart_region.size
     );
+    let header = fdt.header();
     crate::klog_debug!(
         "FDT 头部：版本={}，总长度={} 字节，结构区=偏移 {:#010x}/{} 字节，字符串区=偏移 {:#010x}/{} 字节",
-        fdt_header.version,
-        fdt_header.total_size,
-        fdt_header.structure_offset,
-        fdt_header.structure_size,
-        fdt_header.strings_offset,
-        fdt_header.strings_size
+        header.version,
+        header.total_size,
+        header.structure_offset,
+        header.structure_size,
+        header.strings_offset,
+        header.strings_size
     );
+}
 
-    let memory_info = match FdtMemoryInfo::parse(&fdt, device_tree_physical_address as u64) {
+/// 提取并记录后续内存初始化需要的 FDT 范围信息。
+fn parse_and_log_memory_info(
+    fdt: &FdtBlob<'_>,
+    device_tree_physical_address: usize,
+) -> FdtMemoryInfo {
+    let memory_info = match FdtMemoryInfo::parse(fdt, device_tree_physical_address as u64) {
         Ok(memory_info) => memory_info,
-        Err(error) => report_memory_info_error(error),
+        Err(error) => {
+            panic!("启动信息无效：{}", error.description());
+        }
     };
 
     for region in memory_info.memory_regions() {
@@ -124,7 +138,6 @@ pub(crate) fn run(hart_id: usize, device_tree_physical_address: usize) -> ! {
             region.size
         );
     }
-
     for region in memory_info.memory_reservations() {
         crate::klog_debug!(
             "FDT 固件保留区域：起始地址={:#018x}，长度={:#018x}",
@@ -139,59 +152,28 @@ pub(crate) fn run(hart_id: usize, device_tree_physical_address: usize) -> ! {
         device_tree_region.size
     );
 
-    if let Err(error) = crate::kernel::frame_allocator::initialize(&memory_info) {
-        crate::klog_error!("物理页帧分配器初始化失败：{}", error.description());
-        panic!("物理页帧分配器初始化失败");
+    memory_info
+}
+
+/// 依次建立页帧分配器和堆，再运行依赖这两者的启动自检。
+fn initialize_memory_subsystems(memory_info: &FdtMemoryInfo) {
+    if let Err(error) = crate::kernel::frame_allocator::initialize(memory_info) {
+        panic!("物理页帧分配器初始化失败：{}", error.description());
     }
     if let Err(error) = crate::kernel::heap::initialize() {
-        crate::klog_error!("内核堆初始化失败：{}", error.description());
-        panic!("内核堆初始化失败");
+        panic!("内核堆初始化失败：{}", error.description());
     }
     if let Err(error) = run_startup_checks() {
-        crate::klog_error!("内核启动自检失败：{}", error.description());
-        panic!("内核启动自检失败");
+        panic!("内核启动自检失败：{}", error.description());
     }
+}
 
-    if crate::kernel::logging::is_enabled(crate::kernel::logging::Level::Trace) {
-        let mut structure = fdt.structure();
-
-        loop {
-            match structure.next_event() {
-                Ok(Some(FdtStructureEvent::BeginNode { name, depth })) => {
-                    crate::klog_trace!("FDT 节点：深度={depth}，名称={name}");
-                }
-                Ok(Some(FdtStructureEvent::Property { name, value, depth })) => {
-                    crate::klog_trace!(
-                        "FDT 属性：深度={depth}，名称={name}，长度={} 字节，原始值={}",
-                        value.len(),
-                        HexBytes(value)
-                    );
-                }
-                Ok(Some(FdtStructureEvent::End)) => break,
-                Ok(Some(_)) => {}
-                Ok(None) => break,
-                Err(error) => report_fdt_structure_error(error),
-            }
-        }
-    }
-
+/// 在构建配置指定的模式下启动用户进程。
+fn start_configured_processes() -> ! {
     match env!("FULLEMU_BOOT_MODE") {
         "shell" => crate::kernel::process::run_boot_program(),
         "batch" => crate::kernel::process::run_batch_programs(),
         _ => unreachable!("build.rs 已验证启动模式"),
-    }
-}
-
-/// 以连续十六进制字节显示 FDT 属性值，不分配临时缓冲区。
-struct HexBytes<'a>(&'a [u8]);
-
-impl fmt::Display for HexBytes<'_> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("0x")?;
-        for byte in self.0 {
-            write!(formatter, "{byte:02x}")?;
-        }
-        Ok(())
     }
 }
 
@@ -202,6 +184,32 @@ fn run_startup_checks() -> Result<(), StartupCheckError> {
     super::frame_allocator::check_allocation()
         .map_err(StartupCheckError::PhysicalFrameAllocator)?;
     Ok(())
+}
+
+/// 按 trace 日志级别遍历并显示 FDT 结构块及属性原始值。
+fn log_device_tree_if_trace_enabled(fdt: &FdtBlob<'_>) {
+    if !crate::kernel::logging::is_enabled(crate::kernel::logging::Level::Trace) {
+        return;
+    }
+
+    let mut structure = fdt.structure();
+    loop {
+        match structure.next_event() {
+            Ok(Some(FdtStructureEvent::BeginNode { name, depth })) => {
+                crate::klog_trace!("FDT 节点：深度={depth}，名称={name}");
+            }
+            Ok(Some(FdtStructureEvent::Property { name, value, depth })) => {
+                crate::klog_trace!(
+                    "FDT 属性：深度={depth}，名称={name}，长度={} 字节，原始值={}",
+                    value.len(),
+                    HexBytes(value)
+                );
+            }
+            Ok(Some(FdtStructureEvent::End)) | Ok(None) => break,
+            Ok(Some(_)) => {}
+            Err(error) => panic!("FDT 结构块无效：{}", error.description()),
+        }
+    }
 }
 
 /// 输出链接器定义的内核映像和各段范围；结束地址采用不包含式。
@@ -262,22 +270,34 @@ fn log_kernel_range(name: &str, start: usize, end: usize) {
     );
 }
 
-fn report_fdt_structure_error(error: fullemu::device_tree::fdt::FdtStructureError) -> ! {
-    crate::klog_error!("FDT 结构块无效：{}", error.description());
-    panic!("FDT 结构块无效");
+/// 以连续十六进制字节显示 FDT 属性值，不分配临时缓冲区。
+struct HexBytes<'a>(&'a [u8]);
+
+impl fmt::Display for HexBytes<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("0x")?;
+        for byte in self.0 {
+            write!(formatter, "{byte:02x}")?;
+        }
+        Ok(())
+    }
 }
 
-fn report_fdt_blob_error(error: fullemu::device_tree::fdt::FdtBlobError) -> ! {
-    crate::klog_error!("FDT 文件无效：{}", error.description());
-    panic!("FDT 文件无效");
-}
-
-fn report_memory_info_error(error: fullemu::device_tree::memory_info::FdtMemoryInfoError) -> ! {
-    crate::klog_error!("启动信息无效：{}", error.description());
-    panic!("启动信息无效");
-}
-
-fn report_console_info_error(error: fullemu::device_tree::console_info::FdtConsoleInfoError) -> ! {
-    crate::klog_error!("FDT 控制台信息无效：{}", error.description());
-    panic!("FDT 控制台信息无效");
+extern "C" {
+    static __boot_virtual_start: u8;
+    static __boot_virtual_end: u8;
+    static __boot_bss_virtual_start: u8;
+    static __boot_bss_virtual_end: u8;
+    static __boot_stack_virtual_start: u8;
+    static __boot_stack_virtual_end: u8;
+    static __kernel_start: u8;
+    static __text_start: u8;
+    static __text_end: u8;
+    static __rodata_start: u8;
+    static __rodata_end: u8;
+    static __data_start: u8;
+    static __data_end: u8;
+    static __bss_start: u8;
+    static __bss_data_end: u8;
+    static __bss_end: u8;
 }

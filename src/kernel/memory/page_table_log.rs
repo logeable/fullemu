@@ -10,7 +10,7 @@ use super::page_table::{
 /// 以调试日志输出指定进程页表中的有效映射。
 ///
 /// 连续虚拟页映射到连续物理页且权限相同的条目会合并为一个范围。
-pub(super) fn log_address_space(process_id: usize, address_space: &AddressSpace) {
+pub(in crate::kernel) fn log_address_space(process_id: usize, address_space: &AddressSpace) {
     if !crate::kernel::logging::is_enabled(crate::kernel::logging::Level::Debug) {
         return;
     }

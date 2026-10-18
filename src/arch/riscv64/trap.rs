@@ -96,6 +96,7 @@ impl TrapCause {
 ///
 /// 字段顺序必须与 `trap.S` 中的偏移一致；结构体总大小为 288 字节，满足栈对齐。
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct TrapFrame {
     /// 按 RISC-V 整数寄存器编号保存 x0 至 x31。
     pub registers: [usize; 32],
@@ -112,26 +113,16 @@ pub struct TrapFrame {
 const _: () = assert!(core::mem::size_of::<TrapFrame>() == 288);
 
 impl TrapFrame {
-    /// 为首次运行的用户进程构造一个可由 `sret` 恢复的陷入帧。
-    #[allow(dead_code)]
-    pub fn for_entry(entry: extern "C" fn() -> !, stack_pointer: usize) -> Self {
-        Self::for_privilege(entry as usize, stack_pointer, true)
-    }
-
     /// 为不接收启动参数的独立用户程序构造陷入帧。
     pub fn for_user_entry(entry_address: usize, stack_pointer: usize) -> Self {
-        Self::for_privilege(entry_address, stack_pointer, false)
-    }
-
-    fn for_privilege(entry: usize, stack_pointer: usize, supervisor_mode: bool) -> Self {
         let mut registers = [0; 32];
         registers[2] = stack_pointer;
 
         Self {
             registers,
-            exception_pc: entry,
+            exception_pc: entry_address,
             // SPIE=1 使 sret 后允许 supervisor 中断；SPP 决定返回 S-mode 还是 U-mode。
-            status: (usize::from(supervisor_mode) << 8) | (1 << 5),
+            status: (0 << 8) | (1 << 5),
             cause: 0,
             trap_value: 0,
         }

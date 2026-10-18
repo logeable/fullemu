@@ -20,18 +20,19 @@
 | --- | --- | --- |
 | `kernel::heap` | 管理内核对象使用的字节堆，并实现全局分配器 | 初始化时从页帧分配器取得连续物理页作为固定堆后备区，通过 `memory` 地址接口取得高半区虚拟地址；为 `Vec` 等 `alloc` 容器提供字节分配 |
 | `kernel::frame_allocator` | 根据 FDT 中的 RAM 范围分配和回收物理页帧 | 使用固定 BSS 区间表保存物理范围元数据，不依赖堆；排除内核映像、DTB 和固件保留范围；清零时通过 `memory` 地址接口访问页帧 |
-| `kernel::memory` | 定义进程和 syscall 使用的内存接口、映射输入与统一错误类型 | 地址换算和页几何由纯计算子模块直接提供；地址空间机制不拥有用户栈、程序镜像或页表目标页 |
+| `kernel::memory` | 定义地址空间共享的映射输入与统一错误类型，并提供页帧内容复制 | 操作由 `address_space`、`user_access` 和 `page_table_log` 子模块直接提供；不经 `memory/mod.rs` 纯转发；地址空间机制不拥有用户栈、程序镜像或页表目标页 |
 | `kernel::memory::address` | 定义 Sv39 规范地址规则、低半部用户地址上界、内核直接映射及内核映像 VMA/LMA 换算 | 纯地址计算，不访问页表或分配器；调用方负责保证所访问物理范围已映射；内核其他模块直接依赖此模块，不经 `memory` 转发 |
 | `kernel::memory::page` | 定义 4 KiB 基础页大小、对齐判断及页边界取整 | 纯算术模块，供页帧分配器、页表、地址空间和进程栈共用；不依赖这些调用方 |
 | `kernel::memory::address_space` | 创建、切换、校验和销毁进程的 Sv39 地址空间 | `AddressSpace` 值独占根页表树；单个创建失败时回收部分页表树，通过 `page_table` 建立映射，通过页帧分配器取得和归还页表页 |
 | `kernel::memory::page_table` | 编码 Sv39 页表项、建立 4 KiB 映射并激活根页表 | 只管理页表机制；地址空间生命周期由 `address_space` 决定 |
 | `kernel::memory::page_table_log` | 遍历现有页表并把映射合并成诊断日志 | 只读页表；不创建或释放映射 |
 | `kernel::memory::user_access` | 在短暂设置 `sstatus.SUM` 的窗口内访问已验证的用户地址 | 只执行单次内存读写；范围校验由 syscall 调用路径负责 |
-| `kernel::process` | 编排进程创建、用户态陷入、轮转调度和退出资源回收 | 持有追加式 `Vec<Process>` 与稳定 `ProcessId`；每个进程独占 `ProcessResources`，包含地址空间、陷入帧、镜像和两种栈 |
+| `kernel::process` | 编排进程创建、用户态陷入、轮转调度和退出资源回收 | 持有追加式 `Vec<Process>` 与稳定 `ProcessId`；每个进程独占 `ProcessResources`，包含地址空间、镜像和两种栈；陷入帧固定保存在内核栈顶下方，由栈布局推导地址 |
 | `kernel::process::creation` | 按顺序准备进程镜像、用户栈、内核栈和独立地址空间，全部成功后发布进程对象 | 从链接器符号读取内核各段范围并组装 `KernelMemoryLayout` 传给 memory；使用局部资源所有者实现失败回滚，页表就绪前不发布进程 |
-| `kernel::process::stack` | 分配进程内核栈和用户栈的页帧，并在资源销毁时归还 | 内核栈需要连续页帧并映射到高半区；每张进程页表映射所有可能仍在使用的内核栈，以支持切换期间继续运行；用户栈允许离散页帧；不决定调度策略 |
+| `kernel::process::wait` | 管理父子关系、阻塞等待、退出状态写回和子进程资源回收 | 按稳定 `ProcessId` 匹配子进程；只在父进程地址空间中写入已校验的 wait 状态 |
+| `kernel::process::stack` | 分配进程内核栈和用户栈的页帧，并在资源销毁时归还 | 内核栈需要连续页帧并映射到高半区；`KernelStack` 提供固定位置的陷入帧地址；每张进程页表映射所有可能仍在使用的内核栈，以支持切换期间继续运行；用户栈允许离散页帧；不决定调度策略 |
 | `kernel::syscall` | 将 Linux RISC-V syscall 编号和参数转换为当前内核行为 | 负责 ABI 参数与返回值；调用内存、时钟和控制台能力 |
-| `kernel::user_program` | 校验构建生成的清单并装载原始用户镜像 | 镜像字节嵌入内核构建产物；运行时从页帧分配器取得镜像页，`LoadedUserProgram` 持有并释放这些页帧 |
+| `kernel::user_program` | 校验构建生成的清单并装载原始用户镜像 | 镜像字节嵌入内核构建产物；运行时从页帧分配器取得镜像页，`LoadedUserProgram` 持有并释放这些页帧；当前统一入口地址就是镜像 `virtual_start`，将来 ELF 加载器提供独立入口时再单独建模 |
 | `kernel::clock` | 提供内核启动后的单调时间值 | 读取架构计时源并转换成内核时间值，不定义用户 ABI 布局 |
 | `kernel::logging` | 过滤并格式化内核诊断记录 | 通过 `device::console` 输出，并读取平台计时源 |
 | `device::console` | 为日志和 syscall 提供字节输入输出及格式化写入接口 | 通过 `ConsoleDevice` 契约调用当前 UART 实现 |
@@ -50,10 +51,10 @@
 | `PageTable` | `kernel::memory::page_table` | 表示与 Sv39 硬件格式对齐的页表页 |
 | `UserImageMapping`、`UserStackMapping` | `kernel::memory` | 描述地址空间初始化需要的映射输入；进程拥有镜像和栈，memory 只建立映射 |
 | `KernelMemoryLayout`、`KernelSectionRange` | `kernel::memory` | 描述链接器提供的内核各段虚拟和物理边界；memory 校验页对齐及顺序，并按段设置页权限 |
-| `KernelStack`、`UserStack`、`Process`、`ProcessState`、`ProcessId`、`ProcessResources` | `kernel::process` 及其 `stack` 子模块 | `Process` 持有身份、父进程、状态和退出码；`ProcessResources` 集中拥有可回收的地址空间、陷入帧、镜像和栈资源 |
+| `KernelStack`、`UserStack`、`Process`、`ProcessState`、`ProcessId`、`ProcessResources` | `kernel::process` 及其 `stack` 子模块 | `Process` 持有身份、父进程、状态和退出码；`ProcessResources` 集中拥有可回收的地址空间、镜像和栈资源；陷入帧位于内核栈固定位置，不单独保存其地址 |
 | `TrapFrame`、`TaskContext` | `arch::riscv64::trap`、`arch::riscv64::context` | 布局必须与对应汇编偏移一致，属于架构现场机制，不属于调度策略 |
 | `MonotonicTime` | `kernel::clock` | 表示内核内部时钟读数，不暴露用户 ABI 布局 |
-| `LinuxTimespec`、`SyscallContext`、`SyscallOutcome` | `kernel::syscall` | 将 Linux ABI 表示、用户访问范围和单次调用结果限制在 syscall 边界 |
+| `LinuxTimespec`、`SyscallContext`、`SyscallOutcome`、`WaitRequest` | `kernel::syscall` | 将 Linux ABI 表示、用户访问范围和单次调用结果限制在 syscall 边界 |
 | `ConsoleDevice`、`MmioRegion` | `device` | 定义字节收发契约和设备寄存器范围；日志、syscall 和页表映射不依赖具体 UART 驱动 |
 
 内核子模块之间的协作接口优先采用父模块范围的可见性（`pub(super)`），仅当入口需要由 crate 根调用、宏展开需要访问，或类型确实构成稳定公共解析接口时才使用更宽可见性。这使调用关系可从模块树看出，并避免把内部资源令牌伪装成通用公共 API。
@@ -118,7 +119,7 @@ flowchart TD
 
 本轮新增 `memory::page` 统一 4 KiB 页大小、对齐判断及向上/向下页对齐；页帧分配器、地址空间和进程栈直接使用该叶子模块。Sv39 规范地址转换及用户低半部上界收拢到 `memory::address`，页表诊断也从该处取得规范地址处理。地址换算不再经 `memory/mod.rs` 的转发函数，调用方直接依赖纯计算模块；地址空间创建等有意作为内存子系统接口保留在 `memory` 门面中。
 
-第 32 阶段引入单进程创建器，第 43 阶段移除用户镜像和进程记录的固定数量上限。第 44 阶段将进程记录改为拥有资源的 `Process` 对象：创建器先预留容器容量，再准备镜像、用户栈、内核栈和地址空间，最后一次性发布对象；创建失败时局部所有者回收已取得资源。退出后，调度器先切换地址空间，再回收已退出进程的页表、镜像和用户栈；内核栈延迟到运行在另一栈后释放。最后一个进程退出时，回收器先切换到引导栈和保留的引导页表，再释放最后一组资源。进程 ID 当前只追加、不复用；暂不实现运行时创建、父子关系、`fork`、`wait` 或重用已回收的进程记录。
+第 32 阶段引入单进程创建器，第 43 阶段移除用户镜像和进程记录的固定数量上限。第 44 阶段将进程记录改为拥有资源的 `Process` 对象：创建器先预留容器容量，再准备镜像、用户栈、内核栈和地址空间，最后一次性发布对象；创建失败时局部所有者回收已取得资源。退出后，调度器先切换地址空间，再回收已退出进程的页表、镜像和用户栈；内核栈延迟到运行在另一栈后释放。最后一个进程退出时，回收器先切换到引导栈和保留的引导页表，再释放最后一组资源。第 45 阶段加入 fork 式进程复制和 `wait4` 等待，退出状态由父进程收集；PID 仍追加分配且不复用。
 
 当前启动入口 `_start` 与引导页表、引导栈位于低地址；引导汇编清零各段的物理装载范围，建立临时 Sv39 映射，再切换到高半区 `kernel_main`。内核 `.text`、`.rodata`、`.data` 和 `.bss` 的 VMA 为 `0xffffffc000000000 + LMA`，并按页边界分别映射为 `SR-X`、`SR--`、`SRW-` 和 `SRW-`。进程页表将 FDT RAM 映射到 `0xffffffc000000000 + PA` 的高半区直接映射窗口，并按高 VMA/低 LMA 映射内核段、启动栈和所有进程内核栈；内核代码、堆、页帧和页表通过高半区虚拟地址访问，物理地址仅用于页表项、`satp` 和资源记录。共享内核栈映射使调度器切换 `satp` 后仍能完成当前陷入处理。动态分配的用户镜像页和用户栈分别映射为 `URWX`、`URW-`，仍位于 Sv39 低半部；用户镜像共同虚拟基址为 `0x40000000`，镜像物理页由进程拥有且可以不连续。`make inspect-kernel-elf` 检查低地址入口、启动段恒等布局及内核主体 VMA/LMA 偏移。临时启动页表按 QEMU `virt` 的单 hart、128 MiB RAM 环境用 1 GiB 叶子覆盖低设备窗口、RAM 低地址和高半区别名；进程页表不再建立 RAM 低地址恒等映射，UART MMIO 仍按设备物理地址单独映射。
 
@@ -127,7 +128,7 @@ flowchart TD
 当前仍有明确的重构工作：
 
 1. 地址空间规划已记录在第 33 阶段；第 34 阶段分离用户镜像虚拟地址与 RAM 恒等映射，第 35 阶段按页边界落实内核段权限，第 41 阶段实现低地址入口、早期 Sv39 映射及高 VMA/低 LMA 内核主体。进程页表按 FDT 描述的 RAM 建立高半区直接映射，低地址 RAM 恒等映射只保留在启动页表中；后续可继续审查启动阶段低地址映射的范围和权限。
-2. 第 44 阶段已将进程运行资源集中到可回收的内核对象，并建立最后一个进程退出后的安全回收上下文。退出状态暂时保存在追加式进程记录中，没有父进程来收集状态；下一步可在这一对象与生命周期基础上实现最小 `clone`/fork 创建语义，再讨论父子状态和 `wait`。可同时存活的进程数量由页帧和内核堆容量决定；页帧分配器的固定范围表仍有独立的内存拓扑元数据容量约束。
+2. 第 45 阶段支持 fork 式 `clone(SIGCHLD)`、阻塞 `wait4`、退出状态收集与子进程资源回收。仅支持 `pid > 0` 或 `pid = -1`、`options = 0` 或 `WNOHANG`、空 `rusage` 指针；不实现线程共享标志、进程组等待、信号处理、写时复制、`exec` 或 PID 复用。RISC-V Linux 的用户态 `fork()` 由 `clone` 系统调用承载，因此内核不定义独立的 fork syscall 编号。可同时存活的进程数量由页帧和内核堆容量决定；页帧分配器的固定范围表仍有独立的内存拓扑元数据容量约束。
 3. 当前设备接口只覆盖轮询式 UART 控制台；增加其他设备前，再根据实际消费者扩展设备类别与发现/初始化接口，避免提前建立通用驱动框架。
 4. 页帧分配器目前按页扫描 FDT RAM 范围并用固定容量区间表追踪可用区；尚未解析 `/reserved-memory`、建立通用虚拟堆窗口或按需扩展堆。
 

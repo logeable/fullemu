@@ -10,6 +10,7 @@ use super::{
 /// 单进程创建失败的阶段和原因。
 pub(super) enum ProcessCreationError {
     ProcessMetadataAllocation,
+    ProcessIdExhausted,
     ProgramMissing,
     ProgramLoad(super::super::user_program::UserProgramLoadError),
     UserStack(StackError),
@@ -23,6 +24,7 @@ impl ProcessCreationError {
     pub(super) fn description(&self) -> &'static str {
         match self {
             Self::ProcessMetadataAllocation => "无法为进程记录预留内核堆空间",
+            Self::ProcessIdExhausted => "Linux PID 范围已耗尽",
             Self::ProgramMissing => "用户程序索引不存在",
             Self::ProgramLoad(error) => error.description(),
             Self::UserStack(error) => error.description(),
@@ -31,22 +33,125 @@ impl ProcessCreationError {
             Self::AddressSpace(error) => error.description(),
         }
     }
+
+    pub(super) const fn is_pid_exhausted(&self) -> bool {
+        matches!(self, Self::ProcessIdExhausted)
+    }
 }
 
-/// 创建并追加一个进程；失败时局部所有者自动回收栈，页表由地址空间模块回滚。
-pub(super) fn create_process(program_index: usize) -> Result<ProcessId, ProcessCreationError> {
-    create_process_inner(program_index)
-}
-
-fn create_process_inner(program_index: usize) -> Result<ProcessId, ProcessCreationError> {
-    let process_id = {
-        // 安全性：进程只能在单 hart 的启动或陷入路径创建；当前 S-mode 陷入不会嵌套修改进程表。
-        let processes = unsafe { &mut *core::ptr::addr_of_mut!(super::PROCESSES) };
-        processes
-            .try_reserve(1)
-            .map_err(|_| ProcessCreationError::ProcessMetadataAllocation)?;
-        ProcessId::from_index(processes.len())
+/// 复制父进程的用户态现场和私有内存，创建一个可独立调度的子进程。
+pub(super) fn fork_process(
+    parent_index: usize,
+    parent_frame: &TrapFrame,
+) -> Result<ProcessId, ProcessCreationError> {
+    let child_id = reserve_process_slot()?;
+    let (parent_id, parent_program_range, program_image, user_stack) = {
+        // 安全性：只在单 hart 的 S-mode trap 中创建子进程；进程表不会在该调用中被其他路径修改。
+        let processes = unsafe { &*core::ptr::addr_of!(super::PROCESSES) };
+        let parent = processes
+            .get(parent_index)
+            .unwrap_or_else(|| panic!("fork 的父进程索引无效：{parent_index}"));
+        let resources = parent
+            .resources
+            .as_ref()
+            .unwrap_or_else(|| panic!("fork 的父进程运行资源已释放：{parent_index}"));
+        (
+            parent.id,
+            resources.program_range,
+            resources
+                .program_image
+                .duplicate()
+                .map_err(ProcessCreationError::ProgramLoad)?,
+            resources
+                .user_stack
+                .duplicate()
+                .map_err(ProcessCreationError::UserStack)?,
+        )
     };
+    let kernel_stack = KernelStack::allocate().map_err(ProcessCreationError::KernelStack)?;
+    let user_stack_range = user_stack.range();
+    let kernel_stack_range = kernel_stack.range();
+    let user_stack_mapping = super::super::memory::UserStackMapping {
+        virtual_start: user_stack.start(),
+        frames: user_stack.frames(),
+    };
+    let kernel_stack_mapping = KernelStackMapping {
+        virtual_start: kernel_stack_range.0,
+        physical_start: kernel_stack.physical_start(),
+        size: kernel_stack_range.1 - kernel_stack_range.0,
+    };
+    let user_image_mapping = super::super::memory::UserImageMapping {
+        virtual_start: program_image.virtual_start,
+        frames: program_image.frames(),
+    };
+    let address_space = super::super::memory::address_space::create_address_space(
+        kernel_memory_layout(),
+        &user_stack_mapping,
+        kernel_stack_mapping,
+        user_image_mapping,
+    )
+    .map_err(ProcessCreationError::AddressSpace)?;
+
+    let mut child_frame = *parent_frame;
+    child_frame.exception_pc = child_frame
+        .exception_pc
+        .checked_add(4)
+        .unwrap_or_else(|| panic!("fork 子进程陷入地址溢出"));
+    child_frame.registers[10] = 0;
+    let initial_frame_pointer = kernel_stack.trap_frame_pointer();
+    // 安全性：目标陷入帧位于新分配内核栈的高半区映射内，且该栈尚未发布给调度器。
+    unsafe {
+        core::ptr::write(initial_frame_pointer, child_frame);
+    }
+
+    let program_name = program_image.name;
+    // 安全性：进程表容量已预留；新进程的镜像、栈和页表全部构造完成后才追加记录。
+    unsafe {
+        (&mut *core::ptr::addr_of_mut!(super::PROCESSES)).push(Process {
+            id: child_id,
+            parent_id: Some(parent_id),
+            state: ProcessState::Ready,
+            exit_status: None,
+            wait_request: None,
+            wait_collected: false,
+            resources: Some(ProcessResources {
+                address_space,
+                program_range: parent_program_range,
+                program_image,
+                user_stack,
+                kernel_stack,
+            }),
+        });
+    }
+
+    crate::klog_info!(
+        "fork 创建子进程：父进程 PID={}，子进程 PID={}，程序={}，用户栈={:#018x}..{:#018x}，内核栈={:#018x}..{:#018x}",
+        parent_id.linux_pid(),
+        child_id.linux_pid(),
+        program_name,
+        user_stack_range.0,
+        user_stack_range.1,
+        kernel_stack_range.0,
+        kernel_stack_range.1
+    );
+    Ok(child_id)
+}
+
+fn reserve_process_slot() -> Result<ProcessId, ProcessCreationError> {
+    // 安全性：进程只在单 hart 启动或 S-mode trap 路径创建，不能与进程表的其他写入并发。
+    let processes = unsafe { &mut *core::ptr::addr_of_mut!(super::PROCESSES) };
+    processes
+        .try_reserve(1)
+        .map_err(|_| ProcessCreationError::ProcessMetadataAllocation)?;
+    if processes.len() >= i32::MAX as usize {
+        return Err(ProcessCreationError::ProcessIdExhausted);
+    }
+    Ok(ProcessId::from_index(processes.len()))
+}
+
+/// 创建并追加一个进程；失败时局部所有者自动回收资源，页表由地址空间模块回滚。
+pub(super) fn create_process(program_index: usize) -> Result<ProcessId, ProcessCreationError> {
+    let process_id = reserve_process_slot()?;
 
     let program = match super::super::user_program::load(program_index)
         .map_err(ProcessCreationError::ProgramLoad)?
@@ -63,8 +168,8 @@ fn create_process_inner(program_index: usize) -> Result<ProcessId, ProcessCreati
 
     let user_stack_range = user_stack.range();
     let kernel_stack_range = kernel_stack.range();
-    let initial_frame_address = kernel_stack.top() - core::mem::size_of::<TrapFrame>();
-    let initial_frame = TrapFrame::for_user_entry(program.entry, user_stack.top());
+    let initial_frame = TrapFrame::for_user_entry(program.virtual_start, user_stack.top());
+    let initial_frame_pointer = kernel_stack.trap_frame_pointer();
     let user_stack_mapping = super::super::memory::UserStackMapping {
         virtual_start: user_stack.start(),
         frames: user_stack.frames(),
@@ -80,7 +185,7 @@ fn create_process_inner(program_index: usize) -> Result<ProcessId, ProcessCreati
     };
     let kernel_layout = kernel_memory_layout();
 
-    let address_space = super::super::memory::create_address_space(
+    let address_space = super::super::memory::address_space::create_address_space(
         kernel_layout,
         &user_stack_mapping,
         kernel_stack_mapping,
@@ -90,11 +195,11 @@ fn create_process_inner(program_index: usize) -> Result<ProcessId, ProcessCreati
 
     // 安全性：陷入帧写入本进程独占内核栈的高半区直接映射；该物理页已分配且保持映射。
     unsafe {
-        core::ptr::write(initial_frame_address as *mut TrapFrame, initial_frame);
+        core::ptr::write(initial_frame_pointer, initial_frame);
     }
 
     let program_name = program.name;
-    let program_entry = program.entry;
+    let program_entry = program.virtual_start;
     let image_size = program.image_size;
     // 安全性：进程表容量已在资源分配前预留；追加不再申请内存，且只有全部资源准备成功后才发布进程记录。
     unsafe {
@@ -103,9 +208,10 @@ fn create_process_inner(program_index: usize) -> Result<ProcessId, ProcessCreati
             parent_id: None,
             state: ProcessState::Ready,
             exit_status: None,
+            wait_request: None,
+            wait_collected: false,
             resources: Some(ProcessResources {
                 address_space,
-                saved_frame_address: initial_frame_address,
                 program_range: (program.virtual_start, program_end),
                 program_image: program,
                 user_stack,
@@ -115,8 +221,8 @@ fn create_process_inner(program_index: usize) -> Result<ProcessId, ProcessCreati
     }
 
     crate::klog_info!(
-        "用户进程已创建：进程={}，程序={}，入口 {:#018x}，镜像 {} 字节；用户栈虚拟={:#018x}..{:#018x}，内核栈高地址={:#018x}..{:#018x}",
-        process_id.index(),
+        "用户进程已创建：PID={}，程序={}，入口 {:#018x}，镜像 {} 字节；用户栈虚拟={:#018x}..{:#018x}，内核栈高地址={:#018x}..{:#018x}",
+        process_id.linux_pid(),
         program_name,
         program_entry,
         image_size,

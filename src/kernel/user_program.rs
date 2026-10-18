@@ -1,4 +1,4 @@
-//! 从构建清单装载用户程序，并由页帧分配器管理镜像 backing。
+//! 查找并装入构建清单中的用户程序，管理其镜像页帧的所有权。
 
 use alloc::vec::Vec;
 
@@ -14,13 +14,29 @@ struct UserProgramImage {
 
 include!(concat!(env!("OUT_DIR"), "/user_program_catalog.rs"));
 
-/// 已装入物理页帧、可映射到任务地址空间的用户程序。
+/// 描述用户程序装载失败的阶段和原因。
+pub(super) enum UserProgramLoadError {
+    Frame(FrameError),
+    MetadataAllocation,
+    AddressRangeOverflow,
+}
+
+impl UserProgramLoadError {
+    /// 返回用于进程创建诊断的简要说明。
+    pub(super) fn description(&self) -> &'static str {
+        match self {
+            Self::Frame(error) => error.description(),
+            Self::MetadataAllocation => "无法为用户程序镜像页帧分配内核堆空间",
+            Self::AddressRangeOverflow => "用户程序镜像地址范围溢出",
+        }
+    }
+}
+
+/// 已装入物理页帧、可映射到进程地址空间的用户程序。
 pub(super) struct LoadedUserProgram {
     /// 用户程序在构建清单中的名称。
     pub(super) name: &'static str,
-    /// 用户程序入口地址。
-    pub(super) entry: usize,
-    /// 用户程序链接时使用的固定虚拟起始地址。
+    /// 用户程序链接时使用的固定虚拟起始地址，也是当前的执行入口。
     pub(super) virtual_start: usize,
     /// 镜像在用户虚拟地址空间中实际占用的字节数。
     pub(super) image_size: usize,
@@ -31,33 +47,28 @@ impl LoadedUserProgram {
     pub(super) fn frames(&self) -> &[PhysicalFrame] {
         &self.frames
     }
+
+    /// 复制程序的当前镜像页，为独立用户地址空间准备新的 backing。
+    pub(super) fn duplicate(&self) -> Result<Self, UserProgramLoadError> {
+        let frames = allocate_image_frames(self.frames.len())?;
+        for (source, destination) in self.frames.iter().zip(frames.iter()) {
+            super::memory::copy_frame(source, destination);
+        }
+        // 安全性：本 hart 刚复制的新页帧包含可执行指令，需要同步指令缓存。
+        unsafe { core::arch::asm!("fence.i", options(nostack)) };
+
+        Ok(Self {
+            name: self.name,
+            virtual_start: self.virtual_start,
+            image_size: self.image_size,
+            frames,
+        })
+    }
 }
 
 impl Drop for LoadedUserProgram {
     fn drop(&mut self) {
-        while let Some(frame) = self.frames.pop() {
-            if let Err(error) = frame_allocator::deallocate_frame(frame) {
-                panic!("释放用户程序镜像页帧失败：{}", error.description());
-            }
-        }
-    }
-}
-
-/// 描述用户程序装载失败的阶段和原因。
-pub(super) enum UserProgramLoadError {
-    Frame(FrameError),
-    MetadataAllocation,
-    AddressRangeOverflow,
-}
-
-impl UserProgramLoadError {
-    /// 返回用于任务创建诊断的简要说明。
-    pub(super) fn description(&self) -> &'static str {
-        match self {
-            Self::Frame(error) => error.description(),
-            Self::MetadataAllocation => "无法为用户程序镜像页帧分配内核堆空间",
-            Self::AddressRangeOverflow => "用户程序镜像地址范围溢出",
-        }
+        release_frames(&mut self.frames);
     }
 }
 
@@ -93,6 +104,19 @@ pub(super) fn load(index: usize) -> Result<Option<LoadedUserProgram>, UserProgra
     if frame_count == 0 {
         return Err(UserProgramLoadError::AddressRangeOverflow);
     }
+    let frames = allocate_image_frames(frame_count)?;
+
+    copy_image_to_frames(program.bytes, &frames);
+
+    Ok(Some(LoadedUserProgram {
+        name: program.name,
+        virtual_start: USER_PROGRAM_VIRTUAL_BASE,
+        image_size: program.bytes.len(),
+        frames,
+    }))
+}
+
+fn allocate_image_frames(frame_count: usize) -> Result<Vec<PhysicalFrame>, UserProgramLoadError> {
     let mut frames = Vec::new();
     frames
         .try_reserve_exact(frame_count)
@@ -107,16 +131,7 @@ pub(super) fn load(index: usize) -> Result<Option<LoadedUserProgram>, UserProgra
             }
         }
     }
-
-    copy_image_to_frames(program.bytes, &frames);
-
-    Ok(Some(LoadedUserProgram {
-        name: program.name,
-        entry: USER_PROGRAM_VIRTUAL_BASE,
-        virtual_start: USER_PROGRAM_VIRTUAL_BASE,
-        image_size: program.bytes.len(),
-        frames,
-    }))
+    Ok(frames)
 }
 
 fn copy_image_to_frames(bytes: &[u8], frames: &[PhysicalFrame]) {
@@ -146,7 +161,7 @@ fn copy_image_to_frames(bytes: &[u8], frames: &[PhysicalFrame]) {
 fn release_frames(frames: &mut Vec<PhysicalFrame>) {
     while let Some(frame) = frames.pop() {
         if let Err(error) = frame_allocator::deallocate_frame(frame) {
-            panic!("回滚用户程序镜像页帧失败：{}", error.description());
+            panic!("回收用户程序镜像页帧失败：{}", error.description());
         }
     }
 }

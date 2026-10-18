@@ -1,6 +1,7 @@
 //! 管理进程地址空间根页表的创建、切换、遍历校验和销毁。
 
 use super::page::{align_down_to_page, align_up_to_page, is_page_aligned, PAGE_SIZE};
+pub(in crate::kernel) use super::page_table::activate_boot_address_space;
 use super::page_table::{
     activate, active_root_address, map_page, PageTable, PAGE_TABLE_ENTRIES, PTE_ACCESSED,
     PTE_DIRTY, PTE_EXECUTE, PTE_READ, PTE_USER, PTE_VALID, PTE_WRITE,
@@ -11,7 +12,7 @@ use super::{
 };
 
 /// 为一个进程建立独立页表；失败时归还本次创建的页表树。
-pub(super) fn create_address_space(
+pub(in crate::kernel) fn create_address_space(
     kernel_layout: KernelMemoryLayout,
     user_stack: &UserStackMapping<'_>,
     kernel_stack: KernelStackMapping,
@@ -271,7 +272,7 @@ fn map_kernel_section(
 }
 
 /// 让一个进程页表能访问调度切换期间可能仍在使用的任一内核栈。
-pub(super) fn map_kernel_stacks(
+pub(in crate::kernel) fn map_kernel_stacks(
     address_space: &mut AddressSpace,
     stacks: &[KernelStackMapping],
 ) -> Result<(), PageTableError> {
@@ -319,19 +320,18 @@ fn rollback_page_table_tree(root_address: usize) -> Result<(), PageTableError> {
 }
 
 /// 切换到指定进程的 Sv39 根页表。
-pub(super) fn activate_address_space(address_space: &AddressSpace) -> Result<(), PageTableError> {
+pub(in crate::kernel) fn activate_address_space(
+    address_space: &AddressSpace,
+) -> Result<(), PageTableError> {
     activate(address_space.root_address)
-}
-
-/// 切换到启动阶段保留的内核页表，以便最后一个进程退出后安全回收其页表。
-pub(super) fn activate_boot_address_space() -> Result<(), PageTableError> {
-    super::page_table::activate_boot_address_space()
 }
 
 /// 销毁一个非当前地址空间，并归还它拥有的根页表和中间页表页。
 ///
 /// 返回归还的页表页数。叶子映射指向的内核、用户栈和程序镜像页不会释放。
-pub(super) fn destroy_address_space(address_space: AddressSpace) -> Result<usize, PageTableError> {
+pub(in crate::kernel) fn destroy_address_space(
+    address_space: AddressSpace,
+) -> Result<usize, PageTableError> {
     let root_address = address_space.root_address;
     if root_address == active_root_address() {
         return Err(PageTableError::ActiveAddressSpace);

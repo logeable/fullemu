@@ -1,66 +1,41 @@
-//! 管理 Sv39 地址空间及其对内核其他子系统提供的窄接口。
-//! 地址空间创建和页表操作由子模块实现；进程仍拥有用户栈和程序镜像等映射目标。
+//! 定义 Sv39 地址空间共用的数据类型，并组织地址空间、用户访问和页表诊断子模块。
+//! 操作直接通过职责对应的子模块调用；进程仍拥有用户栈和程序镜像等映射目标。
 
 pub(super) mod address;
-mod address_space;
+pub(super) mod address_space;
 pub(super) mod page;
 mod page_table;
-mod page_table_log;
-mod user_access;
+pub(super) mod page_table_log;
+pub(super) mod user_access;
 
 pub(super) use address_space::AddressSpace;
 
-/// 为单个进程建立独立地址空间；失败时不保留部分页表。
-pub(super) fn create_address_space(
-    kernel_layout: KernelMemoryLayout,
-    user_stack: &UserStackMapping<'_>,
-    kernel_stack: KernelStackMapping,
-    user_image: UserImageMapping<'_>,
-) -> Result<AddressSpace, PageTableError> {
-    address_space::create_address_space(kernel_layout, user_stack, kernel_stack, user_image)
-}
+/// 将一张独占物理页帧的内容复制到另一张独占页帧。
+pub(super) fn copy_frame(
+    source: &crate::kernel::frame_allocator::PhysicalFrame,
+    destination: &crate::kernel::frame_allocator::PhysicalFrame,
+) {
+    if source.start_address() == destination.start_address() {
+        panic!("物理页帧复制的源和目标相同");
+    }
+    let Some(source_virtual_address) = address::physical_to_kernel_virtual(source.start_address())
+    else {
+        panic!("物理页帧复制源无法映射到内核高半区");
+    };
+    let Some(destination_virtual_address) =
+        address::physical_to_kernel_virtual(destination.start_address())
+    else {
+        panic!("物理页帧复制目标无法映射到内核高半区");
+    };
 
-/// 切换到指定进程的 Sv39 根页表。
-pub(super) fn activate_address_space(address_space: &AddressSpace) -> Result<(), PageTableError> {
-    address_space::activate_address_space(address_space)
-}
-
-/// 在一个进程地址空间中映射共享的 S-mode 内核栈集合。
-pub(super) fn map_kernel_stacks(
-    address_space: &mut AddressSpace,
-    stacks: &[KernelStackMapping],
-) -> Result<(), PageTableError> {
-    address_space::map_kernel_stacks(address_space, stacks)
-}
-
-/// 切换到内核启动页表，供最后一个进程退出后的回收路径使用。
-pub(super) fn activate_boot_address_space() -> Result<(), PageTableError> {
-    address_space::activate_boot_address_space()
-}
-
-/// 销毁非活动地址空间，并返回释放的页表页数。
-pub(super) fn destroy_address_space(address_space: AddressSpace) -> Result<usize, PageTableError> {
-    address_space::destroy_address_space(address_space)
-}
-
-/// 在调用方已验证的用户地址范围内读取一个字节。
-///
-/// # Safety
-///
-/// 调用方必须保证地址位于当前任务已映射且可读的用户区域内。
-pub(super) unsafe fn read_user_byte(address: usize) -> u8 {
-    // 安全性：该包装函数沿用调用方对地址范围的保证，并将访问交给局部用户内存接口。
-    unsafe { user_access::read_user_byte(address) }
-}
-
-/// 在调用方已验证的用户地址范围内写入一个值。
-///
-/// # Safety
-///
-/// 调用方必须保证地址对 `T` 对齐，并且完整的 `T` 位于当前任务可写的用户区域内。
-pub(super) unsafe fn write_user_value<T: Copy>(address: usize, value: T) {
-    // 安全性：该包装函数沿用调用方对地址和对齐的保证，并将访问交给局部用户内存接口。
-    unsafe { user_access::write_user_value(address, value) }
+    // 安全性：调用方独占两张不同的已分配页帧；当前内核页表将两者映射到内核高半区。
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            source_virtual_address as *const u8,
+            destination_virtual_address as *mut u8,
+            page::PAGE_SIZE,
+        );
+    }
 }
 
 /// 描述某个进程中用户程序虚拟区域到其独占物理页帧的映射。
@@ -103,11 +78,6 @@ pub(super) struct KernelStackMapping {
     pub(super) virtual_start: usize,
     pub(super) physical_start: usize,
     pub(super) size: usize,
-}
-
-/// 以调试日志输出一个进程页表中的映射范围。
-pub(super) fn log_address_space(process_id: usize, address_space: &AddressSpace) {
-    page_table_log::log_address_space(process_id, address_space);
 }
 
 /// 描述 Sv39 页表初始化失败的原因。
