@@ -1,11 +1,13 @@
 //! 管理进程对象、单 hart 调度和退出资源回收。
 
-use crate::arch::riscv64::trap::{ExceptionCause, TrapCause, TrapFrame};
+use crate::arch::riscv64::trap::TrapFrame;
 use alloc::vec::Vec;
 
 mod creation;
+pub(super) mod exit;
+pub(super) mod fork;
 mod stack;
-mod wait;
+pub(super) mod wait;
 
 use stack::{KernelStack, UserStack};
 
@@ -74,27 +76,9 @@ struct Process {
     parent_id: Option<ProcessId>,
     state: ProcessState,
     exit_status: Option<ProcessExitStatus>,
-    wait_request: Option<ProcessWaitRequest>,
+    wait_request: Option<wait::ProcessWaitRequest>,
     wait_collected: bool,
     resources: Option<ProcessResources>,
-}
-
-#[derive(Clone, Copy)]
-struct ProcessWaitRequest {
-    pid: i32,
-    status_address: Option<usize>,
-    no_hang: bool,
-}
-
-pub(super) enum ForkError {
-    Resources,
-    ProcessIdExhausted,
-}
-
-pub(super) enum WaitDecision {
-    Return(isize),
-    Block,
-    NoChild,
 }
 
 static mut PROCESSES: Vec<Process> = Vec::new();
@@ -255,48 +239,6 @@ pub(super) fn current_user_memory_ranges() -> super::memory::UserMemoryRanges {
     }
 }
 
-/// 复制当前进程并返回子进程 PID；错误分类交由上层转换为 ABI 错误码。
-pub(super) fn fork_current_process(frame: &TrapFrame) -> Result<i32, ForkError> {
-    let current_index = current_process_index();
-    match creation::fork_process(current_index, frame) {
-        Ok(child_id) => Ok(child_id.linux_pid()),
-        Err(error) => {
-            crate::klog_warn!(
-                "进程 PID={} fork 失败：{}",
-                process_id_at(current_index).linux_pid(),
-                error.description()
-            );
-            if error.is_pid_exhausted() {
-                Err(ForkError::ProcessIdExhausted)
-            } else {
-                Err(ForkError::Resources)
-            }
-        }
-    }
-}
-
-/// 处理用户态异常并结束当前进程。
-pub(super) fn terminate_current_process(cause: TrapCause, frame: &TrapFrame) -> *mut TrapFrame {
-    let current_index = current_process_index();
-    crate::klog_error!(
-        "用户进程 PID={} 陷入：原因={cause:?}，scause={:#018x}，sepc={:#018x}，stval={:#018x}",
-        process_id_at(current_index).linux_pid(),
-        frame.cause,
-        frame.exception_pc,
-        frame.trap_value
-    );
-    mark_process_exited(
-        current_index,
-        ProcessExitStatus::Signal(signal_for_trap(cause)),
-    );
-    wait::notify_child_exit(current_index);
-    crate::klog_warn!(
-        "用户进程 PID={} 因异常终止",
-        process_id_at(current_index).linux_pid()
-    );
-    schedule_next(current_index)
-}
-
 /// 当前进程 PID，供陷入协调器生成上下文日志。
 pub(super) fn current_linux_pid() -> i32 {
     process_id_at(current_process_index()).linux_pid()
@@ -312,39 +254,6 @@ pub(super) fn yield_current_process() -> *mut TrapFrame {
     let current_index = current_process_index();
     set_process_state(current_index, ProcessState::Ready);
     schedule_next(current_index)
-}
-
-/// 退出当前进程，并调度其他就绪进程。
-pub(super) fn exit_current_process(status: u8) -> *mut TrapFrame {
-    let current_index = current_process_index();
-    crate::klog_info!(
-        "进程 PID={} 调用 exit 结束，状态码：{status}",
-        process_id_at(current_index).linux_pid()
-    );
-    mark_process_exited(current_index, ProcessExitStatus::Code(status));
-    wait::notify_child_exit(current_index);
-    schedule_next(current_index)
-}
-
-/// 按 syscall 已验证的参数等待子进程。
-pub(super) fn wait_for_child(
-    pid: i32,
-    status_address: Option<usize>,
-    no_hang: bool,
-) -> WaitDecision {
-    let current_index = current_process_index();
-    match wait::wait_for_child(
-        current_index,
-        ProcessWaitRequest {
-            pid,
-            status_address,
-            no_hang,
-        },
-    ) {
-        wait::WaitDecision::Return(result) => WaitDecision::Return(result),
-        wait::WaitDecision::Block => WaitDecision::Block,
-        wait::WaitDecision::NoChild => WaitDecision::NoChild,
-    }
 }
 
 /// 当前进程已进入等待状态后，调度其他就绪进程。
@@ -496,39 +405,6 @@ fn set_process_state(index: usize, state: ProcessState) {
     };
     // 安全性：状态只在单 hart 启动或陷入路径更新；S-mode 陷入期间不会发生定时器重入。
     process.state = state;
-}
-
-fn mark_process_exited(index: usize, exit_status: ProcessExitStatus) {
-    let process_id = {
-        let Some(process) = (unsafe { &mut *core::ptr::addr_of_mut!(PROCESSES) }).get_mut(index)
-        else {
-            panic!("无法结束不存在的进程 {}", index);
-        };
-        process.state = ProcessState::Exited;
-        process.exit_status = Some(exit_status);
-        process.wait_request = None;
-        process.id
-    };
-    wait::orphan_children(process_id);
-}
-
-fn signal_for_trap(cause: TrapCause) -> u8 {
-    match cause {
-        TrapCause::Exception(ExceptionCause::IllegalInstruction) => 4,
-        TrapCause::Exception(ExceptionCause::Breakpoint) => 5,
-        TrapCause::Exception(
-            ExceptionCause::LoadAddressMisaligned | ExceptionCause::StoreAmoAddressMisaligned,
-        ) => 7,
-        TrapCause::Exception(
-            ExceptionCause::InstructionAccessFault
-            | ExceptionCause::LoadAccessFault
-            | ExceptionCause::StoreAmoAccessFault
-            | ExceptionCause::InstructionPageFault
-            | ExceptionCause::LoadPageFault
-            | ExceptionCause::StoreAmoPageFault,
-        ) => 11,
-        _ => 4,
-    }
 }
 
 #[derive(Clone, Copy)]

@@ -23,7 +23,7 @@ pub extern "C" fn supervisor_trap_handler(frame: *mut TrapFrame) -> *mut TrapFra
         (TrapCause::Exception(ExceptionCause::UserEnvironmentCall), true) => {
             super::syscall::handle_user_environment_call(frame)
         }
-        (_, true) => super::process::terminate_current_process(cause, frame),
+        (_, true) => super::process::exit::terminate_current_process(cause, frame),
         (_, false) => panic_kernel_trap(cause, frame),
     }
 }

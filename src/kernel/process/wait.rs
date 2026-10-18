@@ -1,16 +1,38 @@
 //! 管理父子关系、阻塞等待和 Linux wait 状态回收。
 
-use super::ProcessWaitRequest;
 use super::{ProcessId, ProcessState, PROCESSES};
 
-pub(super) enum WaitDecision {
+#[derive(Clone, Copy)]
+pub(super) struct ProcessWaitRequest {
+    pid: i32,
+    status_address: Option<usize>,
+    no_hang: bool,
+}
+
+pub(in crate::kernel) enum WaitDecision {
     Return(isize),
     Block,
     NoChild,
 }
 
+/// 处理当前进程的 wait 请求，并返回立即结果或阻塞决定。
+pub(in crate::kernel) fn wait_for_current_child(
+    pid: i32,
+    status_address: Option<usize>,
+    no_hang: bool,
+) -> WaitDecision {
+    wait_for_child(
+        super::current_process_index(),
+        ProcessWaitRequest {
+            pid,
+            status_address,
+            no_hang,
+        },
+    )
+}
+
 /// 等待指定子进程或任意子进程；只保留退出状态，不重新取得已回收的运行资源。
-pub(super) fn wait_for_child(parent_index: usize, request: ProcessWaitRequest) -> WaitDecision {
+fn wait_for_child(parent_index: usize, request: ProcessWaitRequest) -> WaitDecision {
     let (has_matching_child, exited_child) = {
         let processes = unsafe { &*core::ptr::addr_of!(PROCESSES) };
         let parent = processes

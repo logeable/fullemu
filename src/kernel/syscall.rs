@@ -97,7 +97,7 @@ pub(super) fn handle_user_environment_call(frame: &mut TrapFrame) -> *mut TrapFr
         LINUX_CLOCK_GETTIME_SYSCALL => {
             return_to_user(frame, clock_gettime(context, arguments[0], arguments[1]))
         }
-        LINUX_EXIT_SYSCALL => super::process::exit_current_process(arguments[0] as i32 as u8),
+        LINUX_EXIT_SYSCALL => super::process::exit::exit_current_process(arguments[0] as i32 as u8),
         LINUX_SCHED_YIELD_SYSCALL => {
             frame.registers[10] = 0;
             advance_system_call(frame);
@@ -114,10 +114,10 @@ fn fork(arguments: [usize; 5], frame: &mut TrapFrame) -> *mut TrapFrame {
         return return_to_user(frame, LinuxErrno::InvalidArgument.return_value());
     }
 
-    let result = match super::process::fork_current_process(frame) {
+    let result = match super::process::fork::fork_current_process(frame) {
         Ok(child_pid) => child_pid as isize,
-        Err(super::process::ForkError::Resources) => process_creation_error(),
-        Err(super::process::ForkError::ProcessIdExhausted) => process_id_exhaustion_error(),
+        Err(super::process::fork::ForkError::Resources) => process_creation_error(),
+        Err(super::process::fork::ForkError::ProcessIdExhausted) => process_id_exhaustion_error(),
     };
     return_to_user(frame, result)
 }
@@ -146,13 +146,19 @@ fn wait4(context: SyscallContext, arguments: [usize; 5], frame: &mut TrapFrame) 
         Some(address)
     };
 
-    match super::process::wait_for_child(pid, status_address, arguments[2] == LINUX_WNOHANG) {
-        super::process::WaitDecision::Return(result) => return_to_user(frame, result),
-        super::process::WaitDecision::Block => {
+    match super::process::wait::wait_for_current_child(
+        pid,
+        status_address,
+        arguments[2] == LINUX_WNOHANG,
+    ) {
+        super::process::wait::WaitDecision::Return(result) => return_to_user(frame, result),
+        super::process::wait::WaitDecision::Block => {
             advance_system_call(frame);
             super::process::schedule_blocked_process()
         }
-        super::process::WaitDecision::NoChild => return_to_user(frame, no_child_process_error()),
+        super::process::wait::WaitDecision::NoChild => {
+            return_to_user(frame, no_child_process_error())
+        }
     }
 }
 

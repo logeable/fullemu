@@ -28,9 +28,11 @@
 | `kernel::memory::page_table_log` | 遍历现有页表并把映射合并成诊断日志 | 只读页表；不创建或释放映射 |
 | `kernel::memory::user_access` | 在短暂设置 `sstatus.SUM` 的窗口内访问已验证的用户地址 | 只执行单次内存读写；范围校验由 syscall 调用路径负责 |
 | `kernel::trap_handler` | 接收架构陷入现场并分类陷入原因，将用户环境调用转交给 syscall 层 | 依赖 `arch::riscv64::trap`、`syscall` 和 `process`；不直接访问进程表、页表或设备 |
-| `kernel::process` | 管理进程创建、状态转换、轮转调度和退出资源回收 | 持有追加式 `Vec<Process>` 与稳定 `ProcessId`；每个进程独占 `ProcessResources`，包含地址空间、镜像和两种栈；陷入帧固定保存在内核栈顶下方，由栈布局推导地址；不依赖 syscall ABI |
-| `kernel::process::creation` | 按顺序准备进程镜像、用户栈、内核栈和独立地址空间，全部成功后发布进程对象 | 从链接器符号读取内核各段范围并组装 `KernelMemoryLayout` 传给 memory；使用局部资源所有者实现失败回滚，页表就绪前不发布进程 |
-| `kernel::process::wait` | 管理父子关系、阻塞等待、退出状态写回和子进程资源回收 | 按稳定 `ProcessId` 匹配子进程；只在父进程地址空间中写入已校验的 wait 状态 |
+| `kernel::process` | 管理进程表、状态、轮转调度和进程资源的最终回收 | 持有追加式 `Vec<Process>` 与稳定 `ProcessId`；每个进程独占 `ProcessResources`，包含地址空间、镜像和两种栈；陷入帧固定保存在内核栈顶下方，由栈布局推导地址；不依赖 syscall ABI |
+| `kernel::process::creation` | 创建启动阶段装入的独立用户进程 | 按顺序准备镜像、用户栈、内核栈和地址空间，全部成功后发布进程对象；与 `fork` 共享进程槽位预留及内核映像布局准备 |
+| `kernel::process::fork` | 复制当前进程的用户镜像、用户栈和用户现场，创建子进程 | 子进程独占复制后的页帧、内核栈和地址空间；构造完整后才追加到进程表；将资源失败和 PID 耗尽分类交给 syscall 转换 ABI 错误码 |
+| `kernel::process::wait` | 管理父子关系、阻塞等待、退出状态写回和子进程资源回收 | 按稳定 `ProcessId` 匹配子进程；只在父进程地址空间中写入 syscall 已验证的 wait 状态地址；在子进程退出时唤醒匹配的等待父进程 |
+| `kernel::process::exit` | 标记正常退出或异常终止，发布退出状态并通知父子关系管理 | 调用 `wait` 处理父进程唤醒和孤儿关系，再交给 `process` 调度器切换；资源实际回收由调度器在切换到安全栈后执行 |
 | `kernel::process::stack` | 分配进程内核栈和用户栈的页帧，并在资源销毁时归还 | 内核栈需要连续页帧并映射到高半区；`KernelStack` 提供固定位置的陷入帧地址；每张进程页表映射所有可能仍在使用的内核栈，以支持切换期间继续运行；用户栈允许离散页帧；不决定调度策略 |
 | `kernel::syscall` | 将 Linux RISC-V syscall 转换为内核行为，并协调所需子系统完成调用 | 负责 ABI 参数、用户指针范围验证和 Linux 错误码；通过窄接口调用进程、内存、时钟和控制台能力，不直接访问进程表 |
 | `kernel::user_program` | 校验构建生成的清单并装载原始用户镜像 | 镜像字节嵌入内核构建产物；运行时从页帧分配器取得镜像页，`LoadedUserProgram` 持有并释放这些页帧；当前统一入口地址就是镜像 `virtual_start`，将来 ELF 加载器提供独立入口时再单独建模 |
@@ -56,7 +58,8 @@
 | `UserMemoryRanges` | `kernel::memory` | 由进程管理提供给 syscall 上下文，描述当前用户镜像和用户栈的可访问虚拟地址范围，不包含 Linux ABI 语义 |
 | `TrapFrame`、`TaskContext` | `arch::riscv64::trap`、`arch::riscv64::context` | 布局必须与对应汇编偏移一致，属于架构现场机制，不属于调度策略 |
 | `MonotonicTime` | `kernel::clock` | 表示内核内部时钟读数，不暴露用户 ABI 布局 |
-| `LinuxTimespec`、`SyscallContext` | `kernel::syscall` | 将 Linux ABI 时间布局和当前调用的用户内存访问范围限制在 syscall 边界；进程表用内部 `ProcessWaitRequest` 保存阻塞等待状态 |
+| `LinuxTimespec`、`SyscallContext` | `kernel::syscall` | 将 Linux ABI 时间布局和当前调用的用户内存访问范围限制在 syscall 边界 |
+| `ProcessWaitRequest`、`WaitDecision` | `kernel::process::wait` | 保存进程内部的阻塞等待条件，并描述等待请求应立即返回、阻塞或报告没有匹配子进程 |
 | `ConsoleDevice`、`MmioRegion` | `device` | 定义字节收发契约和设备寄存器范围；日志、syscall 和页表映射不依赖具体 UART 驱动 |
 
 内核子模块之间的协作接口优先采用父模块范围的可见性（`pub(super)`），仅当入口需要由 crate 根调用、宏展开需要访问，或类型确实构成稳定公共解析接口时才使用更宽可见性。这使调用关系可从模块树看出，并避免把内部资源令牌伪装成通用公共 API。
@@ -81,6 +84,13 @@ flowchart TD
     TrapHandler --> Syscall[syscall Linux ABI]
     TrapHandler --> Process[process 进程管理]
     Syscall --> Process[process 进程管理]
+    Syscall --> Fork[process::fork]
+    Syscall --> Wait[process::wait]
+    Syscall --> Exit[process::exit]
+    TrapHandler --> Exit
+    Fork --> Process
+    Wait --> Process
+    Exit --> Process
     Memory[memory Sv39] --> Frames
     Memory --> Address
     Frames -->|清零页帧时换算虚拟地址| Address
@@ -102,7 +112,7 @@ flowchart TD
 - 架构模块提供机制，不决定批处理、进程选择或 Linux syscall 行为。
 - `trap_handler` 是运行时陷入路由层：架构汇编保存和恢复现场并调用陷入协调器；协调器识别原因，将 U-mode 环境调用交给 syscall 处理函数，将定时器与用户异常交给进程管理。它不持有进程状态或实现 syscall ABI。
 - `syscall` 是 Linux ABI 到内核能力的适配与协调层：它解码调用、校验参数，直接调用所需的进程、内存、时钟或设备接口，并负责返回值和用户现场推进。它不直接访问进程表或实现调度策略。
-- `process` 拥有进程状态、创建/退出生命周期和调度策略；它只提供内核语义接口，不解析 Linux syscall 编号、参数或 errno。
+- `process` 拥有进程状态、资源和调度策略；`creation`、`fork`、`wait`、`exit` 分别管理初始创建、复制创建、父子等待和退出状态变化。它们只提供内核语义接口，不解析 Linux syscall 编号、参数或 errno。
 - 页帧分配器管理物理页，不依赖堆、地址空间、进程或用户程序；其元数据使用固定容量区间表，避免堆初始化前的循环依赖。清零页帧时仅依赖 `memory::address` 的纯地址换算，不调用页表生命周期或地址空间接口。
 - `memory::address` 负责 Sv39 地址规则与内核地址换算，不验证映射是否已建立。调用方必须根据启动阶段和地址空间契约保证地址可访问；需要地址换算的内核模块直接调用该子模块，不通过 `memory` 增设纯转发函数。
 - `memory::page` 只依赖 Rust 核心整数运算，集中维护基础页大小和页对齐规则；堆对象对齐仍由 `kernel::heap` 按其任意对齐语义单独处理。
@@ -121,7 +131,9 @@ flowchart TD
 
 早期阶段把原先混合用户态启动与栈生命周期的 `user_mode.rs` 移至进程管理模块，并将栈 backing 收拢到栈子模块；syscall 使用进程分发前提供的地址范围，不再反向查询进程表。页表机制保留在 `kernel::memory`，只读映射诊断拆到 `memory::page_table_log`。启动初始化从 `main.rs` 移入 `kernel::startup`，入口文件只保留 ABI 入口和 panic handler。这些拆分保留既有控制流和资源生命周期。
 
-本轮将导出的 `supervisor_trap_handler` 和运行时陷入路由移至 `kernel::trap_handler`，并明确 syscall 层的协调职责。陷入处理器把 U-mode 环境调用交给 `kernel::syscall`；syscall 直接调用进程、内存、时钟和设备接口，处理返回现场及进程控制，不再通过 `SyscallOutcome` 中转。`process` 不导入 syscall 类型，等待状态仍由进程内部的 `ProcessWaitRequest` 表示，并通过窄接口提供当前用户内存范围、fork、wait、退出、让出和定时器操作。汇编入口符号保持 `supervisor_trap_handler` 不变，因此不需要改变 `trap.S` 的调用约定。
+此前将导出的 `supervisor_trap_handler` 和运行时陷入路由移至 `kernel::trap_handler`，并明确 syscall 层负责协调 ABI 操作。陷入处理器把 U-mode 环境调用交给 `kernel::syscall`；syscall 直接调用进程、内存、时钟和设备接口，处理返回现场及进程控制，不再通过 `SyscallOutcome` 中转。汇编入口符号保持 `supervisor_trap_handler` 不变，因此不需要改变 `trap.S` 的调用约定。
+
+本轮把进程创建相关的 `fork` 从通用 `creation` 中分离到 `process::fork`，把正常退出和异常终止收拢到 `process::exit`，并让 syscall 直接调用 `process::fork`、`process::wait` 和 `process::exit` 的窄接口。`ProcessWaitRequest` 与 `WaitDecision` 收拢到 `process::wait`；进程表和调度器继续由 `process` 核心模块持有，退出模块只改变生命周期状态并请求调度，资源回收仍由调度器在切换地址空间和栈后负责。这样 ABI 参数和 errno 留在 syscall，父子关系与资源生命周期留在进程子模块。
 
 本轮将 `kernel::memory` 从单文件模块整理为 `memory/mod.rs` 目录模块，以便与已有的页表日志子模块共同组织后续内存职责。进程栈模块仍负责栈的页帧分配、所有权和释放；`memory` 仅接收栈映射描述并建立页表映射，避免把进程资源生命周期移入地址空间机制。
 
