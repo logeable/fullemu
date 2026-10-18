@@ -3,7 +3,7 @@
 
 //! 作为 PID 1 启动并监督交互式 shell。
 
-pub fn main() {
+pub fn main(_arguments: fullemu_user::UserArguments) {
     fullemu_user::println!("fullemu init：启动用户态 shell");
     let mut shell_pid = start_shell();
 
@@ -39,7 +39,7 @@ fn start_shell() -> isize {
         fullemu_user::syscall::exit(1);
     }
     if child_pid == 0 {
-        let error = fullemu_user::syscall::exec("/bin/shell");
+        let error = fullemu_user::syscall::exec("shell", &[]);
         fullemu_user::println!("init: exec shell 失败，errno={}", -error);
         fullemu_user::syscall::exit(127);
     }

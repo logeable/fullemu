@@ -9,8 +9,12 @@ const LINUX_EXECVE_SYSCALL: usize = 221;
 const LINUX_WAIT4_SYSCALL: usize = 260;
 const LINUX_SIGCHLD: usize = 17;
 const CLOCK_MONOTONIC: usize = 1;
-const EXEC_PATH_BUFFER_SIZE: usize = 128;
+const EXEC_PROGRAM_NAME_BUFFER_SIZE: usize = 128;
 const LINUX_ENAMETOOLONG: isize = 36;
+const LINUX_E2BIG: isize = 7;
+const LINUX_EINVAL: isize = 22;
+const MAX_EXEC_ARGUMENT_COUNT: usize = 32;
+const MAX_EXEC_ARGUMENT_BYTES: usize = 4096;
 
 /// Linux RISC-V 64 位 ABI 的单调时间结构。
 #[repr(C)]
@@ -136,21 +140,51 @@ pub fn fork() -> isize {
     result
 }
 
-/// 替换当前进程为 `/bin/<程序名>` 中的嵌入式程序；成功后不返回，失败返回负的 Linux errno。
-pub fn exec(program_path: &str) -> isize {
-    if program_path.len() >= EXEC_PATH_BUFFER_SIZE {
+/// 按程序名替换当前进程；程序名作为 `argv[0]`，其余切片依次作为参数。
+///
+/// 参数字符串和总参数数据量受内核栈大小限制；成功后不返回，失败返回负的 Linux errno。
+pub fn exec(program_name: &str, arguments: &[&str]) -> isize {
+    if program_name.len() >= EXEC_PROGRAM_NAME_BUFFER_SIZE {
         return -LINUX_ENAMETOOLONG;
     }
-    let mut path = [0u8; EXEC_PATH_BUFFER_SIZE];
-    path[..program_path.len()].copy_from_slice(program_path.as_bytes());
+    if arguments.len() + 1 > MAX_EXEC_ARGUMENT_COUNT {
+        return -LINUX_E2BIG;
+    }
 
-    let mut result = path.as_mut_ptr() as isize;
-    // 安全性：路径缓冲区在 ecall 期间位于当前用户栈且以 NUL 结尾；本封装只传空 argv 和 envp。
+    let mut name = [0u8; EXEC_PROGRAM_NAME_BUFFER_SIZE];
+    name[..program_name.len()].copy_from_slice(program_name.as_bytes());
+    let mut argument_bytes = [0u8; MAX_EXEC_ARGUMENT_BYTES];
+    let mut argument_pointers = [0usize; MAX_EXEC_ARGUMENT_COUNT + 1];
+    argument_pointers[0] = name.as_ptr() as usize;
+    let mut bytes_used = 0usize;
+    for (argument_index, argument) in arguments.iter().enumerate() {
+        if argument.as_bytes().contains(&0) {
+            return -LINUX_EINVAL;
+        }
+        let Some(argument_size) = argument.len().checked_add(1) else {
+            return -LINUX_E2BIG;
+        };
+        let Some(argument_end) = bytes_used.checked_add(argument_size) else {
+            return -LINUX_E2BIG;
+        };
+        if argument_end > argument_bytes.len() {
+            return -LINUX_E2BIG;
+        }
+
+        argument_pointers[argument_index + 1] = argument_bytes[bytes_used..].as_ptr() as usize;
+        argument_bytes[bytes_used..bytes_used + argument.len()]
+            .copy_from_slice(argument.as_bytes());
+        argument_bytes[bytes_used + argument.len()] = 0;
+        bytes_used = argument_end;
+    }
+
+    let mut result = name.as_mut_ptr() as isize;
+    // 安全性：程序名、参数字符串和以空指针结尾的 argv 都位于当前用户栈；内核会在切换地址空间前复制它们。
     unsafe {
         core::arch::asm!(
             "ecall",
             inlateout("a0") result,
-            in("a1") 0usize,
+            in("a1") argument_pointers.as_ptr() as usize,
             in("a2") 0usize,
             in("a7") LINUX_EXECVE_SYSCALL,
             options(nostack)

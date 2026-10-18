@@ -6,7 +6,7 @@
 const START_MESSAGE: &[u8] = "CPU 密集任务：开始长时间计算，不主动让出 CPU。\n".as_bytes();
 const FINISH_MESSAGE: &[u8] = "CPU 密集任务：计算完成，即将结束。\n".as_bytes();
 
-pub fn main() {
+pub fn main(_arguments: fullemu_user::UserArguments) {
     const ITERATIONS: u64 = 2_500_000_000;
 
     if fullemu_user::syscall::write(1, START_MESSAGE) != START_MESSAGE.len() as isize {

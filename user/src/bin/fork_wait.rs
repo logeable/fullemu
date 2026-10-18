@@ -5,7 +5,7 @@
 
 static mut FORK_MARKER: usize = 41;
 
-pub fn main() {
+pub fn main(_arguments: fullemu_user::UserArguments) {
     let child_pid = fullemu_user::syscall::fork();
     if child_pid < 0 {
         fullemu_user::println!("fork 失败：errno={}", -child_pid);

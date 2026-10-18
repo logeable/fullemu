@@ -11,7 +11,7 @@ const MESSAGES: [&[u8]; 3] = [
     "协作任务 A：第 3 步\n".as_bytes(),
 ];
 
-pub fn main() {
+pub fn main(_arguments: fullemu_user::UserArguments) {
     for message in MESSAGES {
         if syscall::write(1, message) != message.len() as isize {
             syscall::exit(1);

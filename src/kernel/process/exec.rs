@@ -8,11 +8,13 @@ use super::{ProcessState, PROCESSES};
 pub(in crate::kernel) enum ExecError {
     Resources,
     InvalidImage,
+    ArgumentsTooLarge,
 }
 
 /// 在保留 PID、父子关系和内核栈的同时，替换当前进程的程序、用户栈和地址空间。
 pub(in crate::kernel) fn replace_current_process(
     program_index: usize,
+    arguments: &[alloc::vec::Vec<u8>],
     frame: &mut TrapFrame,
 ) -> Result<(), ExecError> {
     let program = match super::super::user_program::load(program_index) {
@@ -24,7 +26,14 @@ pub(in crate::kernel) fn replace_current_process(
     let Some(program_end) = program.virtual_start.checked_add(program.image_size) else {
         return Err(ExecError::InvalidImage);
     };
-    let user_stack = super::UserStack::allocate().map_err(|_| ExecError::Resources)?;
+    let mut user_stack = super::UserStack::allocate().map_err(|_| ExecError::Resources)?;
+    let user_stack_top = match user_stack.initialize_arguments(arguments) {
+        Ok(stack_pointer) => stack_pointer,
+        Err(super::stack::StackError::ArgumentsTooLarge) => {
+            return Err(ExecError::ArgumentsTooLarge);
+        }
+        Err(_) => return Err(ExecError::Resources),
+    };
     let current_index = super::current_process_index();
 
     let kernel_stack = {
@@ -71,7 +80,6 @@ pub(in crate::kernel) fn replace_current_process(
 
     let program_range = (program.virtual_start, program_end);
     let entry = program.entry;
-    let user_stack_top = user_stack.top();
     let (old_address_space, old_program_image, old_user_stack) = {
         let processes = unsafe { &mut *core::ptr::addr_of_mut!(PROCESSES) };
         let process = processes

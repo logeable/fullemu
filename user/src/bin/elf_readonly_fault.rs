@@ -5,7 +5,7 @@
 
 static READ_ONLY_VALUE: u64 = 0x1234_5678_9abc_def0;
 
-pub fn main() {
+pub fn main(_arguments: fullemu_user::UserArguments) {
     fullemu_user::println!("ELF 权限示例：只读数据为 {:#x}", READ_ONLY_VALUE);
     fullemu_user::println!("现在尝试写入 ELF 只读数据，应触发 StoreAmoPageFault");
 

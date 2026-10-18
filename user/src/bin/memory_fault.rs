@@ -5,7 +5,7 @@
 
 const SUPERVISOR_IMAGE_SLOT_ADDRESS: usize = 0x8041_0000;
 
-pub fn main() {
+pub fn main(_arguments: fullemu_user::UserArguments) {
     fullemu_user::println!(
         "内存隔离示例：尝试从 U-mode 直接读取内核物理地址 {:#010x}",
         SUPERVISOR_IMAGE_SLOT_ADDRESS

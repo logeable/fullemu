@@ -10,6 +10,9 @@ _start:
     la      gp, __global_pointer$
     .option pop
 
+    /* 把内核构造的初始用户栈地址传给共用 Rust 入口，供程序读取 argc 和 argv。 */
+    mv      a0, sp
+
     /* 用户主体通过系统调用输出文本并结束当前任务，不应返回到此处。 */
     call    user_main
 

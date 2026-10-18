@@ -3,7 +3,7 @@
 
 //! 验证 PID 1 接管并回收父进程退出后留下的孤儿进程。
 
-pub fn main() {
+pub fn main(_arguments: fullemu_user::UserArguments) {
     let child_pid = fullemu_user::syscall::fork();
     if child_pid < 0 {
         fullemu_user::println!("孤儿回收测试 fork 失败：errno={}", -child_pid);

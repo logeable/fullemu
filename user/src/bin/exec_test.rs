@@ -3,7 +3,7 @@
 
 //! 验证子进程通过 exec 替换映像，并由父进程回收退出状态。
 
-pub fn main() {
+pub fn main(_arguments: fullemu_user::UserArguments) {
     let child_pid = fullemu_user::syscall::fork();
     if child_pid < 0 {
         fullemu_user::println!("exec 测试 fork 失败：errno={}", -child_pid);
@@ -11,15 +11,15 @@ pub fn main() {
     }
 
     if child_pid == 0 {
-        let missing_program = fullemu_user::syscall::exec("/bin/no_such_program");
+        let missing_program = fullemu_user::syscall::exec("no_such_program", &[]);
         if missing_program != -2 {
             fullemu_user::println!("exec 错误路径返回异常：{}", missing_program);
             fullemu_user::syscall::exit(4);
         }
         fullemu_user::println!("exec 不存在的程序返回 ENOENT，当前程序继续运行");
 
-        fullemu_user::println!("exec 测试子进程：即将替换为 exec_target");
-        let result = fullemu_user::syscall::exec("/bin/exec_target");
+        fullemu_user::println!("exec 测试子进程：即将替换为 argv_test");
+        let result = fullemu_user::syscall::exec("argv_test", &["alpha", "two words"]);
         fullemu_user::println!("exec 失败：errno={}", -result);
         fullemu_user::syscall::exit(2);
     }

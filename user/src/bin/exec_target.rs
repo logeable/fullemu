@@ -3,7 +3,7 @@
 
 //! 作为 exec 测试目标，验证内核装入了另一份程序映像。
 
-pub fn main() -> i32 {
+pub fn main(_arguments: fullemu_user::UserArguments) -> i32 {
     fullemu_user::println!("exec_target：新映像已开始运行");
     23
 }

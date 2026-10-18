@@ -2,6 +2,7 @@
 
 use crate::arch::riscv64::trap::TrapFrame;
 use crate::device::console;
+use alloc::vec::Vec;
 
 const LINUX_WRITE_SYSCALL: usize = 64;
 const LINUX_READ_SYSCALL: usize = 63;
@@ -17,7 +18,9 @@ const STDIN_FILE_DESCRIPTOR: usize = 0;
 const STDOUT_FILE_DESCRIPTOR: usize = 1;
 const STDERR_FILE_DESCRIPTOR: usize = 2;
 const CLOCK_MONOTONIC: usize = 1;
-const MAX_EXEC_PATH_LENGTH: usize = 128;
+const MAX_EXEC_PROGRAM_NAME_LENGTH: usize = 128;
+const MAX_EXEC_ARGUMENT_COUNT: usize = 32;
+const MAX_EXEC_ARGUMENT_BYTES: usize = 4096;
 
 /// Linux RISC-V 64 位 ABI 的 `timespec` 内存布局。
 #[repr(C)]
@@ -32,6 +35,7 @@ struct LinuxTimespec {
 #[derive(Clone, Copy)]
 #[repr(isize)]
 enum LinuxErrno {
+    TooBig = 7,
     Again = 11,
     BadFileDescriptor = 9,
     Child = 10,
@@ -123,19 +127,23 @@ pub(super) fn handle_user_environment_call(frame: &mut TrapFrame) -> *mut TrapFr
 }
 
 fn execve(context: SyscallContext, arguments: [usize; 5], frame: &mut TrapFrame) -> *mut TrapFrame {
-    if arguments[1] != 0 || arguments[2] != 0 {
+    if arguments[2] != 0 {
         return return_to_user(frame, LinuxErrno::InvalidArgument.return_value());
     }
 
-    let mut path = [0u8; MAX_EXEC_PATH_LENGTH];
-    let path_length = match copy_exec_path(context, arguments[0], &mut path) {
+    let mut program_name = [0u8; MAX_EXEC_PROGRAM_NAME_LENGTH];
+    let program_name_length = match copy_exec_program_name(context, arguments[0], &mut program_name)
+    {
         Ok(length) => length,
         Err(error) => return return_to_user(frame, error.return_value()),
     };
-    let path = &path[..path_length];
-    let Some(program_name) = path.strip_prefix(b"/bin/") else {
-        return return_to_user(frame, LinuxErrno::NoEntry.return_value());
+    let program_name = &program_name[..program_name_length];
+
+    let program_arguments = match copy_exec_arguments(context, arguments[1]) {
+        Ok(arguments) => arguments,
+        Err(error) => return return_to_user(frame, error.return_value()),
     };
+
     let Ok(program_name) = core::str::from_utf8(program_name) else {
         return return_to_user(frame, LinuxErrno::NoEntry.return_value());
     };
@@ -143,7 +151,7 @@ fn execve(context: SyscallContext, arguments: [usize; 5], frame: &mut TrapFrame)
         return return_to_user(frame, LinuxErrno::NoEntry.return_value());
     };
 
-    match super::process::exec::replace_current_process(program_index, frame) {
+    match super::process::exec::replace_current_process(program_index, &program_arguments, frame) {
         Ok(()) => super::process::resume_user(frame),
         Err(super::process::exec::ExecError::Resources) => {
             return_to_user(frame, LinuxErrno::NoMemory.return_value())
@@ -151,13 +159,79 @@ fn execve(context: SyscallContext, arguments: [usize; 5], frame: &mut TrapFrame)
         Err(super::process::exec::ExecError::InvalidImage) => {
             return_to_user(frame, LinuxErrno::ExecFormat.return_value())
         }
+        Err(super::process::exec::ExecError::ArgumentsTooLarge) => {
+            return_to_user(frame, LinuxErrno::TooBig.return_value())
+        }
     }
 }
 
-fn copy_exec_path(
+fn copy_exec_arguments(
+    context: SyscallContext,
+    vector_address: usize,
+) -> Result<Vec<Vec<u8>>, LinuxErrno> {
+    let mut arguments = Vec::new();
+    if vector_address == 0 {
+        return Ok(arguments);
+    }
+    if vector_address % core::mem::align_of::<usize>() != 0 {
+        return Err(LinuxErrno::Fault);
+    }
+
+    let mut total_bytes = 0;
+    for argument_index in 0..=MAX_EXEC_ARGUMENT_COUNT {
+        let vector_offset = argument_index
+            .checked_mul(core::mem::size_of::<usize>())
+            .ok_or(LinuxErrno::Fault)?;
+        let slot_address = vector_address
+            .checked_add(vector_offset)
+            .ok_or(LinuxErrno::Fault)?;
+        if !context.contains_program_or_stack_buffer(slot_address, core::mem::size_of::<usize>()) {
+            return Err(LinuxErrno::Fault);
+        }
+
+        // 安全性：完整指针槽已验证位于当前进程可读的程序段或用户栈，并满足自然对齐。
+        let argument_address: usize =
+            unsafe { super::memory::user_access::read_user_value(slot_address) };
+        if argument_address == 0 {
+            return Ok(arguments);
+        }
+        if argument_index == MAX_EXEC_ARGUMENT_COUNT {
+            return Err(LinuxErrno::TooBig);
+        }
+
+        let mut argument = Vec::new();
+        loop {
+            if total_bytes == MAX_EXEC_ARGUMENT_BYTES {
+                return Err(LinuxErrno::TooBig);
+            }
+            let Some(byte_address) = argument_address.checked_add(argument.len()) else {
+                return Err(LinuxErrno::Fault);
+            };
+            if !context.contains_program_or_stack_buffer(byte_address, 1) {
+                return Err(LinuxErrno::Fault);
+            }
+
+            // 安全性：逐字节验证字符串位于当前进程可读的程序段或用户栈后再读取。
+            let byte = unsafe { super::memory::user_access::read_user_byte(byte_address) };
+            total_bytes += 1;
+            if byte == 0 {
+                break;
+            }
+            argument.try_reserve(1).map_err(|_| LinuxErrno::NoMemory)?;
+            argument.push(byte);
+        }
+
+        arguments.try_reserve(1).map_err(|_| LinuxErrno::NoMemory)?;
+        arguments.push(argument);
+    }
+
+    unreachable!("exec argv 遍历必定遇到空指针或达到参数上限")
+}
+
+fn copy_exec_program_name(
     context: SyscallContext,
     address: usize,
-    destination: &mut [u8; MAX_EXEC_PATH_LENGTH],
+    destination: &mut [u8; MAX_EXEC_PROGRAM_NAME_LENGTH],
 ) -> Result<usize, LinuxErrno> {
     for (offset, byte) in destination.iter_mut().enumerate() {
         let Some(user_address) = address.checked_add(offset) else {

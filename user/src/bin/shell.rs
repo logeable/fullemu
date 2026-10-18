@@ -4,10 +4,11 @@
 //! 提供最小交互式命令行，命令在用户态解析和执行。
 
 const MAX_COMMAND_LENGTH: usize = 128;
+const MAX_COMMAND_ARGUMENT_COUNT: usize = 16;
 const BACKSPACE: &[u8] = b"\x08 \x08";
 const BUILTIN_COMMANDS: &[&str] = &["help", "uptime", "exit"];
 
-pub fn main() {
+pub fn main(_arguments: fullemu_user::UserArguments) {
     fullemu_user::println!("fullemu 用户态 shell");
     fullemu_user::println!("输入 help 查看内置命令，或输入程序名运行嵌入式程序。");
 
@@ -56,22 +57,31 @@ fn execute_command(command: &[u8]) {
         return;
     }
 
-    let name_length = command
-        .iter()
-        .position(u8::is_ascii_whitespace)
-        .unwrap_or(command.len());
-    let name = &command[..name_length];
-    let arguments = trim_ascii_whitespace(&command[name_length..]);
-    if !arguments.is_empty() {
-        fullemu_user::println!("shell: 当前不支持命令参数");
+    let Ok(command) = core::str::from_utf8(command) else {
+        fullemu_user::println!("shell: 命令必须是 UTF-8 文本");
         return;
+    };
+    let mut tokens = [""; MAX_COMMAND_ARGUMENT_COUNT + 1];
+    let mut token_count = 0;
+    for token in command.split_ascii_whitespace() {
+        if token_count == tokens.len() {
+            fullemu_user::println!("shell: 参数数量过多");
+            return;
+        }
+        tokens[token_count] = token;
+        token_count += 1;
     }
+    let name = tokens[0];
+    let arguments = &tokens[1..token_count];
 
     match name {
-        b"help" => print_commands(),
-        b"uptime" => print_uptime(),
-        b"exit" => fullemu_user::syscall::exit(0),
-        _ => run_program(name),
+        "help" if arguments.is_empty() => print_commands(),
+        "uptime" if arguments.is_empty() => print_uptime(),
+        "exit" if arguments.is_empty() => fullemu_user::syscall::exit(0),
+        "help" | "uptime" | "exit" => {
+            fullemu_user::println!("shell: 内置命令不接受参数");
+        }
+        _ => run_program(name, arguments),
     }
 }
 
@@ -80,12 +90,13 @@ fn print_commands() {
     for command in BUILTIN_COMMANDS {
         fullemu_user::println!("  {}", command);
     }
-    fullemu_user::println!("直接输入嵌入式程序名运行，例如 compute；当前不支持参数。");
+    fullemu_user::println!("直接输入程序名运行；参数以空格分隔，不支持引号和转义。");
 }
 
-fn run_program(program_name: &[u8]) {
+fn run_program(program_name: &str, arguments: &[&str]) {
     if program_name.is_empty()
         || !program_name
+            .as_bytes()
             .iter()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b'_' | b'-'))
     {
@@ -93,28 +104,14 @@ fn run_program(program_name: &[u8]) {
         return;
     }
 
-    let mut path = [0u8; 128];
-    let prefix = b"/bin/";
-    let path_length = prefix.len() + program_name.len();
-    if path_length >= path.len() {
-        fullemu_user::println!("shell: 程序名过长");
-        return;
-    }
-    path[..prefix.len()].copy_from_slice(prefix);
-    path[prefix.len()..path_length].copy_from_slice(program_name);
-    let Ok(path) = core::str::from_utf8(&path[..path_length]) else {
-        fullemu_user::println!("shell: 程序名不是有效的 ASCII 文本");
-        return;
-    };
-
     let child_pid = fullemu_user::syscall::fork();
     if child_pid < 0 {
         fullemu_user::println!("shell: fork 失败，errno={}", -child_pid);
         return;
     }
     if child_pid == 0 {
-        let error = fullemu_user::syscall::exec(path);
-        fullemu_user::println!("shell: 无法启动 {}，errno={}", path, -error);
+        let error = fullemu_user::syscall::exec(program_name, arguments);
+        fullemu_user::println!("shell: 无法启动 {}，errno={}", program_name, -error);
         fullemu_user::syscall::exit(127);
     }
 
@@ -124,7 +121,7 @@ fn run_program(program_name: &[u8]) {
         fullemu_user::println!("shell: wait 子进程失败，errno={}", -waited_pid);
         return;
     }
-    fullemu_user::println!("{} 已退出，wait 状态={:#x}", path, status);
+    fullemu_user::println!("{} 已退出，wait 状态={:#x}", program_name, status);
 }
 
 fn print_uptime() {

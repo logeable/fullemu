@@ -61,7 +61,10 @@ pub(super) fn create_process(program_index: usize) -> Result<ProcessId, ProcessC
         Some(program) => program,
         None => return Err(ProcessCreationError::ProgramMissing),
     };
-    let user_stack = UserStack::allocate().map_err(ProcessCreationError::UserStack)?;
+    let mut user_stack = UserStack::allocate().map_err(ProcessCreationError::UserStack)?;
+    let user_stack_top = user_stack
+        .initialize_arguments(&[])
+        .map_err(ProcessCreationError::UserStack)?;
     let kernel_stack = KernelStack::allocate().map_err(ProcessCreationError::KernelStack)?;
     let program_end = program
         .virtual_start
@@ -70,7 +73,7 @@ pub(super) fn create_process(program_index: usize) -> Result<ProcessId, ProcessC
 
     let user_stack_range = user_stack.range();
     let kernel_stack_range = kernel_stack.range();
-    let initial_frame = TrapFrame::for_user_entry(program.entry, user_stack.top());
+    let initial_frame = TrapFrame::for_user_entry(program.entry, user_stack_top);
     let initial_frame_pointer = kernel_stack.trap_frame_pointer();
     let user_stack_mapping = super::super::memory::UserStackMapping {
         virtual_start: user_stack.start(),

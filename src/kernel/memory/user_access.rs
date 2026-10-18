@@ -17,6 +17,21 @@ pub(in crate::kernel) unsafe fn read_user_byte(address: usize) -> u8 {
     value
 }
 
+/// 在短暂允许 S-mode 访问 U 页面期间读取一个已验证的用户值。
+///
+/// # Safety
+///
+/// 调用方必须保证 `address` 对 `T` 对齐，并且完整的 `T` 位于当前任务可读的用户区域内。
+pub(in crate::kernel) unsafe fn read_user_value<T: Copy>(address: usize) -> T {
+    // 安全性：SUM 仅在下面这一次用户地址读取期间开启，避免扩大内核访问 U 页的窗口。
+    set_sum(true);
+    // 安全性：调用方保证地址对齐且整个值位于当前用户已映射区域内。
+    let value = unsafe { core::ptr::read_volatile(address as *const T) };
+    // 安全性：结束单次用户内存访问后立即清除 SUM，恢复内核默认访问限制。
+    set_sum(false);
+    value
+}
+
 /// 在短暂允许 S-mode 访问 U 页面期间写入一个已验证的用户值。
 ///
 /// # Safety

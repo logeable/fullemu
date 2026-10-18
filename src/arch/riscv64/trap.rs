@@ -113,7 +113,7 @@ pub struct TrapFrame {
 const _: () = assert!(core::mem::size_of::<TrapFrame>() == 288);
 
 impl TrapFrame {
-    /// 为不接收启动参数的独立用户程序构造陷入帧。
+    /// 为用户程序构造陷入帧；栈顶指向内核准备的初始进程栈数据。
     pub fn for_user_entry(entry_address: usize, stack_pointer: usize) -> Self {
         let mut registers = [0; 32];
         registers[2] = stack_pointer;

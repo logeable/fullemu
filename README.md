@@ -1,6 +1,6 @@
 # fullemu
 
-fullemu 是一个以可读性和教学为优先的 Rust 操作系统项目。当前实现从 QEMU RISC-V `virt` 平台启动，将独立构建的 no_std RV64 ELF 用户程序装入 U-mode。内核默认启动用户态 `init`，由它启动并监督 shell；shell 支持输入、内置命令，以及通过 `fork`、`exec`、`wait` 前台运行嵌入式用户程序。内核解析静态 `ET_EXEC` 的 `PT_LOAD` 段，为代码、只读数据和可写数据建立对应的 Sv39 权限，并实现 Linux RISC-V syscall 的有限子集。程序镜像页由进程单独持有。源码按内核职责和稳定概念组织，阶段编号只用于文档中的教学脉络。
+fullemu 是一个以可读性和教学为优先的 Rust 操作系统项目。当前实现从 QEMU RISC-V `virt` 平台启动，将独立构建的 no_std RV64 ELF 用户程序装入 U-mode。内核默认启动用户态 `init`，由它启动并监督 shell；shell 支持输入、内置命令，以及通过 `fork`、`exec`、`wait` 前台运行嵌入式用户程序并传递空格分隔的参数。内核解析静态 `ET_EXEC` 的 `PT_LOAD` 段，为代码、只读数据和可写数据建立对应的 Sv39 权限，并实现 Linux RISC-V syscall 的有限子集。程序镜像页由进程单独持有。源码按内核职责和稳定概念组织，阶段编号只用于文档中的教学脉络。
 
 ## 快速开始
 
@@ -14,7 +14,7 @@ make run
 
 内核默认启动 `init`，再由它启动 shell。可以通过 `make run BOOT_PROGRAM=fork_wait` 选择其他用户程序作为内核入口，便于直接运行单项实验。当前 shell 可通过输入程序名启动其他嵌入式用户程序；批量启动所有用户程序的旧 batch 模式已移除。
 
-`make build` 会先构建独立的 `user/` 程序，再由内核构建脚本把 ELF 文件嵌入内核。用户程序使用共同虚拟区域 `0x40000000`，链接脚本按页分离可执行代码、只读数据和可写数据；内核装载器解析 ELF 程序头并将各段复制到独立页帧。当前只支持静态 RV64 little-endian `ET_EXEC`，不支持动态链接、PIE、文件系统或命令行参数。`user/target/riscv64gc-unknown-none-elf/release/user-programs.manifest` 记录程序名和 ELF 路径。以 `disabled-` 开头的 bin 源文件会被 `make build-user` 忽略；新增或移除其他 `user/src/bin/` 程序时，镜像清单会随 `make build-user` 更新。若只需编译不含用户程序的内核，可运行 `make build-kernel` 或直接运行 `cargo build --target riscv64gc-unknown-none-elf`。当前 syscall 仅实现有限 Linux ABI 子集，不代表已兼容完整 Linux 用户态。按 `Ctrl-C` 结束 QEMU。
+`make build` 会先构建独立的 `user/` 程序，再由内核构建脚本把 ELF 文件嵌入内核。用户程序使用共同虚拟区域 `0x40000000`，链接脚本按页分离可执行代码、只读数据和可写数据；内核装载器解析 ELF 程序头并将各段复制到独立页帧。当前只支持静态 RV64 little-endian `ET_EXEC`，不支持动态链接、PIE 或文件系统。shell 可将空格分隔的命令参数传入新程序，暂不支持引号、转义和非空环境变量。`user/target/riscv64gc-unknown-none-elf/release/user-programs.manifest` 记录程序名和 ELF 路径。以 `disabled-` 开头的 bin 源文件会被 `make build-user` 忽略；新增或移除其他 `user/src/bin/` 程序时，镜像清单会随 `make build-user` 更新。若只需编译不含用户程序的内核，可运行 `make build-kernel` 或直接运行 `cargo build --target riscv64gc-unknown-none-elf`。当前 syscall 仅实现有限 Linux ABI 子集，不代表已兼容完整 Linux 用户态。按 `Ctrl-C` 结束 QEMU。
 
 若 QEMU 可执行文件不在 PATH，可运行 `make run QEMU=/path/to/qemu-system-riscv64`。也可以单独运行 `make build-user` 构建用户程序。
 
@@ -68,4 +68,5 @@ make run
 - [第 47 阶段：用户态 init 启动并监督 shell](docs/phase-47-user-init.md) 记录 PID 1 的用户态服务启动、shell 重启和孤儿进程回收。
 - [第 48 阶段：shell 前台执行嵌入式程序](docs/phase-48-shell-program-execution.md) 记录 shell 如何通过 fork、exec、wait 启动命令程序并返回提示符。
 - [第 49 阶段：嵌入式 RV64 ELF 装载](docs/phase-49-elf-loading.md) 记录静态 ELF 程序头校验、段复制、BSS 清零和按段权限建立用户映射。
+- [第 50 阶段：execve 参数传递](docs/phase-50-exec-argv.md) 记录 argv 校验、复制和新进程初始栈布局，以及 shell 的简单参数拆分。
 - [项目原则与代码规范](docs/development-principles.md) 是设计和协作规范。
