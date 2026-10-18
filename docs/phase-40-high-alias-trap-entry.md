@@ -20,7 +20,7 @@
 
 - `make build` 成功，格式检查和差异空白检查通过。
 - `make run LOG_LEVEL=debug` 应打印高地址陷入入口；shell 启动后执行 `help`，确认 syscall 经该入口返回。
-- `make run BOOT_MODE=batch BATCH_EXCLUDED_BINS=shell LOG_LEVEL=info` 应完成批处理，包括 `cpu_hog` 被定时器抢占、其他任务得到运行机会并最终退出。
+- `make run LOG_LEVEL=info` 后输入 `cpu_hog`，应能观察到用户程序持续占用 CPU 时仍由定时器进入高地址陷入入口并恢复 shell。
 
 ## 后续连接
 

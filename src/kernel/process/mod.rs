@@ -14,7 +14,7 @@ use stack::{KernelStack, UserStack};
 
 const BOOT_PROGRAM_NAME: &str = match option_env!("FULLEMU_BOOT_PROGRAM") {
     Some(name) => name,
-    None => "shell",
+    None => "init",
 };
 const SSTATUS_SPP: usize = 1 << 8;
 // 按 QEMU virt 的时间基准将时间片固定为 10 ms。
@@ -92,35 +92,10 @@ pub(super) fn run_boot_program() -> ! {
         panic!("用户程序清单中没有入口程序：{BOOT_PROGRAM_NAME}");
     };
 
-    let mut program_indices = Vec::new();
-    if program_indices.try_reserve_exact(1).is_err() {
-        panic!("无法为入口程序索引分配内核堆空间");
-    }
-    program_indices.push(program_index);
-    start_programs(program_indices);
+    start_program(program_index);
 }
 
-/// 同时装入并调度构建清单中的全部程序。
-pub(super) fn run_batch_programs() -> ! {
-    let program_count = super::user_program::count();
-    if program_count == 0 {
-        panic!("批处理程序清单为空");
-    }
-
-    let mut program_indices = Vec::new();
-    if program_indices.try_reserve_exact(program_count).is_err() {
-        panic!("无法为批处理程序索引分配内核堆空间");
-    }
-    program_indices.extend(0..program_count);
-
-    start_programs(program_indices);
-}
-
-fn start_programs(program_indices: Vec<usize>) -> ! {
-    if program_indices.is_empty() {
-        panic!("启动进程列表不能为空");
-    }
-
+fn start_program(program_index: usize) -> ! {
     // 安全性：启动页表仍保持活动；新建进程页表映射内核高半区、启动栈和 RAM 直接映射区。
     unsafe {
         core::arch::asm!("csrw sie, zero", options(nostack));
@@ -135,53 +110,9 @@ fn start_programs(program_indices: Vec<usize>) -> ! {
         }
     }
 
-    let program_count = program_indices.len();
-    for program_index in program_indices.iter().copied() {
-        if let Err(error) = creation::create_process(program_index) {
-            panic!(
-                "用户进程 {} 创建失败：{}",
-                program_index,
-                error.description()
-            );
-        }
+    if let Err(error) = creation::create_process(program_index) {
+        panic!("入口用户进程创建失败：{}", error.description());
     }
-    drop(program_indices);
-
-    let mut kernel_stacks = Vec::new();
-    if kernel_stacks.try_reserve_exact(program_count).is_err() {
-        panic!("无法为共享内核栈映射分配内核堆空间");
-    }
-    // 安全性：进程创建已完成且启动中断仍关闭；每个内核栈的页帧所有权由进程资源记录持有。
-    let processes = unsafe { &*core::ptr::addr_of!(PROCESSES) };
-    for process in processes.iter() {
-        let Some(resources) = process.resources.as_ref() else {
-            panic!("进程 {} 的资源在启动时不存在", process.id.index());
-        };
-        let stack = &resources.kernel_stack;
-        let range = stack.range();
-        kernel_stacks.push(super::memory::KernelStackMapping {
-            virtual_start: range.0,
-            physical_start: stack.physical_start(),
-            size: range.1 - range.0,
-        });
-    }
-    let processes = unsafe { &mut *core::ptr::addr_of_mut!(PROCESSES) };
-    for process in processes.iter_mut() {
-        let Some(resources) = process.resources.as_mut() else {
-            panic!("进程 {} 的资源在启动时不存在", process.id.index());
-        };
-        if let Err(error) = super::memory::address_space::map_kernel_stacks(
-            &mut resources.address_space,
-            &kernel_stacks,
-        ) {
-            panic!(
-                "进程 {} 的内核栈映射失败：{}",
-                process.id.index(),
-                error.description()
-            );
-        }
-    }
-    drop(kernel_stacks);
 
     set_process_state(0, ProcessState::Running);
     if let Err(error) = activate_process_address_space(0) {
@@ -197,7 +128,7 @@ fn start_programs(program_indices: Vec<usize>) -> ! {
     log_process_address_spaces();
     crate::klog_debug!("已启用 Sv39 用户/内核页权限边界");
     crate::klog_debug!("S-mode 陷入入口位于内核高半区：{trap_entry:#018x}");
-    crate::klog_info!("启动 {} 个用户进程；定时器中断保持调度响应", program_count);
+    crate::klog_info!("启动入口用户进程；定时器中断保持调度响应");
 
     arm_next_timer();
     crate::arch::riscv64::interrupt::enable_supervisor_timer();

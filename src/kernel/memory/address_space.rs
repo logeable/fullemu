@@ -271,18 +271,6 @@ fn map_kernel_section(
     Ok(())
 }
 
-/// 让一个进程页表能访问调度切换期间可能仍在使用的任一内核栈。
-pub(in crate::kernel) fn map_kernel_stacks(
-    address_space: &mut AddressSpace,
-    stacks: &[KernelStackMapping],
-) -> Result<(), PageTableError> {
-    let root_table = address_space.root_table()?;
-    for stack in stacks {
-        map_kernel_stack(root_table, *stack)?;
-    }
-    Ok(())
-}
-
 fn map_kernel_stack(
     root_table: *mut PageTable,
     stack: KernelStackMapping,
@@ -357,12 +345,6 @@ pub struct AddressSpace {
 impl AddressSpace {
     pub(super) const fn root_address(&self) -> usize {
         self.root_address
-    }
-
-    fn root_table(&mut self) -> Result<*mut PageTable, PageTableError> {
-        let virtual_address = super::address::physical_to_kernel_virtual(self.root_address)
-            .ok_or(PageTableError::InvalidRootTable)?;
-        Ok(virtual_address as *mut PageTable)
     }
 }
 

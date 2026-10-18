@@ -28,11 +28,9 @@
 make fmt-check
 make build
 make run
-make build BOOT_MODE=batch
-make run BOOT_MODE=batch
 ```
 
-shell 模式应从 `0x80400000` 进入并显示提示符。batch 模式日志中的每个任务入口都应为 `0x80400000`，计算、I/O 和协作程序应正常运行；`memory_fault` 访问 `0x80410000` 时应触发 `LoadPageFault`，且其他任务继续执行。
+当前入口默认启动 init 和 shell；可输入 `compute`、`io` 等程序名执行相应用户程序。历史 batch 实验中各程序的入口均为 `0x80400000`，`memory_fault` 访问 `0x80410000` 时触发 `LoadPageFault`。
 
 构建时指定 `LOG_LEVEL=debug` 可查看每个任务的页表根地址及合并后的映射区间。每条映射包含虚拟范围、物理范围和权限标记：`S/U` 表示特权级，`R/W/X` 分别表示读、写和执行权限。例如，用户程序映射在各任务中有相同的虚拟范围，但物理范围不同。
 

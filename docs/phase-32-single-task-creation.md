@@ -38,11 +38,10 @@ shell 已经可以接受用户输入，但还不能启动一个新的嵌入式�
 ```sh
 make fmt-check
 make build
-make run BOOT_MODE=shell LOG_LEVEL=info
-make run BOOT_MODE=batch LOG_LEVEL=info
+make run LOG_LEVEL=info
 ```
 
-启动后应正常进入 shell 或批处理。shell 模式仍只启动配置的入口程序；批处理仍装入清单中构建时保留的所有程序。调试日志可检查每个任务的创建记录和独立页表。
+当前启动后应进入 init 和 shell；输入 `compute` 可观察 shell 通过进程创建路径启动子进程。调试日志可检查每个任务的创建记录和独立页表。
 
 ## 当前限制
 

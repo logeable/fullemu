@@ -4,19 +4,11 @@ use std::path::{Path, PathBuf};
 
 const IMAGE_MANIFEST_ENV: &str = "FULLEMU_USER_IMAGE_MANIFEST";
 const BOOT_PROGRAM_ENV: &str = "FULLEMU_BOOT_PROGRAM";
-const BOOT_MODE_ENV: &str = "FULLEMU_BOOT_MODE";
 
 fn main() {
     println!("cargo:rustc-link-arg-bin=fullemu=-Tlinker.ld");
     println!("cargo:rerun-if-env-changed={IMAGE_MANIFEST_ENV}");
     println!("cargo:rerun-if-env-changed={BOOT_PROGRAM_ENV}");
-    println!("cargo:rerun-if-env-changed={BOOT_MODE_ENV}");
-
-    let boot_mode = env::var(BOOT_MODE_ENV).unwrap_or_else(|_| "shell".to_owned());
-    if boot_mode != "shell" && boot_mode != "batch" {
-        panic!("{BOOT_MODE_ENV} 只支持 shell 或 batch，当前值为：{boot_mode}");
-    }
-    println!("cargo:rustc-env={BOOT_MODE_ENV}={boot_mode}");
 
     let output_directory =
         PathBuf::from(env::var_os("OUT_DIR").expect("Cargo 应为构建脚本提供 OUT_DIR"));

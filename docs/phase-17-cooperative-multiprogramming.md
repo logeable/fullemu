@@ -10,7 +10,7 @@
 
 ## 实现范围
 
-- `user/src/lib.rs` 提供共用的 `no_std` 运行时，统一链接入口汇编、panic handler、`print!`/`println!` 输出宏和入口适配。输出宏经 `core::fmt::Write` 与 `write` syscall 写入 fd 1，不需要堆分配；内核验证缓冲区位于当前程序镜像或任务栈内。格式化输出错误由便捷宏忽略，需要检查时可调用 `fullemu_user::print`。panic handler 输出 panic 信息后通过 `exit(1)` 结束当前任务，避免协作式调度下自旋占用 CPU。每个 bin 用普通 Rust `pub fn main()` 表达程序主体，并调用 `fullemu_user::user_entry!(main)` 生成汇编所需的 `user_main` C ABI 入口；该适配入口在 `main` 正常返回后通过 `exit(0)` 结束程序。程序需要报告非零状态时仍可显式调用 `syscall::exit(状态码)`。
+- `user/src/lib.rs` 提供共用的 `no_std` 运行时，统一链接入口汇编、panic handler、`print!`/`println!` 输出宏和入口适配。输出宏经 `core::fmt::Write` 与 `write` syscall 写入 fd 1，不需要堆分配；内核验证缓冲区位于当前程序镜像或任务栈内。格式化输出错误由便捷宏忽略，需要检查时可调用 `fullemu_user::print`。panic handler 输出 panic 信息后通过 `exit(1)` 结束当前任务，避免协作式调度下自旋占用 CPU。每个 bin 调用 `fullemu_user::user_entry!(main)` 生成汇编所需的 `user_main` C ABI 入口；本阶段入口接受普通 Rust `pub fn main()`，并默认以 `exit(0)` 结束。后续[第 46 阶段](phase-46-exec.md)扩展为同时接受 `main() -> i32`，把整数返回值作为进程退出状态；需要时仍可显式调用 `syscall::exit(状态码)`。
 - `user/build.rs` 按用户 bin 源文件名排序，为每个 bin 分配连续的 64 KiB 槽位，并通过 Cargo 的 bin 专属链接参数将程序链接到它将要运行的地址。`user/linker.ld` 断言入口等于该地址且程序不超过槽位。
 - `make build-user` 把 ELF 转成原始二进制，并生成包含程序名、链接基址、入口偏移和镜像路径的清单。内核构建脚本检查清单地址与槽位顺序；加载器在运行时再次比较链接基址和目标槽位，再复制镜像。
 - 每个任务拥有独立的 16 KiB U-mode 栈、16 KiB S-mode 陷入栈和完整 `TrapFrame`。陷入时保存当前帧；恢复时可以返回另一个任务的帧。

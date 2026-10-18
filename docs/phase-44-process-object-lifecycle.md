@@ -20,7 +20,7 @@
 - `AddressSpace` 作为显式所有权值从创建器传给进程对象；删除 memory 内部用全局数组索引管理根页表的路径。
 - 进程退出后，调度器先切换到下一个进程页表，再释放旧页表、镜像和用户栈。旧内核栈放入单项延迟释放槽，并在另一进程的 trap 栈上释放。
 - 最后一个进程退出时，在其陷入处理仍可访问的启动栈映射中切换到独立引导栈，再激活保留的引导页表；完成切换后才回收该进程的全部资源并进入空闲等待。
-- shell 模式和批处理模式继续共用单进程创建器；批处理仍按原顺序运行，shell 仍作为启动进程。
+- 当时的 shell 模式和批处理模式共用单进程创建器；后续 batch 启动入口已移除，当前内核只创建入口进程，其余进程由用户态按需派生。
 
 ## 资源所有权与销毁顺序
 
@@ -57,14 +57,13 @@ Process
 
 ```sh
 make fmt-check
-make build BOOT_MODE=shell LOG_LEVEL=info
-make run BOOT_MODE=shell LOG_LEVEL=info
-make run BOOT_MODE=batch LOG_LEVEL=info
+make build LOG_LEVEL=info
+make run LOG_LEVEL=info
 ```
 
 运行中观察：
 
-1. shell 模式仍启动 shell；批处理模式仍装入清单中的程序并由定时器轮转调度。
+1. init 启动 shell；在 shell 中运行程序名会创建子进程并由定时器调度。
 2. `exit` 和用户异常会结束当前进程；日志显示切换后回收页表、镜像和栈资源。
 3. 最后一个进程结束时，内核切换到引导回收上下文并进入空闲等待，不再恢复已退出的用户态现场。
 4. 进程创建路径先构造完整资源，再追加 `Process` 记录；所有资源由该对象单点持有。

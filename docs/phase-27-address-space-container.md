@@ -27,10 +27,10 @@
 ```sh
 make fmt-check
 make build
-make run BOOT_MODE=batch LOG_LEVEL=debug
+make run LOG_LEVEL=debug
 ```
 
-QEMU 应继续启动批处理中的用户任务并输出各地址空间页表映射；任务退出后，其页表树应能按原有流程回收，之后对已清空槽位的激活请求应返回“地址空间尚未初始化”。
+当前可在 shell 中运行用户程序，调试日志输出其地址空间页表映射；进程退出后页表树按原有流程回收。历史批处理实验还验证了对已清空槽位的激活请求会返回“地址空间尚未初始化”。
 
 ## 后续连接
 

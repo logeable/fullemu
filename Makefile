@@ -4,9 +4,16 @@ OBJCOPY ?= rust-objcopy
 READOBJ ?= rust-readobj
 PYTHON ?= python3
 LOG_LEVEL ?= info
-BOOT_PROGRAM ?= shell
-BOOT_MODE ?= shell
-BATCH_EXCLUDED_BINS ?= shell
+BOOT_PROGRAM ?= init
+ifneq ($(origin BOOT_MODE),undefined)
+$(error BOOT_MODE 已移除；请使用 BOOT_PROGRAM 指定单个入口程序，并通过 shell 按需运行其他程序)
+endif
+ifneq ($(origin BATCH_PROGRAMS),undefined)
+$(error BATCH_PROGRAMS 已移除；请通过 shell 按需运行用户程序)
+endif
+ifneq ($(origin BATCH_EXCLUDED_BINS),undefined)
+$(error BATCH_EXCLUDED_BINS 已移除；当前会构建用户程序清单中的全部程序)
+endif
 TARGET := riscv64gc-unknown-none-elf
 HOST_TARGET := $(shell rustc -vV | sed -n 's/^host: //p')
 KERNEL := target/$(TARGET)/release/fullemu
@@ -14,9 +21,6 @@ USER_BUILD_DIR := user/target/$(TARGET)/release
 USER_IMAGE_MANIFEST := $(USER_BUILD_DIR)/user-programs.manifest
 USER_BIN_SOURCES := $(filter-out user/src/bin/disabled-%,$(wildcard user/src/bin/*.rs))
 USER_BIN_NAMES := $(patsubst user/src/bin/%.rs,%,$(USER_BIN_SOURCES))
-ifeq ($(BOOT_MODE),batch)
-USER_BIN_NAMES := $(filter-out $(BATCH_EXCLUDED_BINS),$(USER_BIN_NAMES))
-endif
 USER_BIN_FLAGS := $(foreach bin,$(USER_BIN_NAMES),--bin $(bin))
 
 .PHONY: all build build-kernel build-user inspect-kernel-elf run test-fdt clean fmt fmt-check
@@ -24,10 +28,10 @@ USER_BIN_FLAGS := $(foreach bin,$(USER_BIN_NAMES),--bin $(bin))
 all: build
 
 build: build-user
-	FULLEMU_USER_IMAGE_MANIFEST=$(USER_IMAGE_MANIFEST) FULLEMU_LOG_LEVEL=$(LOG_LEVEL) FULLEMU_BOOT_PROGRAM=$(BOOT_PROGRAM) FULLEMU_BOOT_MODE=$(BOOT_MODE) $(CARGO) build --release --target $(TARGET)
+	FULLEMU_USER_IMAGE_MANIFEST=$(USER_IMAGE_MANIFEST) FULLEMU_LOG_LEVEL=$(LOG_LEVEL) FULLEMU_BOOT_PROGRAM=$(BOOT_PROGRAM) $(CARGO) build --release --target $(TARGET)
 
 build-kernel:
-	FULLEMU_USER_IMAGE_MANIFEST= FULLEMU_LOG_LEVEL=$(LOG_LEVEL) FULLEMU_BOOT_PROGRAM=$(BOOT_PROGRAM) FULLEMU_BOOT_MODE=$(BOOT_MODE) $(CARGO) build --release --target $(TARGET)
+	FULLEMU_USER_IMAGE_MANIFEST= FULLEMU_LOG_LEVEL=$(LOG_LEVEL) FULLEMU_BOOT_PROGRAM=$(BOOT_PROGRAM) $(CARGO) build --release --target $(TARGET)
 
 build-user:
 	cd user && $(CARGO) build --release --target $(TARGET) $(USER_BIN_FLAGS)

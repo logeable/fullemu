@@ -34,7 +34,7 @@
 1. `make build` 成功。
 2. `make inspect-kernel-elf` 报告入口 `0x80200000`，启动段 VMA=LMA，内核主体 VMA 位于 `0xffffffc0...`，且 `VMA - 0xffffffc000000000 = LMA`。
 3. `make run` 能完成启动、打印高半区内核段范围并进入用户态 shell；输入 `help` 后 shell 正常响应。
-4. `make run BOOT_MODE=batch BATCH_EXCLUDED_BINS=shell` 中，计算、协作、CPU 密集、I/O、非法指令和非法内存访问任务都按预期运行或终止，最终报告所有任务退出。
+4. 在 `make run` 启动的 shell 中依次运行 `compute`、`io`、`cpu_hog` 和 `memory_fault`，确认用户进程执行、定时器陷入和异常结束路径都能在高半区内核中工作。
 
 ## 后续连接
 

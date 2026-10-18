@@ -168,15 +168,20 @@ pub(super) fn notify_child_exit(child_index: usize) {
     child.wait_collected = true;
 }
 
-/// 父进程退出后解除子进程的父子关联；孤儿退出时不再保留可等待状态。
+/// 父进程退出后将其子进程重新托管给 PID 1；PID 1 退出时才解除父子关联。
 pub(super) fn orphan_children(parent_id: ProcessId) {
+    let init_id = ProcessId::from_index(0);
+    let new_parent_id = (parent_id != init_id).then_some(init_id);
     let processes = unsafe { &mut *core::ptr::addr_of_mut!(PROCESSES) };
     for child in processes.iter_mut() {
         if child.parent_id != Some(parent_id) {
             continue;
         }
-        child.parent_id = None;
-        if child.state == ProcessState::Exited && child.resources.is_none() {
+        child.parent_id = new_parent_id;
+        if new_parent_id.is_none()
+            && child.state == ProcessState::Exited
+            && child.resources.is_none()
+        {
             child.state = ProcessState::Reaped;
         }
     }

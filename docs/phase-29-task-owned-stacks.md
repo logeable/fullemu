@@ -29,11 +29,10 @@
 ```sh
 make fmt-check
 make build
-make run BOOT_MODE=batch LOG_LEVEL=debug
-make run BOOT_MODE=shell LOG_LEVEL=info
+make run LOG_LEVEL=debug
 ```
 
-批处理模式应显示每个任务独立的栈物理 backing、共同的用户栈虚拟范围，以及页表中用户栈的 `URW-` 映射；内核栈地址落在共同的 `SRWX` 内核映射中。任务应继续完成定时器切换、系统调用、退出及异常隔离。shell 模式应仍能通过 `read` 和 `write` 系统调用交互。
+当前 shell 模式可通过 `read` 和 `write` 系统调用交互，并启动具有独立用户栈、内核栈和地址空间的子进程。历史批处理实验还检查了多个同时运行任务的栈 backing 与定时器切换。
 
 ## 后续连接
 

@@ -23,7 +23,8 @@
 - 新页表激活后，进程对象替换地址空间、程序镜像、用户栈和程序范围；PID、父子关系、内核栈及陷入帧所在地址保持不变。
 - 新陷入帧从目标程序入口和新用户栈顶开始执行，并重置旧程序寄存器现场。
 - 旧地址空间切离后销毁其页表，再释放旧镜像页和用户栈页。
-- `exec_test` 创建子进程，让子进程 exec 到 `exec_target`；父进程 wait 并验证目标程序的退出码。
+- 用户程序入口支持 `main() -> i32`：正常返回的整数作为进程退出状态；`main() -> ()` 继续默认以 0 退出。`exec_target` 返回 23，入口将其交给 Linux `exit` syscall。
+- `exec_test` 创建子进程，让子进程 exec 到 `exec_target`；父进程 wait 并验证目标程序返回的退出码。
 
 ## 暂不实现
 
@@ -35,12 +36,12 @@
 
 ```sh
 make fmt-check
-make build BOOT_PROGRAM=exec_test BOOT_MODE=shell LOG_LEVEL=info
-make run BOOT_PROGRAM=exec_test BOOT_MODE=shell LOG_LEVEL=info
+make build BOOT_PROGRAM=exec_test LOG_LEVEL=info
+make run BOOT_PROGRAM=exec_test LOG_LEVEL=info
 ```
 
-运行时应看到子进程调用 exec、`exec_target` 的新映像开始运行并以状态码 23 退出；父进程 wait 后打印 `exec 验证通过`。若路径不存在或参数不受支持，调用应返回 errno，原程序仍能继续执行。
+运行时应看到子进程调用 exec、`exec_target` 的新映像开始运行并从 `main() -> i32` 返回 23；`user_entry!` 应将该状态传给 `exit`，父进程 wait 后打印 `exec 验证通过`。若路径不存在或参数不受支持，调用应返回 errno，原程序仍能继续执行。
 
 ## 后续连接
 
-该接口让用户态 init 能派生子进程并 exec 成 shell，也让 shell 能 exec 为独立命令程序。后续可增加参数和环境数组复制，再将内嵌镜像查找替换为文件系统路径加载。
+该接口让用户态 init 能派生子进程并 exec 成 shell，也让 shell 能 exec 为独立命令程序。下一阶段由 init 组合现有 `fork`、`exec` 和 `wait` 管理 shell 生命周期；之后可增加参数和环境数组复制，再将内嵌镜像查找替换为文件系统路径加载。

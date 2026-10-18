@@ -39,11 +39,10 @@
 ```sh
 make fmt-check
 make build
-make run BOOT_MODE=shell LOG_LEVEL=info
-make run BOOT_MODE=batch LOG_LEVEL=info
+make run LOG_LEVEL=info
 ```
 
-shell 应从 `0x40000000` 正常启动并能执行 `help`。batch 中各用户程序的入口日志应为 `0x40000000`，计算、I/O、协作任务和长时间 CPU 任务应保持原有行为；`memory_fault` 访问 `0x80410000` 时应报告 U-mode 页故障，其他就绪任务仍应运行完成。页表调试输出中，用户镜像虚拟范围应是 `0x40000000..0x40010000`，物理范围仍落在固定加载槽位。
+shell 应从 `0x40000000` 正常启动并能执行 `help`。输入 `compute`、`io` 等命令可启动嵌入式程序；`memory_fault` 访问 `0x80410000` 时应报告 U-mode 页故障。页表调试输出中，用户镜像虚拟范围应是 `0x40000000..0x40010000`，物理范围由当前进程持有的页帧 backing。
 
 ## 后续连接
 

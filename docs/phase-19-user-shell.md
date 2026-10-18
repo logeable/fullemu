@@ -12,7 +12,7 @@
 
 - 内核按名字从嵌入式程序清单中查找 `shell`，只装入并启动该程序。其他用户 bin 仍参与构建和嵌入，但当前不会在启动时批量运行。
 - 用户态 shell 维护固定 128 字节命令缓冲区，逐字节调用 `read`，回显可打印输入，支持退格、回车和换行，并忽略超过缓冲区容量的字符。
-- `help` 显示内置命令；`uptime` 通过 `clock_gettime(CLOCK_MONOTONIC)` 显示从内核计时起点开始经过的秒数。
+- `help` 显示内置命令；`uptime` 通过 `clock_gettime(CLOCK_MONOTONIC)` 显示从内核计时起点开始经过的秒数；`exit` 结束当前 shell，由用户态 init 再次启动它。
 - `read` 使用 Linux RISC-V syscall 编号 63，只接受 fd 0，并将数据写入当前任务的用户栈缓冲区；首字节通过 UART 轮询阻塞等待，之后读取当前已经到达的字节并允许短读。
 - `clock_gettime` 使用 Linux RISC-V syscall 编号 113，只支持 `CLOCK_MONOTONIC`，输出 64 位 `timespec` 到当前任务用户栈。时钟基于 QEMU `virt` 的 10 MHz `time` 计数器，不提供日历时间。
 - 任务索引和程序清单索引已分别传入系统调用分发，以便默认任务槽位 0 能运行清单中位置不固定的 shell。
@@ -42,4 +42,6 @@ make run
 
 ## 后续连接
 
-当前 shell 证明用户态程序能接收输入并解释命令，但无法启动其他程序。后续先通过[第 20 阶段](phase-20-sv39-user-protection.md)建立内存保护边界；在独立地址空间和相应的任务生命周期机制成熟后，再围绕“输入一个程序名并在运行时启动它”建立动态执行能力，初期仍可从嵌入式程序清单选择程序，无需先实现文件系统。
+本阶段最初只实现了内置命令。后续建立了独立地址空间和进程生命周期机制；当前 shell 的前台嵌入式程序执行见[第 48 阶段](phase-48-shell-program-execution.md)，仍不需要文件系统。
+
+后续阶段已经增加了用户态 init 和受限 `exec`。当前默认启动路径由 init 作为 PID 1 创建 shell 子进程；init 的监督与重启策略见[第 47 阶段](phase-47-user-init.md)。

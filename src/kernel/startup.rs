@@ -26,7 +26,7 @@ impl StartupCheckError {
     }
 }
 
-/// 按固定顺序初始化内核，并根据构建配置启动用户进程。
+/// 按固定顺序初始化内核，再启动构建配置指定的入口用户进程。
 pub(crate) fn run(hart_id: usize, device_tree_physical_address: usize) -> ! {
     crate::kernel::clock::initialize();
 
@@ -38,7 +38,7 @@ pub(crate) fn run(hart_id: usize, device_tree_physical_address: usize) -> ! {
     initialize_memory_subsystems(&memory_info);
     log_device_tree_if_trace_enabled(&fdt);
 
-    start_configured_processes()
+    crate::kernel::process::run_boot_program()
 }
 
 /// 将固件传入的 FDT 物理地址解析为只读视图。
@@ -165,15 +165,6 @@ fn initialize_memory_subsystems(memory_info: &FdtMemoryInfo) {
     }
     if let Err(error) = run_startup_checks() {
         panic!("内核启动自检失败：{}", error.description());
-    }
-}
-
-/// 在构建配置指定的模式下启动用户进程。
-fn start_configured_processes() -> ! {
-    match env!("FULLEMU_BOOT_MODE") {
-        "shell" => crate::kernel::process::run_boot_program(),
-        "batch" => crate::kernel::process::run_batch_programs(),
-        _ => unreachable!("build.rs 已验证启动模式"),
     }
 }
 

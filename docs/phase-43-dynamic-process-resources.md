@@ -37,11 +37,10 @@
 ```sh
 make fmt-check
 make build
-make run BOOT_MODE=shell LOG_LEVEL=info
-make run BOOT_MODE=batch LOG_LEVEL=info
+make run LOG_LEVEL=info
 ```
 
-shell 模式应启动入口程序，批处理模式应按清单启动所有程序，原有 `exit` 和定时器调度行为应保持。增加镜像条目不再遇到 8 项构建上限；超出可用运行资源时应通过现有任务创建错误路径报告失败，而不是覆盖相邻镜像槽。
+当前启动应进入 init 和 shell；输入程序名可按需创建进程。增加嵌入式镜像不再遇到 8 项构建上限；超出可用运行资源时应通过现有任务创建错误路径报告失败，而不是覆盖相邻镜像槽。批量启动清单的旧行为已移除。
 
 ## 当前限制与后续连接
 

@@ -44,12 +44,11 @@ RISC-V Linux 没有独立的 `fork` syscall 编号。用户态 `fork()` 以 fork
 
 ```sh
 make fmt-check
-make build BOOT_PROGRAM=fork_wait BOOT_MODE=shell LOG_LEVEL=info
-make run BOOT_PROGRAM=fork_wait BOOT_MODE=shell LOG_LEVEL=info
-make run BOOT_MODE=batch LOG_LEVEL=info
+make build BOOT_PROGRAM=fork_wait LOG_LEVEL=info
+make run BOOT_PROGRAM=fork_wait LOG_LEVEL=info
 ```
 
-shell 模式中的 `fork_wait` 程序应打印父子分支、成功等待及私有数据保持原值的信息；退出日志应显示子进程资源被回收。批处理模式应继续运行构建清单中的程序，允许程序动态追加子进程。
+`fork_wait` 程序应打印父子分支、成功等待及私有数据保持原值的信息；退出日志应显示子进程资源被回收。shell 也可直接输入 `fork_wait` 运行该实验。历史 batch 启动路径已移除。
 
 ## 后续连接
 

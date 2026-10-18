@@ -27,11 +27,10 @@
 
 ```sh
 make fmt-check
-make build BOOT_MODE=batch
-make run BOOT_MODE=batch
+make run BOOT_PROGRAM=memory_fault
 ```
 
-串口应报告多个用户任务已装入。内存隔离示例尝试读取 `0x80400000` 后应触发 `LoadPageFault`，`stval` 为 `0x80400000`；随后其他就绪任务仍应执行并结束。默认 `make run` 应仍启动 shell。
+历史 batch 验收中，内存隔离示例尝试读取 `0x80400000` 后触发 `LoadPageFault`。当前可直接运行 `memory_fault` 验证该进程因非法访问退出；`make run` 则启动 init 和 shell，shell 会继续运行。
 
 ## 后续连接
 

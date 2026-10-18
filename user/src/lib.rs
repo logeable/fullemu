@@ -34,6 +34,24 @@ pub fn print(arguments: core::fmt::Arguments<'_>) -> core::fmt::Result {
     core::fmt::Write::write_fmt(&mut output, arguments)
 }
 
+/// 定义用户程序 `main` 返回值到进程退出状态的转换。
+pub trait UserMainReturn {
+    /// 转换为传给 Linux `exit` 系统调用的状态码。
+    fn into_exit_code(self) -> i32;
+}
+
+impl UserMainReturn for () {
+    fn into_exit_code(self) -> i32 {
+        0
+    }
+}
+
+impl UserMainReturn for i32 {
+    fn into_exit_code(self) -> i32 {
+        self
+    }
+}
+
 /// 将格式化文本写入标准输出。
 #[macro_export]
 macro_rules! print {
@@ -55,14 +73,14 @@ macro_rules! println {
 
 /// 为独立用户程序生成启动汇编所需的 C ABI 入口。
 ///
-/// 用户程序提供普通 Rust `main` 函数；该入口负责调用它，并在其正常返回后以状态码 0 退出。
+/// 用户程序提供返回 `()` 或 `i32` 的普通 Rust `main` 函数；该入口把返回值转换为进程退出状态。
 #[macro_export]
 macro_rules! user_entry {
     ($main:path) => {
         #[no_mangle]
         pub extern "C" fn user_main() -> ! {
-            $main();
-            $crate::syscall::exit(0)
+            let exit_code = $crate::UserMainReturn::into_exit_code($main());
+            $crate::syscall::exit(exit_code)
         }
     };
 }
