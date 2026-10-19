@@ -45,7 +45,7 @@
 | `block` | 定义单个 512 字节扇区的读写接口和扇区数量查询 | 不依赖具体 transport、设备驱动或文件系统 |
 | `driver::virtio` | 组织 VirtIO transport、通用队列机制和具体设备驱动 | 子模块按 VirtIO 设备协议归属；与 UART 等非 VirtIO 驱动并列 |
 | `driver::virtio::mmio` | 探测现代 VirtIO MMIO transport，并封装通用状态、特性、队列寄存器和有范围检查的 MMIO 访问 | 启动层提供 FDT 解析出的 MMIO 物理范围；不依赖具体 VirtIO 设备类型 |
-| `driver::virtio::block` | 实现 VirtIO 块设备容量解析、块请求格式和扇区读写 | 通过 `VirtioMmioTransport` 访问设备配置和寄存器；通过 `driver::virtio::virtqueue` 发布缓冲区链并检查完成；请求缓冲区仍是静态单实例资源 |
+| `driver::virtio::block` | 实现 VirtIO 块设备容量解析、块请求格式和扇区读写 | 通过 `VirtioMmioTransport` 访问设备配置和寄存器；通过 `driver::virtio::virtqueue` 发布缓冲区链并检查完成；请求缓冲区仍是静态单实例资源；依赖 `memory::address` 将静态 DMA 区域的高半区虚拟地址换算为当前平台使用的物理设备地址 |
 | `driver::virtio::virtqueue` | 实现固定大小、单请求串行的 VirtIO split virtqueue 描述符链、环形区和完成轮询 | 拥有静态队列 DMA 区域；缓冲区内容及读写方向由设备驱动提供；不依赖具体 transport，由设备驱动编排队列寄存器配置和通知 |
 
 ## 关键数据类型的归属
@@ -89,6 +89,7 @@ flowchart TD
     Startup -->|解析 VirtIO transport 范围| VirtioInfo[device_tree::virtio_info]
     Startup -->|启动期扇区读取| VirtioBlock[driver::virtio::block]
     VirtioBlock --> Block[block 扇区读写契约]
+    VirtioBlock --> Address[memory::address 地址换算]
     VirtioBlock --> VirtioQueue[driver::virtio::virtqueue]
     VirtioBlock --> VirtioMmio
     Heap[heap 全局分配器] -->|连续物理页后备区| Frames
@@ -143,7 +144,7 @@ flowchart TD
 - `main` 只负责启动编排；FDT 解析、页表细节和进程状态转换分别留在各自子系统。
 - `device_tree::fdt` 只依赖核心库并返回借用式原始视图；`device_tree::memory_info` 在无堆阶段把初始化信息复制到固定容量值中。页帧分配器消费 `FdtMemoryInfo` 中的物理范围，不反向依赖内核分配器或日志。
 - `device_tree::console_info` 在无堆阶段从 `/soc` 下提取 NS16550 UART 的寄存器范围；`startup` 在首次日志输出前把寄存器范围交给 `console::initialize`，控制台模块配置当前 UART 驱动；解析器不依赖驱动，驱动也不解析 FDT。
-- `device_tree::virtio_info` 在无堆阶段收集 `/soc` 下启用的 `virtio,mmio` transport 范围；`startup` 将候选范围交给 `driver::virtio::block::VirtioBlockDevice::probe`，由块驱动调用 `driver::virtio::mmio` 探测通用 transport，再检查设备 ID 并构造设备对象。启动层负责把队列和请求缓冲区的高半区虚拟地址换算为物理地址，再通过窄参数传入驱动；驱动不依赖 FDT 或内核内存模块。块驱动负责块请求头、扇区数据、状态缓冲区以及 transport 队列寄存器编排和通知；`driver::virtio::virtqueue` 负责通用描述符链、环形区更新和完成轮询。`make run` 连接专用临时镜像验证扇区读写；该测试布局不用于普通磁盘镜像。
+- `device_tree::virtio_info` 在无堆阶段收集 `/soc` 下启用的 `virtio,mmio` transport 范围；`startup` 将候选范围交给 `driver::virtio::block::VirtioBlockDevice::probe`，由块驱动调用 `driver::virtio::mmio` 探测通用 transport，再检查设备 ID 并构造设备对象。块驱动内部取得静态队列和请求缓冲区的虚拟地址，并通过 `memory::address` 换算为当前 QEMU 平台使用的物理设备地址；因此启动层不查询 VirtIO 内部 DMA 缓冲区，也不传递队列或请求地址。该换算假设设备可直接使用物理地址，尚未引入独立 DMA 映射接口或 IOMMU 支持。块驱动负责块请求头、扇区数据、状态缓冲区以及 transport 队列寄存器编排和通知；`driver::virtio::virtqueue` 负责通用描述符链、环形区更新和完成轮询。`make run` 连接专用临时镜像验证扇区读写；该测试布局不用于普通磁盘镜像。
 - `block::BlockDevice` 为上层提供 512 字节扇区读写接口，`VirtioBlockDevice` 实现该接口。当前设备对象以可变借用串行提交请求，底层静态 DMA 队列限制为单个活动实例；正常销毁对象时复位设备并释放队列占用，超时或队列状态损坏后保留占用以防设备继续访问被复用的缓冲区。接口尚未由运行时块设备管理器持有。驱动使用引导页表保留的低地址 MMIO 恒等映射。进程页表尚未映射 VirtIO 寄存器，运行时块 I/O、设备中断和文件系统均未实现。`make run` 在独立临时双扇区镜像上验证写后读回，并在 QEMU 退出时删除该镜像。
 - Linux ABI 的数据布局由 `syscall` 持有；`clock` 只返回内部时间值，避免内核机制层依赖 syscall ABI。
 - 启动顺序必须先解析并校验 DTB、提取 RAM/固件保留范围和 DTB 自身范围，再初始化页帧分配器，最后从页帧分配器取得堆后备页；页帧分配器的元数据不能通过堆分配。
@@ -152,7 +153,7 @@ flowchart TD
 
 早期阶段把原先混合用户态启动与栈生命周期的 `user_mode.rs` 移至进程管理模块，并将栈 backing 收拢到栈子模块；syscall 使用进程分发前提供的地址范围，不再反向查询进程表。页表机制保留在 `memory`，只读映射诊断拆到 `memory::page_table_log`。启动初始化从 `main.rs` 移入 `startup`，入口文件只保留 ABI 入口和 panic handler。这些拆分保留既有控制流和资源生命周期。
 
-第 52 阶段新增 `block::BlockDevice`，以 512 字节扇区读写接口隔离上层消费者与具体硬件；`driver::virtio::block::VirtioBlockDevice` 实现该接口，持有容量和队列对象。通用现代 MMIO transport 探测与寄存器访问位于 `driver::virtio::mmio`；split virtqueue 的描述符、环形区和完成轮询位于 `driver::virtio::virtqueue`；块驱动保留块请求格式、队列寄存器编排、设备通知和扇区读写语义。队列和请求缓冲区仍为静态单实例资源，启动层在临时双扇区镜像上验证写后读回，并检查相邻扇区未被修改。运行时设备管理、多设备和并发请求留待文件系统及同步机制形成实际需求后推进。
+第 52 阶段新增 `block::BlockDevice`，以 512 字节扇区读写接口隔离上层消费者与具体硬件；`driver::virtio::block::VirtioBlockDevice` 实现该接口，持有容量和队列对象。通用现代 MMIO transport 探测与寄存器访问位于 `driver::virtio::mmio`；split virtqueue 的描述符、环形区和完成轮询位于 `driver::virtio::virtqueue`；块驱动保留块请求格式、队列寄存器编排、设备通知和扇区读写语义。队列和请求缓冲区仍为静态单实例资源，物理设备地址由驱动内部从内核高半区地址换算，启动层只负责发现 transport 并执行启动读写检查。运行时设备管理、多设备和并发请求留待文件系统及同步机制形成实际需求后推进。
 
 此前将导出的 `supervisor_trap_handler` 和运行时陷入路由移至 `trap_handler`，并明确 syscall 层负责协调 ABI 操作。陷入处理器把 U-mode 环境调用交给 `syscall`；syscall 直接调用进程、内存、时钟和设备接口，处理返回现场及进程控制，不再通过 `SyscallOutcome` 中转。汇编入口符号保持 `supervisor_trap_handler` 不变，因此不需要改变 `trap.S` 的调用约定。
 

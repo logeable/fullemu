@@ -183,13 +183,6 @@ fn check_block_device_read_write(fdt: &FdtBlob<'_>) {
         Ok(info) => info,
         Err(error) => panic!("FDT VirtIO 信息无效：{}", error.description()),
     };
-    let (queue_virtual_address, request_virtual_address) =
-        crate::driver::virtio::block::dma_virtual_addresses();
-    let queue_physical_address =
-        super::memory::address::kernel_virtual_to_physical(queue_virtual_address);
-    let request_physical_address =
-        super::memory::address::kernel_virtual_to_physical(request_virtual_address);
-
     let mut block_device = None;
     for region in info.regions() {
         let start = match usize::try_from(region.start) {
@@ -200,11 +193,10 @@ fn check_block_device_read_write(fdt: &FdtBlob<'_>) {
             Ok(size) => size,
             Err(_) => panic!("VirtIO MMIO 范围超出当前平台可寻址范围"),
         };
-        match crate::driver::virtio::block::VirtioBlockDevice::probe(
-            crate::driver::MmioRegion { start, size },
-            queue_physical_address,
-            request_physical_address,
-        ) {
+        match crate::driver::virtio::block::VirtioBlockDevice::probe(crate::driver::MmioRegion {
+            start,
+            size,
+        }) {
             Ok(Some(device)) => {
                 crate::klog_info!(
                     "VirtIO 块设备已初始化：MMIO={start:#018x}，容量={} 扇区",

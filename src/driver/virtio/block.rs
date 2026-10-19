@@ -135,11 +135,7 @@ pub(crate) struct VirtioBlockDevice {
 
 impl VirtioBlockDevice {
     /// 若该 MMIO 区域是块设备则初始化并返回设备对象；其他 VirtIO 设备返回 `Ok(None)`。
-    pub(crate) fn probe(
-        region: MmioRegion,
-        queue_physical_address: usize,
-        request_physical_address: usize,
-    ) -> Result<Option<Self>, VirtioBlockError> {
+    pub(crate) fn probe(region: MmioRegion) -> Result<Option<Self>, VirtioBlockError> {
         let Some(transport) = VirtioMmioTransport::probe(region)? else {
             return Ok(None);
         };
@@ -157,6 +153,12 @@ impl VirtioBlockDevice {
             return Err(VirtioBlockError::DeviceAlreadyInitialized);
         }
 
+        // 当前 QEMU 平台没有 IOMMU；静态 DMA 区域位于内核高半区直接映射中，设备地址等于对应物理地址。
+        let queue_physical_address = crate::memory::address::kernel_virtual_to_physical(
+            VirtioSplitQueue::dma_virtual_address(),
+        );
+        let request_physical_address =
+            crate::memory::address::kernel_virtual_to_physical(request_virtual_address());
         let (sector_count, queue) =
             match initialize_device(transport, queue_physical_address, request_physical_address) {
                 Ok(initialized) => initialized,
@@ -349,14 +351,6 @@ fn checked_dma_offset(base: usize, offset: usize) -> Result<u64, VirtioBlockErro
         .checked_add(offset)
         .ok_or(VirtioBlockError::InvalidDmaAddress)?;
     encode_dma_address(address)
-}
-
-/// 返回队列和请求 DMA 区域的内核虚拟地址，供启动层换算为物理地址。
-pub(crate) fn dma_virtual_addresses() -> (usize, usize) {
-    (
-        VirtioSplitQueue::dma_virtual_address(),
-        addr_of_mut!(REQUEST) as usize,
-    )
 }
 
 fn request_virtual_address() -> usize {

@@ -178,7 +178,7 @@ impl VirtioSplitQueue {
         QUEUE_SIZE as u32
     }
 
-    /// 返回队列 DMA 区域的内核虚拟地址，供启动层换算为物理地址。
+    /// 返回队列 DMA 区域的内核虚拟地址，供块驱动换算为设备地址。
     pub(super) fn dma_virtual_address() -> usize {
         addr_of_mut!(QUEUE_MEMORY) as usize
     }
