@@ -6,6 +6,8 @@ set -eu
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 KERNEL=${1:-"$ROOT_DIR/target/riscv64gc-unknown-none-elf/release/fullemu"}
 QEMU=${QEMU:-qemu-system-riscv64}
+PYTHON=${PYTHON:-python3}
+BLOCK_IMAGE=${BLOCK_IMAGE:-"$ROOT_DIR/target/fullemu-block-test.img"}
 
 if ! command -v "$QEMU" >/dev/null 2>&1; then
     printf 'error: QEMU executable not found: %s\n' "$QEMU" >&2
@@ -20,13 +22,16 @@ if [ ! -f "$KERNEL" ]; then
 fi
 
 cd "$ROOT_DIR"
+"$PYTHON" "$ROOT_DIR/scripts/create-block-test-image.py" "$BLOCK_IMAGE"
 exec "$QEMU" \
     -machine virt \
+    -global virtio-mmio.force-legacy=false \
     -cpu rv64 \
     -smp 1 \
     -m 128M \
     -bios default \
     -kernel "$KERNEL" \
+    -drive "if=none,file=$BLOCK_IMAGE,format=raw,id=fullemu-block" \
+    -device virtio-blk-device,drive=fullemu-block \
     -display none \
-    -serial stdio \
-    -monitor none
+    -serial mon:stdio

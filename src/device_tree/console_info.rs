@@ -4,19 +4,11 @@
 //! 解析结果不分配堆内存，也不依赖具体 UART 驱动。
 
 use super::fdt::{FdtBlob, FdtStructureError, FdtStructureEvent};
+use super::FdtDeviceRegisterRegion;
 
 const DEFAULT_ADDRESS_CELLS: u32 = 2;
 const DEFAULT_SIZE_CELLS: u32 = 1;
 const MINIMUM_UART_REGISTER_SIZE: u64 = 8;
-
-/// FDT 中一个设备寄存器的物理范围。
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct FdtDeviceRegisterRegion {
-    /// 设备寄存器的物理起始地址。
-    pub start: u64,
-    /// 设备寄存器范围的字节数。
-    pub size: u64,
-}
 
 /// UART 节点无法转换为本阶段支持的控制台启动信息。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -10,20 +10,20 @@ const UART_LINE_STATUS_OFFSET: usize = 5;
 const RECEIVER_DATA_READY: u8 = 1 << 0;
 const TRANSMITTER_EMPTY: u8 = 1 << 5;
 
-pub(super) struct Uart16550 {
+pub(crate) struct Uart16550 {
     register_base: AtomicUsize,
     register_size: AtomicUsize,
 }
 
 impl Uart16550 {
-    pub(super) const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
             register_base: AtomicUsize::new(0),
             register_size: AtomicUsize::new(0),
         }
     }
 
-    pub(super) fn initialize(&self, region: MmioRegion) {
+    pub(crate) fn initialize(&self, region: MmioRegion) {
         self.register_size.store(region.size, Ordering::Relaxed);
         self.register_base.store(region.start, Ordering::Release);
     }

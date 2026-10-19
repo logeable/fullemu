@@ -2,7 +2,7 @@
 
 use core::fmt;
 
-use crate::device::console;
+use crate::console;
 
 /// 内核日志的严重程度，顺序也表示过滤时的优先级。
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

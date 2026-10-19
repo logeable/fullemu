@@ -6,7 +6,7 @@
 
 ## 实现范围
 
-- 当时由 `arch::riscv64::console` 负责 UART 字节传输；当前该驱动已移至 `device::uart16550`，`device::console` 提供统一字节接口，`kernel::logging` 负责日志级别、调用模块名称和统一前缀。
+- 当时由 `arch::riscv64::console` 负责 UART 字节传输；当前该驱动已移至 `driver::uart16550`，`console` 提供统一字节接口，`kernel::logging` 负责日志级别、调用模块名称和统一前缀。
 - `klog_error!`、`klog_warn!`、`klog_info!`、`klog_debug!` 和 `klog_trace!` 宏通过 `module_path!()` 自动记录来源。
 - 日志格式为 `[LEVEL time=秒.微秒s module::path] message`，使用 `core::fmt` 同步写入 UART，不申请堆内存，也不引入第三方依赖。每条通过级别过滤的日志读取一次 RISC-V `time` 计数器，避免被过滤的日志产生额外计时读取。
 - 显示时间由单调递增的硬件时间计数换算而来，不是调度器周期 tick，也不是日历时间。当前按 QEMU `virt` 的 `timebase-frequency=10 MHz` 换算为秒和微秒；时间起点由平台计数器决定，不代表操作系统启动时刻。日志前缀不输出原始计数值。

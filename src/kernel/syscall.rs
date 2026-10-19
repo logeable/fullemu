@@ -1,7 +1,7 @@
 //! 实现当前内核支持的最小 Linux RISC-V 系统调用集合。
 
 use crate::arch::riscv64::trap::TrapFrame;
-use crate::device::console;
+use crate::console;
 use alloc::vec::Vec;
 
 const LINUX_WRITE_SYSCALL: usize = 64;

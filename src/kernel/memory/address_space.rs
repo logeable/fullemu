@@ -204,7 +204,7 @@ fn populate_address_space(
         )?;
     }
 
-    let console_region = crate::device::console::mmio_region();
+    let console_region = crate::console::mmio_region();
     let console_start = align_down_to_page(console_region.start);
     let console_end = align_up_to_page(
         console_region

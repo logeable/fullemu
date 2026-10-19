@@ -2,9 +2,11 @@
 
 use core::fmt;
 
-use fullemu::device_tree::console_info::{FdtConsoleInfo, FdtDeviceRegisterRegion};
+use fullemu::device_tree::console_info::FdtConsoleInfo;
 use fullemu::device_tree::fdt::{FdtBlob, FdtHeader, FdtStructureEvent};
 use fullemu::device_tree::memory_info::FdtMemoryInfo;
+use fullemu::device_tree::virtio_info::FdtVirtioInfo;
+use fullemu::device_tree::FdtDeviceRegisterRegion;
 
 use super::frame_allocator::FrameError;
 use super::heap::HeapError;
@@ -36,6 +38,7 @@ pub(crate) fn run(hart_id: usize, device_tree_physical_address: usize) -> ! {
 
     let memory_info = parse_and_log_memory_info(&fdt, device_tree_physical_address);
     initialize_memory_subsystems(&memory_info);
+    read_block_device_test_sector(&fdt);
     log_device_tree_if_trace_enabled(&fdt);
 
     crate::kernel::process::run_boot_program()
@@ -84,7 +87,7 @@ fn initialize_console(fdt: &FdtBlob<'_>) -> FdtDeviceRegisterRegion {
         Ok(size) => size,
         Err(_) => panic!("FDT UART 寄存器范围超出当前平台可寻址范围"),
     };
-    crate::device::console::initialize(crate::device::MmioRegion {
+    crate::console::initialize(crate::driver::MmioRegion {
         start: uart_start,
         size: uart_size,
     });
@@ -166,6 +169,63 @@ fn initialize_memory_subsystems(memory_info: &FdtMemoryInfo) {
     if let Err(error) = run_startup_checks() {
         panic!("内核启动自检失败：{}", error.description());
     }
+}
+
+/// 从 FDT 发现 VirtIO 块设备，读取测试镜像的第一个扇区并检查固定签名。
+fn read_block_device_test_sector(fdt: &FdtBlob<'_>) {
+    let info = match FdtVirtioInfo::parse(fdt) {
+        Ok(info) => info,
+        Err(error) => panic!("FDT VirtIO 信息无效：{}", error.description()),
+    };
+    let (queue_virtual_address, request_virtual_address) =
+        crate::driver::virtio_block::dma_virtual_addresses();
+    let queue_physical_address =
+        super::memory::address::kernel_virtual_to_physical(queue_virtual_address);
+    let request_physical_address =
+        super::memory::address::kernel_virtual_to_physical(request_virtual_address);
+
+    let mut found_block_device = false;
+    for region in info.regions() {
+        let start = match usize::try_from(region.start) {
+            Ok(start) => start,
+            Err(_) => panic!("VirtIO MMIO 地址超出当前平台可寻址范围"),
+        };
+        let size = match usize::try_from(region.size) {
+            Ok(size) => size,
+            Err(_) => panic!("VirtIO MMIO 范围超出当前平台可寻址范围"),
+        };
+        match crate::driver::virtio_block::initialize(
+            crate::driver::MmioRegion { start, size },
+            queue_physical_address,
+            request_physical_address,
+        ) {
+            Ok(true) => {
+                found_block_device = true;
+                crate::klog_info!(
+                    "VirtIO 块设备已初始化：MMIO={start:#018x}，容量={} 扇区",
+                    crate::driver::virtio_block::capacity_sectors()
+                );
+                break;
+            }
+            Ok(false) => {}
+            Err(error) => panic!("VirtIO 块设备初始化失败：{}", error.description()),
+        }
+    }
+    if !found_block_device {
+        panic!("FDT 中没有可用的 VirtIO 块设备");
+    }
+
+    let mut sector = [0; crate::driver::virtio_block::SECTOR_SIZE];
+    if let Err(error) = crate::driver::virtio_block::read_sector(0, &mut sector) {
+        panic!("读取 VirtIO 块设备扇区失败：{}", error.description());
+    }
+    if !sector.starts_with(crate::driver::virtio_block::TEST_SECTOR_SIGNATURE) {
+        panic!("VirtIO 块设备扇区内容与测试镜像签名不符");
+    }
+    crate::klog_info!(
+        "VirtIO 块设备扇区读取成功：扇区=0，签名={}",
+        HexBytes(&sector[..24])
+    );
 }
 
 /// 运行启动自检；调用前必须初始化内核堆和物理页帧分配器。

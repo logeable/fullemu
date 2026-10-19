@@ -2,7 +2,7 @@
 
 use core::fmt;
 
-use super::{uart16550::Uart16550, ConsoleDevice, MmioRegion};
+use crate::driver::{uart16550::Uart16550, ConsoleDevice, MmioRegion};
 
 static CONSOLE_DEVICE: Uart16550 = Uart16550::new();
 
