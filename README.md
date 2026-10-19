@@ -1,6 +1,6 @@
 # fullemu
 
-fullemu 是一个以可读性和教学为优先的 Rust 操作系统项目。当前实现从 QEMU RISC-V `virt` 平台启动，将独立构建的 no_std RV64 ELF 用户程序装入 U-mode。内核默认启动用户态 `init`，由它启动并监督 shell；shell 支持输入、内置命令，以及通过 `fork`、`exec`、`wait` 前台运行嵌入式用户程序并传递空格分隔的参数。内核解析静态 `ET_EXEC` 的 `PT_LOAD` 段，为代码、只读数据和可写数据建立对应的 Sv39 权限，并实现 Linux RISC-V syscall 的有限子集。启动阶段还通过 FDT 发现 VirtIO MMIO 块设备，并轮询读取测试镜像的一个扇区；文件系统和运行时块 I/O 尚未实现。程序镜像页由进程单独持有。源码按内核职责和稳定概念组织，阶段编号只用于文档中的教学脉络。
+fullemu 是一个以可读性和教学为优先的 Rust 操作系统项目。当前实现从 QEMU RISC-V `virt` 平台启动，将独立构建的 no_std RV64 ELF 用户程序装入 U-mode。内核默认启动用户态 `init`，由它启动并监督 shell；shell 支持输入、内置命令，以及通过 `fork`、`exec`、`wait` 前台运行嵌入式用户程序并传递空格分隔的参数。内核解析静态 `ET_EXEC` 的 `PT_LOAD` 段，为代码、只读数据和可写数据建立对应的 Sv39 权限，并实现 Linux RISC-V syscall 的有限子集。启动阶段还通过 FDT 发现 VirtIO MMIO 块设备，在专用临时双扇区镜像上验证扇区读写和写后读回；文件系统和运行时块 I/O 尚未实现。程序镜像页由进程单独持有。源码按内核职责和稳定概念组织，阶段编号只用于文档中的教学脉络。
 
 ## 快速开始
 
@@ -70,4 +70,5 @@ make run
 - [第 49 阶段：嵌入式 RV64 ELF 装载](docs/phase-49-elf-loading.md) 记录静态 ELF 程序头校验、段复制、BSS 清零和按段权限建立用户映射。
 - [第 50 阶段：execve 参数传递](docs/phase-50-exec-argv.md) 记录 argv 校验、复制和新进程初始栈布局，以及 shell 的简单参数拆分。
 - [第 51 阶段：VirtIO 块设备单扇区读取](docs/phase-51-virtio-block-read.md) 记录通过 FDT 发现 VirtIO MMIO transport、初始化 split virtqueue 并读取测试扇区的过程。
+- [第 52 阶段：块设备对象与扇区读写接口](docs/phase-52-block-device-object.md) 记录上层块设备契约、VirtIO 设备对象及串行扇区读写实现。
 - [项目原则与代码规范](docs/development-principles.md) 是设计和协作规范。

@@ -1,7 +1,7 @@
 //! 定义驱动共享的数据接口，并组织具体硬件驱动。
 
 pub(crate) mod uart16550;
-pub(crate) mod virtio_block;
+pub(crate) mod virtio;
 
 /// 描述设备寄存器所在的物理地址范围。
 #[derive(Clone, Copy)]

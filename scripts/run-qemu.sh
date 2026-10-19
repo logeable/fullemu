@@ -7,7 +7,26 @@ ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 KERNEL=${1:-"$ROOT_DIR/target/riscv64gc-unknown-none-elf/release/fullemu"}
 QEMU=${QEMU:-qemu-system-riscv64}
 PYTHON=${PYTHON:-python3}
-BLOCK_IMAGE=${BLOCK_IMAGE:-"$ROOT_DIR/target/fullemu-block-test.img"}
+TEMP_BLOCK_DIR=
+if [ -n "${BLOCK_IMAGE:-}" ]; then
+    if [ -e "$BLOCK_IMAGE" ]; then
+        printf 'error: refusing to overwrite existing block test image: %s\n' "$BLOCK_IMAGE" >&2
+        exit 2
+    fi
+    BLOCK_TEST_IMAGE=$BLOCK_IMAGE
+else
+    mkdir -p "$ROOT_DIR/target"
+    TEMP_BLOCK_DIR=$(mktemp -d "$ROOT_DIR/target/fullemu-block-test.XXXXXX")
+    BLOCK_TEST_IMAGE=$TEMP_BLOCK_DIR/disk.img
+fi
+
+cleanup() {
+    if [ -n "$TEMP_BLOCK_DIR" ]; then
+        rm -f "$BLOCK_TEST_IMAGE"
+        rmdir "$TEMP_BLOCK_DIR"
+    fi
+}
+trap cleanup EXIT
 
 if ! command -v "$QEMU" >/dev/null 2>&1; then
     printf 'error: QEMU executable not found: %s\n' "$QEMU" >&2
@@ -22,8 +41,8 @@ if [ ! -f "$KERNEL" ]; then
 fi
 
 cd "$ROOT_DIR"
-"$PYTHON" "$ROOT_DIR/scripts/create-block-test-image.py" "$BLOCK_IMAGE"
-exec "$QEMU" \
+"$PYTHON" "$ROOT_DIR/scripts/create-block-test-image.py" "$BLOCK_TEST_IMAGE"
+"$QEMU" \
     -machine virt \
     -global virtio-mmio.force-legacy=false \
     -cpu rv64 \
@@ -31,7 +50,7 @@ exec "$QEMU" \
     -m 128M \
     -bios default \
     -kernel "$KERNEL" \
-    -drive "if=none,file=$BLOCK_IMAGE,format=raw,id=fullemu-block" \
+    -drive "if=none,file=$BLOCK_TEST_IMAGE,format=raw,id=fullemu-block" \
     -device virtio-blk-device,drive=fullemu-block \
     -display none \
     -serial mon:stdio

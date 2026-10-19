@@ -6,6 +6,7 @@
 extern crate alloc;
 
 mod arch;
+mod block;
 pub(crate) mod clock;
 mod console;
 mod driver;
