@@ -7,6 +7,7 @@ const LINUX_EXIT_SYSCALL: usize = 93;
 const LINUX_CLONE_SYSCALL: usize = 220;
 const LINUX_EXECVE_SYSCALL: usize = 221;
 const LINUX_WAIT4_SYSCALL: usize = 260;
+const LINUX_BRK_SYSCALL: usize = 214;
 const LINUX_SIGCHLD: usize = 17;
 const CLOCK_MONOTONIC: usize = 1;
 const EXEC_PROGRAM_NAME_BUFFER_SIZE: usize = 128;
@@ -74,6 +75,23 @@ pub fn clock_gettime(time: &mut Timespec) -> isize {
             inlateout("a0") result,
             in("a1") time as *mut Timespec as usize,
             in("a7") LINUX_CLOCK_GETTIME_SYSCALL,
+            options(nostack)
+        );
+    }
+
+    result
+}
+
+/// 查询或设置当前进程的 program break；失败时原始 Linux syscall 返回旧边界。
+pub fn brk(address: usize) -> usize {
+    let mut result = address;
+
+    // 安全性：参数按 Linux RISC-V ABI 放入 a0，系统调用号 214 放入 a7。
+    unsafe {
+        core::arch::asm!(
+            "ecall",
+            inlateout("a0") result,
+            in("a7") LINUX_BRK_SYSCALL,
             options(nostack)
         );
     }

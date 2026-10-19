@@ -12,6 +12,7 @@ const LINUX_SCHED_YIELD_SYSCALL: usize = 124;
 const LINUX_CLONE_SYSCALL: usize = 220;
 const LINUX_EXECVE_SYSCALL: usize = 221;
 const LINUX_WAIT4_SYSCALL: usize = 260;
+const LINUX_BRK_SYSCALL: usize = 214;
 const LINUX_SIGCHLD: usize = 17;
 const LINUX_WNOHANG: usize = 1;
 const STDIN_FILE_DESCRIPTOR: usize = 0;
@@ -69,20 +70,22 @@ impl SyscallContext {
         }
     }
 
-    fn contains_stack_buffer(self, address: usize, length: usize) -> bool {
-        contains_range(self.user_memory.stack, address, length)
-    }
-
-    fn contains_program_or_stack_buffer(self, address: usize, length: usize) -> bool {
-        contains_range(self.user_memory.program, address, length)
-            || contains_range(self.user_memory.stack, address, length)
-    }
-
-    fn contains_writable_program_or_stack_buffer(self, address: usize, length: usize) -> bool {
+    fn contains_writable_buffer(self, address: usize, length: usize) -> bool {
         self.user_memory
             .writable_program
             .is_some_and(|range| contains_range(range, address, length))
+            || contains_range(self.user_memory.heap, address, length)
             || contains_range(self.user_memory.stack, address, length)
+    }
+
+    fn contains_readable_buffer(self, address: usize, length: usize) -> bool {
+        contains_range(self.user_memory.program, address, length)
+            || contains_range(self.user_memory.heap, address, length)
+            || contains_range(self.user_memory.stack, address, length)
+    }
+
+    fn contains_writable_user_buffer(self, address: usize, length: usize) -> bool {
+        self.contains_writable_buffer(address, length)
     }
 }
 
@@ -122,6 +125,10 @@ pub(super) fn handle_user_environment_call(frame: &mut TrapFrame) -> *mut TrapFr
         LINUX_CLONE_SYSCALL => fork(arguments, frame),
         LINUX_EXECVE_SYSCALL => execve(context, arguments, frame),
         LINUX_WAIT4_SYSCALL => wait4(context, arguments, frame),
+        LINUX_BRK_SYSCALL => return_to_user(
+            frame,
+            super::process::set_current_program_break(arguments[0]) as isize,
+        ),
         _ => return_to_user(frame, LinuxErrno::NoSystemCall.return_value()),
     }
 }
@@ -185,7 +192,7 @@ fn copy_exec_arguments(
         let slot_address = vector_address
             .checked_add(vector_offset)
             .ok_or(LinuxErrno::Fault)?;
-        if !context.contains_program_or_stack_buffer(slot_address, core::mem::size_of::<usize>()) {
+        if !context.contains_readable_buffer(slot_address, core::mem::size_of::<usize>()) {
             return Err(LinuxErrno::Fault);
         }
 
@@ -207,7 +214,7 @@ fn copy_exec_arguments(
             let Some(byte_address) = argument_address.checked_add(argument.len()) else {
                 return Err(LinuxErrno::Fault);
             };
-            if !context.contains_program_or_stack_buffer(byte_address, 1) {
+            if !context.contains_readable_buffer(byte_address, 1) {
                 return Err(LinuxErrno::Fault);
             }
 
@@ -237,7 +244,7 @@ fn copy_exec_program_name(
         let Some(user_address) = address.checked_add(offset) else {
             return Err(LinuxErrno::Fault);
         };
-        if !context.contains_program_or_stack_buffer(user_address, 1) {
+        if !context.contains_readable_buffer(user_address, 1) {
             return Err(LinuxErrno::Fault);
         }
         // 安全性：逐字节验证该地址属于当前进程的程序段或用户栈，再从当前地址空间读取。
@@ -279,8 +286,7 @@ fn wait4(context: SyscallContext, arguments: [usize; 5], frame: &mut TrapFrame) 
     } else {
         let address = arguments[1];
         if address % core::mem::align_of::<i32>() != 0
-            || !context
-                .contains_writable_program_or_stack_buffer(address, core::mem::size_of::<i32>())
+            || !context.contains_writable_user_buffer(address, core::mem::size_of::<i32>())
         {
             return return_to_user(frame, LinuxErrno::Fault.return_value());
         }
@@ -340,7 +346,7 @@ fn read(
     if count == 0 {
         return 0;
     }
-    if !context.contains_stack_buffer(buffer_address, count) {
+    if !context.contains_writable_buffer(buffer_address, count) {
         return LinuxErrno::Fault.return_value();
     }
 
@@ -380,7 +386,7 @@ fn write(
         return 0;
     }
 
-    if !context.contains_program_or_stack_buffer(buffer_address, count) {
+    if !context.contains_readable_buffer(buffer_address, count) {
         crate::klog_trace!(
             "拒绝进程 {} 的 write 缓冲区：地址={:#018x}，长度={}",
             context.process_id,
@@ -408,7 +414,7 @@ fn clock_gettime(context: SyscallContext, clock_id: usize, timespec_address: usi
 
     let timespec_size = core::mem::size_of::<LinuxTimespec>();
     if timespec_address % core::mem::align_of::<LinuxTimespec>() != 0
-        || !context.contains_stack_buffer(timespec_address, timespec_size)
+        || !context.contains_writable_buffer(timespec_address, timespec_size)
     {
         return LinuxErrno::Fault.return_value();
     }

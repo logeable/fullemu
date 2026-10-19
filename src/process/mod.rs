@@ -8,9 +8,11 @@ pub(super) mod exec;
 pub(super) mod exit;
 pub(super) mod fork;
 mod stack;
+mod user_heap;
 pub(super) mod wait;
 
 use stack::{KernelStack, UserStack};
+use user_heap::UserHeap;
 
 const BOOT_PROGRAM_NAME: &str = match option_env!("FULLEMU_BOOT_PROGRAM") {
     Some(name) => name,
@@ -68,6 +70,7 @@ struct ProcessResources {
     address_space: super::memory::AddressSpace,
     program_range: (usize, usize),
     program_image: super::user_program::LoadedUserProgram,
+    user_heap: UserHeap,
     user_stack: UserStack,
     kernel_stack: KernelStack,
 }
@@ -168,8 +171,25 @@ pub(super) fn current_user_memory_ranges() -> super::memory::UserMemoryRanges {
     super::memory::UserMemoryRanges {
         program: process.program_range,
         writable_program: process.writable_program_range,
+        heap: process.heap_range,
         stack: stack_range,
     }
+}
+
+/// 按 Linux `brk` 规则调整当前进程堆边界，失败时返回原边界。
+pub(super) fn set_current_program_break(requested_break: usize) -> usize {
+    let current_index = current_process_index();
+    let process = unsafe { &mut *core::ptr::addr_of_mut!(PROCESSES) }
+        .get_mut(current_index)
+        .unwrap_or_else(|| panic!("brk 当前进程索引无效：{current_index}"));
+    let resources = process
+        .resources
+        .as_mut()
+        .unwrap_or_else(|| panic!("brk 当前进程资源已释放：{current_index}"));
+    let stack_start = resources.user_stack.range().0;
+    resources
+        .user_heap
+        .set_break(requested_break, stack_start, &resources.address_space)
 }
 
 /// 当前进程 PID，供陷入协调器生成上下文日志。
@@ -344,6 +364,7 @@ fn set_process_state(index: usize, state: ProcessState) {
 struct ProcessSnapshot {
     program_range: (usize, usize),
     writable_program_range: Option<(usize, usize)>,
+    heap_range: (usize, usize),
 }
 
 fn process_record_or_panic(index: usize) -> ProcessSnapshot {
@@ -364,6 +385,7 @@ fn process_record_or_panic(index: usize) -> ProcessSnapshot {
     ProcessSnapshot {
         program_range: resources.program_range,
         writable_program_range: resources.program_image.writable_range(),
+        heap_range: resources.user_heap.mapped_range(),
     }
 }
 
@@ -407,6 +429,7 @@ fn reap_process_resources(index: usize, defer_kernel_stack: bool) {
     let ProcessResources {
         address_space,
         program_image,
+        user_heap,
         user_stack,
         kernel_stack,
         ..
@@ -414,6 +437,7 @@ fn reap_process_resources(index: usize, defer_kernel_stack: bool) {
     let released_page_count = super::memory::address_space::destroy_address_space(address_space)
         .unwrap_or_else(|error| panic!("回收进程 {} 的页表失败：{}", index, error.description()));
     drop(program_image);
+    drop(user_heap);
     drop(user_stack);
 
     if defer_kernel_stack {

@@ -26,6 +26,7 @@ pub(crate) fn replace_current_process(
     let Some(program_end) = program.virtual_start.checked_add(program.image_size) else {
         return Err(ExecError::InvalidImage);
     };
+    let user_heap = super::UserHeap::new(program_end);
     let mut user_stack = super::UserStack::allocate().map_err(|_| ExecError::Resources)?;
     let user_stack_top = match user_stack.initialize_arguments(arguments) {
         Ok(stack_pointer) => stack_pointer,
@@ -66,9 +67,14 @@ pub(crate) fn replace_current_process(
         frames: program.frames(),
         page_permissions: program.page_permissions(),
     };
+    let user_heap_mapping = super::super::memory::UserHeapMapping {
+        virtual_start: user_heap.mapped_range().0,
+        frames: user_heap.frames(),
+    };
     let address_space = super::super::memory::address_space::create_address_space(
         super::creation::kernel_memory_layout(),
         &user_stack_mapping,
+        &user_heap_mapping,
         kernel_stack,
         user_image_mapping,
     )
@@ -80,7 +86,7 @@ pub(crate) fn replace_current_process(
 
     let program_range = (program.virtual_start, program_end);
     let entry = program.entry;
-    let (old_address_space, old_program_image, old_user_stack) = {
+    let (old_address_space, old_program_image, old_user_heap, old_user_stack) = {
         let processes = unsafe { &mut *core::ptr::addr_of_mut!(PROCESSES) };
         let process = processes
             .get_mut(current_index)
@@ -92,9 +98,15 @@ pub(crate) fn replace_current_process(
 
         let old_address_space = core::mem::replace(&mut resources.address_space, address_space);
         let old_program_image = core::mem::replace(&mut resources.program_image, program);
+        let old_user_heap = core::mem::replace(&mut resources.user_heap, user_heap);
         let old_user_stack = core::mem::replace(&mut resources.user_stack, user_stack);
         resources.program_range = program_range;
-        (old_address_space, old_program_image, old_user_stack)
+        (
+            old_address_space,
+            old_program_image,
+            old_user_heap,
+            old_user_stack,
+        )
     };
 
     *frame = TrapFrame::for_user_entry(entry, user_stack_top);
@@ -103,6 +115,7 @@ pub(crate) fn replace_current_process(
         super::super::memory::address_space::destroy_address_space(old_address_space)
             .unwrap_or_else(|error| panic!("exec 回收旧地址空间失败：{}", error.description()));
     drop(old_program_image);
+    drop(old_user_heap);
     drop(old_user_stack);
 
     crate::klog_debug!(

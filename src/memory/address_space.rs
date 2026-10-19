@@ -7,19 +7,20 @@ use super::page_table::{
     PTE_DIRTY, PTE_EXECUTE, PTE_READ, PTE_USER, PTE_VALID, PTE_WRITE,
 };
 use super::{
-    KernelMemoryLayout, KernelSectionRange, KernelStackMapping, PageTableError, UserImageMapping,
-    UserStackMapping,
+    KernelMemoryLayout, KernelSectionRange, KernelStackMapping, PageTableError, UserHeapMapping,
+    UserImageMapping, UserStackMapping,
 };
 
 /// 为一个进程建立独立页表；失败时归还本次创建的页表树。
 pub(crate) fn create_address_space(
     kernel_layout: KernelMemoryLayout,
     user_stack: &UserStackMapping<'_>,
+    user_heap: &UserHeapMapping<'_>,
     kernel_stack: KernelStackMapping,
     user_image: UserImageMapping<'_>,
 ) -> Result<AddressSpace, PageTableError> {
     validate_kernel_layout(kernel_layout)?;
-    validate_user_mappings(kernel_layout, user_stack, user_image)?;
+    validate_user_mappings(kernel_layout, user_stack, user_heap, user_image)?;
 
     let root_frame =
         crate::frame_allocator::allocate_zeroed_frame().map_err(PageTableError::FrameAllocation)?;
@@ -36,6 +37,7 @@ pub(crate) fn create_address_space(
         root_table,
         kernel_layout,
         user_stack,
+        user_heap,
         kernel_stack,
         user_image,
     ) {
@@ -52,6 +54,7 @@ pub(crate) fn create_address_space(
 fn validate_user_mappings(
     kernel_layout: KernelMemoryLayout,
     user_stack: &UserStackMapping<'_>,
+    user_heap: &UserHeapMapping<'_>,
     user_image: UserImageMapping<'_>,
 ) -> Result<(), PageTableError> {
     let kernel_end = align_up_to_page(
@@ -126,6 +129,36 @@ fn validate_user_mappings(
         }
     }
 
+    let heap_size = user_heap
+        .frames
+        .len()
+        .checked_mul(PAGE_SIZE)
+        .ok_or(PageTableError::InvalidRange)?;
+    let heap_end = user_heap
+        .virtual_start
+        .checked_add(heap_size)
+        .ok_or(PageTableError::InvalidRange)?;
+    if !is_page_aligned(user_heap.virtual_start)
+        || heap_end > super::address::SV39_USER_ADDRESS_END_EXCLUSIVE
+        || user_heap.virtual_start < image_end
+        || ranges_overlap(
+            user_heap.virtual_start,
+            heap_end,
+            user_stack.virtual_start,
+            stack_end,
+        )
+    {
+        return Err(PageTableError::InvalidRange);
+    }
+    for frame in user_heap.frames {
+        let physical_address = frame.start_address();
+        if !is_page_aligned(physical_address)
+            || !crate::frame_allocator::is_allocated_frame_address(physical_address)
+        {
+            return Err(PageTableError::InvalidRange);
+        }
+    }
+
     for memory in crate::frame_allocator::physical_memory_regions()
         .map_err(PageTableError::FrameAllocation)?
     {
@@ -152,6 +185,7 @@ fn populate_address_space(
     root_table: *mut PageTable,
     kernel_layout: KernelMemoryLayout,
     user_stack: &UserStackMapping<'_>,
+    user_heap: &UserHeapMapping<'_>,
     kernel_stack: KernelStackMapping,
     user_image: UserImageMapping<'_>,
 ) -> Result<(), PageTableError> {
@@ -204,6 +238,8 @@ fn populate_address_space(
         )?;
     }
 
+    map_user_heap_frames_in_table(root_table, user_heap.virtual_start, user_heap.frames)?;
+
     let console_region = crate::console::mmio_region();
     let console_start = align_down_to_page(console_region.start);
     let console_end = align_up_to_page(
@@ -220,6 +256,94 @@ fn populate_address_space(
     }
 
     Ok(())
+}
+
+fn map_user_heap_frames_in_table(
+    root_table: *mut PageTable,
+    virtual_start: usize,
+    frames: &[crate::frame_allocator::PhysicalFrame],
+) -> Result<(), PageTableError> {
+    for (index, frame) in frames.iter().enumerate() {
+        let Some(virtual_address) = index
+            .checked_mul(PAGE_SIZE)
+            .and_then(|offset| virtual_start.checked_add(offset))
+        else {
+            rollback_user_heap_mappings(root_table, virtual_start, index);
+            return Err(PageTableError::InvalidRange);
+        };
+        if let Err(error) = map_page(
+            root_table,
+            virtual_address,
+            frame.start_address(),
+            PTE_READ | PTE_WRITE | PTE_USER,
+        ) {
+            rollback_user_heap_mappings(root_table, virtual_start, index);
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+/// 为当前或尚未激活的进程地址空间追加用户堆页映射。
+pub(crate) fn map_user_heap_frames(
+    address_space: &AddressSpace,
+    virtual_start: usize,
+    frames: &[crate::frame_allocator::PhysicalFrame],
+) -> Result<(), PageTableError> {
+    if !is_page_aligned(virtual_start) {
+        return Err(PageTableError::InvalidRange);
+    }
+    let root_virtual_address =
+        super::address::physical_to_kernel_virtual(address_space.root_address)
+            .ok_or(PageTableError::InvalidRootTable)?;
+    let root_table = root_virtual_address as *mut PageTable;
+    map_user_heap_frames_in_table(root_table, virtual_start, frames)?;
+
+    if !frames.is_empty() && address_space.root_address == active_root_address() {
+        // 安全性：刚加入的用户堆页属于当前地址空间；刷新 TLB 后用户态才能使用新 PTE。
+        unsafe { core::arch::asm!("sfence.vma zero, zero", options(nostack)) };
+    }
+    Ok(())
+}
+
+/// 清除用户堆映射；调用方仍持有并负责归还对应物理页帧。
+pub(crate) fn unmap_user_heap_pages(
+    address_space: &AddressSpace,
+    virtual_start: usize,
+    page_count: usize,
+) -> Result<(), PageTableError> {
+    if !is_page_aligned(virtual_start) {
+        return Err(PageTableError::InvalidRange);
+    }
+    let root_virtual_address =
+        super::address::physical_to_kernel_virtual(address_space.root_address)
+            .ok_or(PageTableError::InvalidRootTable)?;
+    let root_table = root_virtual_address as *mut PageTable;
+    for page_index in 0..page_count {
+        let virtual_address = page_index
+            .checked_mul(PAGE_SIZE)
+            .and_then(|offset| virtual_start.checked_add(offset))
+            .ok_or(PageTableError::InvalidRange)?;
+        super::page_table::unmap_page(root_table, virtual_address)?;
+    }
+    if page_count > 0 && address_space.root_address == active_root_address() {
+        // 安全性：已清除当前页表中的这些叶子项；刷新 TLB 后用户态不再访问已释放页帧。
+        unsafe { core::arch::asm!("sfence.vma zero, zero", options(nostack)) };
+    }
+    Ok(())
+}
+
+fn rollback_user_heap_mappings(
+    root_table: *mut PageTable,
+    virtual_start: usize,
+    page_count: usize,
+) {
+    for page_index in 0..page_count {
+        let virtual_address = virtual_start + page_index * PAGE_SIZE;
+        if let Err(error) = super::page_table::unmap_page(root_table, virtual_address) {
+            panic!("回滚用户堆页映射失败：{}", error.description());
+        }
+    }
 }
 
 fn user_page_table_permissions(permissions: super::UserImagePermissions) -> usize {

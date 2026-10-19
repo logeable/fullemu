@@ -72,12 +72,17 @@ pub(super) fn create_process(program_index: usize) -> Result<ProcessId, ProcessC
         .ok_or(ProcessCreationError::ProgramRangeOverflow)?;
 
     let user_stack_range = user_stack.range();
+    let user_heap = super::UserHeap::new(program_end);
     let kernel_stack_range = kernel_stack.range();
     let initial_frame = TrapFrame::for_user_entry(program.entry, user_stack_top);
     let initial_frame_pointer = kernel_stack.trap_frame_pointer();
     let user_stack_mapping = super::super::memory::UserStackMapping {
         virtual_start: user_stack.start(),
         frames: user_stack.frames(),
+    };
+    let user_heap_mapping = super::super::memory::UserHeapMapping {
+        virtual_start: user_heap.mapped_range().0,
+        frames: &[],
     };
     let kernel_stack_mapping = super::super::memory::KernelStackMapping {
         virtual_start: kernel_stack_range.0,
@@ -94,6 +99,7 @@ pub(super) fn create_process(program_index: usize) -> Result<ProcessId, ProcessC
     let address_space = super::super::memory::address_space::create_address_space(
         kernel_layout,
         &user_stack_mapping,
+        &user_heap_mapping,
         kernel_stack_mapping,
         user_image_mapping,
     )
@@ -120,6 +126,7 @@ pub(super) fn create_process(program_index: usize) -> Result<ProcessId, ProcessC
                 address_space,
                 program_range: (program.virtual_start, program_end),
                 program_image: program,
+                user_heap,
                 user_stack,
                 kernel_stack,
             }),

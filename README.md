@@ -71,4 +71,5 @@ make run
 - [第 50 阶段：execve 参数传递](docs/phase-50-exec-argv.md) 记录 argv 校验、复制和新进程初始栈布局，以及 shell 的简单参数拆分。
 - [第 51 阶段：VirtIO 块设备单扇区读取](docs/phase-51-virtio-block-read.md) 记录通过 FDT 发现 VirtIO MMIO transport、初始化 split virtqueue 并读取测试扇区的过程。
 - [第 52 阶段：块设备对象与扇区读写接口](docs/phase-52-block-device-object.md) 记录上层块设备契约、VirtIO 设备对象及串行扇区读写实现。
+- [第 53 阶段：用户进程 program break 与堆页](docs/phase-53-user-process-heap.md) 记录 Linux RISC-V `brk`、进程堆页映射与回收，以及 fork/exec 生命周期验证。
 - [项目原则与代码规范](docs/development-principles.md) 是设计和协作规范。

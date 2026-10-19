@@ -88,6 +88,50 @@ pub(super) fn map_page(
     Ok(())
 }
 
+/// 清除一条 4 KiB 叶子映射，但保留空的中间页表页供后续映射复用。
+pub(super) fn unmap_page(
+    root_table: *mut PageTable,
+    virtual_address: usize,
+) -> Result<(), PageTableError> {
+    if !is_page_aligned(virtual_address) {
+        return Err(PageTableError::InvalidRange);
+    }
+    let indices = [
+        (virtual_address >> 30) & 0x1ff,
+        (virtual_address >> 21) & 0x1ff,
+        (virtual_address >> 12) & 0x1ff,
+    ];
+    let mut table = root_table;
+
+    for index in indices[..2].iter().copied() {
+        // 安全性：索引来自 Sv39 地址的 9 位 VPN 字段，当前表属于传入的页表树。
+        let entry = unsafe { core::ptr::addr_of!((*table).0[index]) };
+        // 安全性：页表项指针位于有效页表页内。
+        let entry_value = unsafe { core::ptr::read(entry) };
+        if entry_value & PTE_VALID == 0 || entry_value & (PTE_READ | PTE_WRITE | PTE_EXECUTE) != 0 {
+            return Err(PageTableError::InvalidRange);
+        }
+        let child_address = ((entry_value >> 10) << 12) as usize;
+        if !crate::frame_allocator::is_allocated_frame_address(child_address) {
+            return Err(PageTableError::InvalidChildTable);
+        }
+        let child_virtual_address = super::address::physical_to_kernel_virtual(child_address)
+            .ok_or(PageTableError::InvalidChildTable)?;
+        table = child_virtual_address as *mut PageTable;
+    }
+
+    // 安全性：最低层索引经过 9 位掩码限制；当前页表项属于已验证的页表树。
+    let leaf = unsafe { core::ptr::addr_of_mut!((*table).0[indices[2]]) };
+    // 安全性：清除前确认目标是有效叶子映射，避免静默接受错误的堆元数据。
+    let leaf_value = unsafe { core::ptr::read(leaf) };
+    if leaf_value & PTE_VALID == 0 || leaf_value & (PTE_READ | PTE_WRITE | PTE_EXECUTE) == 0 {
+        return Err(PageTableError::InvalidRange);
+    }
+    // 安全性：调用方持有叶子 backing 页帧所有权；此操作只清除页表映射。
+    unsafe { core::ptr::write(leaf, 0) };
+    Ok(())
+}
+
 pub(super) fn activate(root_physical_address: usize) -> Result<(), PageTableError> {
     if root_physical_address == 0
         || !is_page_aligned(root_physical_address)

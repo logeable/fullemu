@@ -34,7 +34,7 @@ fn create_child_process(
 ) -> Result<super::ProcessId, creation::ProcessCreationError> {
     let parent_index = super::current_process_index();
     let child_id = creation::reserve_process_slot()?;
-    let (parent_id, parent_program_range, program_image, user_stack) = {
+    let (parent_id, parent_program_range, program_image, user_heap, user_stack) = {
         // 安全性：只在单 hart 的 S-mode trap 中创建子进程；进程表不会在该调用中被其他路径修改。
         let processes = unsafe { &*core::ptr::addr_of!(super::PROCESSES) };
         let parent = processes
@@ -52,6 +52,10 @@ fn create_child_process(
                 .duplicate()
                 .map_err(creation::ProcessCreationError::ProgramLoad)?,
             resources
+                .user_heap
+                .duplicate()
+                .map_err(|_| creation::ProcessCreationError::ProcessMetadataAllocation)?,
+            resources
                 .user_stack
                 .duplicate()
                 .map_err(creation::ProcessCreationError::UserStack)?,
@@ -64,6 +68,10 @@ fn create_child_process(
     let user_stack_mapping = super::super::memory::UserStackMapping {
         virtual_start: user_stack.start(),
         frames: user_stack.frames(),
+    };
+    let user_heap_mapping = super::super::memory::UserHeapMapping {
+        virtual_start: user_heap.mapped_range().0,
+        frames: user_heap.frames(),
     };
     let kernel_stack_mapping = super::super::memory::KernelStackMapping {
         virtual_start: kernel_stack_range.0,
@@ -78,6 +86,7 @@ fn create_child_process(
     let address_space = super::super::memory::address_space::create_address_space(
         creation::kernel_memory_layout(),
         &user_stack_mapping,
+        &user_heap_mapping,
         kernel_stack_mapping,
         user_image_mapping,
     )
@@ -109,6 +118,7 @@ fn create_child_process(
                 address_space,
                 program_range: parent_program_range,
                 program_image,
+                user_heap,
                 user_stack,
                 kernel_stack,
             }),

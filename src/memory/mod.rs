@@ -1,5 +1,5 @@
 //! 定义 Sv39 地址空间共用的数据类型，并组织地址空间、用户访问和页表诊断子模块。
-//! 操作直接通过职责对应的子模块调用；进程仍拥有用户栈和程序镜像等映射目标。
+//! 操作直接通过职责对应的子模块调用；进程仍拥有用户镜像、栈和堆页等映射目标。
 
 pub(super) mod address;
 pub(super) mod address_space;
@@ -10,11 +10,12 @@ pub(super) mod user_access;
 
 pub(super) use address_space::AddressSpace;
 
-/// 描述当前进程中允许 syscall 访问的用户镜像与用户栈范围。
+/// 描述当前进程中允许 syscall 访问的用户镜像、堆和栈范围。
 #[derive(Clone, Copy)]
 pub(super) struct UserMemoryRanges {
     pub(super) program: (usize, usize),
     pub(super) writable_program: Option<(usize, usize)>,
+    pub(super) heap: (usize, usize),
     pub(super) stack: (usize, usize),
 }
 
@@ -85,6 +86,12 @@ pub(super) struct KernelSectionRange {
 
 /// 描述一个进程的用户栈虚拟起点及其拥有的物理页帧。
 pub(super) struct UserStackMapping<'a> {
+    pub(super) virtual_start: usize,
+    pub(super) frames: &'a [crate::frame_allocator::PhysicalFrame],
+}
+
+/// 描述一个进程用户堆的虚拟起点及其拥有的物理页帧。
+pub(super) struct UserHeapMapping<'a> {
     pub(super) virtual_start: usize,
     pub(super) frames: &'a [crate::frame_allocator::PhysicalFrame],
 }
