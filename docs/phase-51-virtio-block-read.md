@@ -29,7 +29,7 @@
 
 ## 模块边界
 
-`device_tree::virtio_info` 只解析 FDT 并返回 transport 物理范围；`kernel::startup` 把范围和静态 DMA 区域的物理地址交给 `driver::virtio_block`；驱动只负责 MMIO 协商、队列提交、轮询完成和复制扇区数据。启动页表当前提供本实验使用的低地址 MMIO 恒等映射，驱动不直接依赖 FDT、页帧分配器或内核地址转换模块。
+`device_tree::virtio_info` 只解析 FDT 并返回 transport 物理范围；`startup` 把范围和静态 DMA 区域的物理地址交给 `driver::virtio_block`；驱动只负责 MMIO 协商、队列提交、轮询完成和复制扇区数据。启动页表当前提供本实验使用的低地址 MMIO 恒等映射，驱动不直接依赖 FDT、页帧分配器或内核地址转换模块。
 
 ## 验收方式
 

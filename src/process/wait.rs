@@ -9,14 +9,14 @@ pub(super) struct ProcessWaitRequest {
     no_hang: bool,
 }
 
-pub(in crate::kernel) enum WaitDecision {
+pub(crate) enum WaitDecision {
     Return(isize),
     Block,
     NoChild,
 }
 
 /// 处理当前进程的 wait 请求，并返回立即结果或阻塞决定。
-pub(in crate::kernel) fn wait_for_current_child(
+pub(crate) fn wait_for_current_child(
     pid: i32,
     status_address: Option<usize>,
     no_hang: bool,

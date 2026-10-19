@@ -30,7 +30,7 @@ impl StartupCheckError {
 
 /// 按固定顺序初始化内核，再启动构建配置指定的入口用户进程。
 pub(crate) fn run(hart_id: usize, device_tree_physical_address: usize) -> ! {
-    crate::kernel::clock::initialize();
+    crate::clock::initialize();
 
     let fdt = parse_device_tree(device_tree_physical_address);
     let uart_region = initialize_console(&fdt);
@@ -41,7 +41,7 @@ pub(crate) fn run(hart_id: usize, device_tree_physical_address: usize) -> ! {
     read_block_device_test_sector(&fdt);
     log_device_tree_if_trace_enabled(&fdt);
 
-    crate::kernel::process::run_boot_program()
+    crate::process::run_boot_program()
 }
 
 /// 将固件传入的 FDT 物理地址解析为只读视图。
@@ -160,10 +160,10 @@ fn parse_and_log_memory_info(
 
 /// 依次建立页帧分配器和堆，再运行依赖这两者的启动自检。
 fn initialize_memory_subsystems(memory_info: &FdtMemoryInfo) {
-    if let Err(error) = crate::kernel::frame_allocator::initialize(memory_info) {
+    if let Err(error) = crate::frame_allocator::initialize(memory_info) {
         panic!("物理页帧分配器初始化失败：{}", error.description());
     }
-    if let Err(error) = crate::kernel::heap::initialize() {
+    if let Err(error) = crate::heap::initialize() {
         panic!("内核堆初始化失败：{}", error.description());
     }
     if let Err(error) = run_startup_checks() {
@@ -239,7 +239,7 @@ fn run_startup_checks() -> Result<(), StartupCheckError> {
 
 /// 按 trace 日志级别遍历并显示 FDT 结构块及属性原始值。
 fn log_device_tree_if_trace_enabled(fdt: &FdtBlob<'_>) {
-    if !crate::kernel::logging::is_enabled(crate::kernel::logging::Level::Trace) {
+    if !crate::logging::is_enabled(crate::logging::Level::Trace) {
         return;
     }
 

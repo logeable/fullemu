@@ -104,8 +104,8 @@ pub(super) fn parse(bytes: &[u8]) -> Result<ElfImage, ElfError> {
             || file_size > memory_size
             || memory_size == 0
             || file_end > bytes.len()
-            || virtual_start < crate::kernel::user_program::USER_PROGRAM_VIRTUAL_BASE
-            || virtual_end > crate::kernel::memory::address::SV39_USER_ADDRESS_END_EXCLUSIVE
+            || virtual_start < crate::user_program::USER_PROGRAM_VIRTUAL_BASE
+            || virtual_end > crate::memory::address::SV39_USER_ADDRESS_END_EXCLUSIVE
             || !valid_alignment(alignment, file_offset, virtual_start)
         {
             return Err(ElfError::InvalidSegment);
@@ -159,7 +159,7 @@ fn read_u64(bytes: &[u8], offset: usize) -> Result<u64, ElfError> {
 }
 
 /// 本阶段 ELF 解析失败的原因。
-pub(in crate::kernel) enum ElfError {
+pub(crate) enum ElfError {
     UnsupportedFormat,
     DynamicLinkingUnsupported,
     InvalidRange,

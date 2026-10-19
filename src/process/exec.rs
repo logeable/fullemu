@@ -5,14 +5,14 @@ use crate::arch::riscv64::trap::TrapFrame;
 use super::{ProcessState, PROCESSES};
 
 /// 替换失败时供 syscall 层转换为 Linux 错误码的类别。
-pub(in crate::kernel) enum ExecError {
+pub(crate) enum ExecError {
     Resources,
     InvalidImage,
     ArgumentsTooLarge,
 }
 
 /// 在保留 PID、父子关系和内核栈的同时，替换当前进程的程序、用户栈和地址空间。
-pub(in crate::kernel) fn replace_current_process(
+pub(crate) fn replace_current_process(
     program_index: usize,
     arguments: &[alloc::vec::Vec<u8>],
     frame: &mut TrapFrame,

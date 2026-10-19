@@ -5,7 +5,7 @@ use crate::arch::riscv64::trap::{ExceptionCause, TrapCause, TrapFrame};
 use super::{ProcessExitStatus, ProcessState, PROCESSES};
 
 /// 按 `exit` 系统调用状态结束当前进程。
-pub(in crate::kernel) fn exit_current_process(status: u8) -> *mut TrapFrame {
+pub(crate) fn exit_current_process(status: u8) -> *mut TrapFrame {
     let current_index = super::current_process_index();
     crate::klog_debug!(
         "进程 PID={} 调用 exit 结束，状态码：{status}",
@@ -17,10 +17,7 @@ pub(in crate::kernel) fn exit_current_process(status: u8) -> *mut TrapFrame {
 }
 
 /// 将因用户态异常终止的进程记为退出，并切换到其他就绪进程。
-pub(in crate::kernel) fn terminate_current_process(
-    cause: TrapCause,
-    frame: &TrapFrame,
-) -> *mut TrapFrame {
+pub(crate) fn terminate_current_process(cause: TrapCause, frame: &TrapFrame) -> *mut TrapFrame {
     let current_index = super::current_process_index();
     let process_id = super::current_linux_pid();
     crate::klog_error!(

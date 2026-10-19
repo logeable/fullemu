@@ -20,8 +20,8 @@ pub(super) struct UserMemoryRanges {
 
 /// 将一张独占物理页帧的内容复制到另一张独占页帧。
 pub(super) fn copy_frame(
-    source: &crate::kernel::frame_allocator::PhysicalFrame,
-    destination: &crate::kernel::frame_allocator::PhysicalFrame,
+    source: &crate::frame_allocator::PhysicalFrame,
+    destination: &crate::frame_allocator::PhysicalFrame,
 ) {
     if source.start_address() == destination.start_address() {
         panic!("物理页帧复制的源和目标相同");
@@ -50,7 +50,7 @@ pub(super) fn copy_frame(
 #[derive(Clone, Copy)]
 pub(super) struct UserImageMapping<'a> {
     pub(super) virtual_start: usize,
-    pub(super) frames: &'a [crate::kernel::frame_allocator::PhysicalFrame],
+    pub(super) frames: &'a [crate::frame_allocator::PhysicalFrame],
     pub(super) page_permissions: &'a [UserImagePermissions],
 }
 
@@ -86,7 +86,7 @@ pub(super) struct KernelSectionRange {
 /// 描述一个进程的用户栈虚拟起点及其拥有的物理页帧。
 pub(super) struct UserStackMapping<'a> {
     pub(super) virtual_start: usize,
-    pub(super) frames: &'a [crate::kernel::frame_allocator::PhysicalFrame],
+    pub(super) frames: &'a [crate::frame_allocator::PhysicalFrame],
 }
 
 /// 描述进程内核栈的高地址虚拟范围及其连续物理 backing。
@@ -103,7 +103,7 @@ pub(super) enum PageTableError {
     /// 映射范围为空、反向或没有按页对齐。
     InvalidRange,
     /// 物理页帧分配器无法提供页表页。
-    FrameAllocation(crate::kernel::frame_allocator::FrameError),
+    FrameAllocation(crate::frame_allocator::FrameError),
     /// 页表树中的子页表地址不属于已分配页帧。
     InvalidChildTable,
     /// 不能销毁当前 hart 正在使用的地址空间。
@@ -111,7 +111,7 @@ pub(super) enum PageTableError {
     /// 归还的页表页数量与销毁前验证的数量不一致。
     PageTableCountMismatch,
     /// 页表页归还给物理页帧分配器时失败。
-    FrameDeallocation(crate::kernel::frame_allocator::FrameError),
+    FrameDeallocation(crate::frame_allocator::FrameError),
     /// 本实验只建立 4 KiB 叶子映射，却遇到大页叶子项。
     UnexpectedSuperpage,
     /// 根页表没有按 4 KiB 对齐。

@@ -7,7 +7,7 @@
 use core::alloc::{GlobalAlloc, Layout};
 use core::ptr::NonNull;
 
-use crate::kernel::frame_allocator::{self, FrameError, PhysicalFrameRun};
+use crate::frame_allocator::{self, FrameError, PhysicalFrameRun};
 
 const KERNEL_HEAP_FRAME_COUNT: usize = 64;
 const KERNEL_HEAP_SIZE: usize = KERNEL_HEAP_FRAME_COUNT * super::memory::page::PAGE_SIZE;

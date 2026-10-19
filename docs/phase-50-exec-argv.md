@@ -16,7 +16,7 @@ ELF 装载器已经能把程序映像放入新进程，但此前 `execve` 只接
 
 ## 主要边界
 
-`kernel::syscall` 负责解读并验证旧进程的 Linux `execve` 参数，将内容复制为内核数据；`process::exec` 负责构造新进程栈并执行映像替换；`process::stack::UserStack` 负责把初始栈数据写入自身拥有的页帧。用户库只提供启动栈参数迭代器和 syscall 封装，不参与内核内存管理。
+`syscall` 负责解读并验证旧进程的 Linux `execve` 参数，将内容复制为内核数据；`process::exec` 负责构造新进程栈并执行映像替换；`process::stack::UserStack` 负责把初始栈数据写入自身拥有的页帧。用户库只提供启动栈参数迭代器和 syscall 封装，不参与内核内存管理。
 
 ## 验收方式
 

@@ -38,13 +38,13 @@ pub(super) fn map_page(
         // 安全性：当前表指针来自已分配根页帧或已验证的子页帧，索引经过 9 位掩码限制。
         let entry_value = unsafe { core::ptr::read(entry) };
         if entry_value & PTE_VALID == 0 {
-            let child_frame = crate::kernel::frame_allocator::allocate_zeroed_frame()
+            let child_frame = crate::frame_allocator::allocate_zeroed_frame()
                 .map_err(PageTableError::FrameAllocation)?;
             let child_address = child_frame.start_address();
             let Some(child_virtual_address) =
                 super::address::physical_to_kernel_virtual(child_address)
             else {
-                crate::kernel::frame_allocator::deallocate_frame(child_frame)
+                crate::frame_allocator::deallocate_frame(child_frame)
                     .map_err(PageTableError::FrameDeallocation)?;
                 return Err(PageTableError::InvalidRange);
             };
@@ -59,7 +59,7 @@ pub(super) fn map_page(
                 return Err(PageTableError::UnexpectedSuperpage);
             }
             let child_address = ((entry_value >> 10) << 12) as usize;
-            if !crate::kernel::frame_allocator::is_allocated_frame_address(child_address) {
+            if !crate::frame_allocator::is_allocated_frame_address(child_address) {
                 return Err(PageTableError::InvalidChildTable);
             }
             let child_virtual_address = super::address::physical_to_kernel_virtual(child_address)
@@ -91,7 +91,7 @@ pub(super) fn map_page(
 pub(super) fn activate(root_physical_address: usize) -> Result<(), PageTableError> {
     if root_physical_address == 0
         || !is_page_aligned(root_physical_address)
-        || !crate::kernel::frame_allocator::is_allocated_frame_address(root_physical_address)
+        || !crate::frame_allocator::is_allocated_frame_address(root_physical_address)
     {
         return Err(PageTableError::InvalidRootTable);
     }
@@ -99,7 +99,7 @@ pub(super) fn activate(root_physical_address: usize) -> Result<(), PageTableErro
     activate_root(root_physical_address)
 }
 
-pub(in crate::kernel) fn activate_boot_address_space() -> Result<(), PageTableError> {
+pub(crate) fn activate_boot_address_space() -> Result<(), PageTableError> {
     let boot_root_virtual_address = core::ptr::addr_of!(__boot_page_table_virtual_start) as usize;
     let root_physical_address =
         super::address::kernel_virtual_to_physical(boot_root_virtual_address);

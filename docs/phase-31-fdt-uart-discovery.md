@@ -26,7 +26,7 @@
 ## 依赖与不变量
 
 - `device_tree::console_info` 依赖 FDT 结构遍历器，只输出无堆、拥有的 `FdtConsoleInfo` 值。
-- `kernel::startup` 是设备树数据与控制台服务之间的组合点：先解析 FDT 控制台信息，再调用 `console::initialize`，之后才使用内核日志。
+- `startup` 是设备树数据与控制台服务之间的组合点：先解析 FDT 控制台信息，再调用 `console::initialize`，之后才使用内核日志。
 - `driver::uart16550` 不含平台物理地址常量；MMIO 范围来自 `console::initialize`，且在首次日志输出前固定。
 - 页表映射的 MMIO 范围与驱动访问范围来自同一个 UART 配置，避免设备能输出但任务地址空间未映射该设备的分歧。
 

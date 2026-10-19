@@ -1,7 +1,7 @@
 //! 管理进程地址空间根页表的创建、切换、遍历校验和销毁。
 
 use super::page::{align_down_to_page, align_up_to_page, is_page_aligned, PAGE_SIZE};
-pub(in crate::kernel) use super::page_table::activate_boot_address_space;
+pub(crate) use super::page_table::activate_boot_address_space;
 use super::page_table::{
     activate, active_root_address, map_page, PageTable, PAGE_TABLE_ENTRIES, PTE_ACCESSED,
     PTE_DIRTY, PTE_EXECUTE, PTE_READ, PTE_USER, PTE_VALID, PTE_WRITE,
@@ -12,7 +12,7 @@ use super::{
 };
 
 /// 为一个进程建立独立页表；失败时归还本次创建的页表树。
-pub(in crate::kernel) fn create_address_space(
+pub(crate) fn create_address_space(
     kernel_layout: KernelMemoryLayout,
     user_stack: &UserStackMapping<'_>,
     kernel_stack: KernelStackMapping,
@@ -21,12 +21,12 @@ pub(in crate::kernel) fn create_address_space(
     validate_kernel_layout(kernel_layout)?;
     validate_user_mappings(kernel_layout, user_stack, user_image)?;
 
-    let root_frame = crate::kernel::frame_allocator::allocate_zeroed_frame()
-        .map_err(PageTableError::FrameAllocation)?;
+    let root_frame =
+        crate::frame_allocator::allocate_zeroed_frame().map_err(PageTableError::FrameAllocation)?;
     let root_address = root_frame.start_address();
     let Some(root_virtual_address) = super::address::physical_to_kernel_virtual(root_address)
     else {
-        crate::kernel::frame_allocator::deallocate_frame(root_frame)
+        crate::frame_allocator::deallocate_frame(root_frame)
             .map_err(PageTableError::FrameDeallocation)?;
         return Err(PageTableError::InvalidRange);
     };
@@ -89,7 +89,7 @@ fn validate_user_mappings(
     for (page_index, frame) in user_stack.frames.iter().enumerate() {
         let physical_address = frame.start_address();
         if !is_page_aligned(physical_address)
-            || !crate::kernel::frame_allocator::is_allocated_frame_address(physical_address)
+            || !crate::frame_allocator::is_allocated_frame_address(physical_address)
         {
             return Err(PageTableError::InvalidRange);
         }
@@ -118,7 +118,7 @@ fn validate_user_mappings(
         let permissions = user_image.page_permissions[page_index];
         if !is_page_aligned(physical_address)
             || physical_address < kernel_end
-            || !crate::kernel::frame_allocator::is_allocated_frame_address(physical_address)
+            || !crate::frame_allocator::is_allocated_frame_address(physical_address)
             || !permissions.readable
             || (permissions.writable && permissions.executable)
         {
@@ -126,7 +126,7 @@ fn validate_user_mappings(
         }
     }
 
-    for memory in crate::kernel::frame_allocator::physical_memory_regions()
+    for memory in crate::frame_allocator::physical_memory_regions()
         .map_err(PageTableError::FrameAllocation)?
     {
         let memory_start =
@@ -156,7 +156,7 @@ fn populate_address_space(
     user_image: UserImageMapping<'_>,
 ) -> Result<(), PageTableError> {
     // FDT 描述的 RAM 映射到高半区直接映射窗口；Rust 指针使用虚拟地址，页表项仍记录物理地址。
-    for memory in crate::kernel::frame_allocator::physical_memory_regions()
+    for memory in crate::frame_allocator::physical_memory_regions()
         .map_err(PageTableError::FrameAllocation)?
     {
         let mut page = usize::try_from(memory.start).map_err(|_| PageTableError::InvalidRange)?;
@@ -327,18 +327,14 @@ fn rollback_page_table_tree(root_address: usize) -> Result<(), PageTableError> {
 }
 
 /// 切换到指定进程的 Sv39 根页表。
-pub(in crate::kernel) fn activate_address_space(
-    address_space: &AddressSpace,
-) -> Result<(), PageTableError> {
+pub(crate) fn activate_address_space(address_space: &AddressSpace) -> Result<(), PageTableError> {
     activate(address_space.root_address)
 }
 
 /// 销毁一个非当前地址空间，并归还它拥有的根页表和中间页表页。
 ///
 /// 返回归还的页表页数。叶子映射指向的内核、用户栈和程序镜像页不会释放。
-pub(in crate::kernel) fn destroy_address_space(
-    address_space: AddressSpace,
-) -> Result<usize, PageTableError> {
+pub(crate) fn destroy_address_space(address_space: AddressSpace) -> Result<usize, PageTableError> {
     let root_address = address_space.root_address;
     if root_address == active_root_address() {
         return Err(PageTableError::ActiveAddressSpace);
@@ -368,7 +364,7 @@ impl AddressSpace {
 }
 
 fn validate_page_table_tree(table_address: usize, level: usize) -> Result<usize, PageTableError> {
-    if !crate::kernel::frame_allocator::is_allocated_frame_address(table_address) {
+    if !crate::frame_allocator::is_allocated_frame_address(table_address) {
         return Err(PageTableError::InvalidChildTable);
     }
 
@@ -417,11 +413,9 @@ fn release_page_table_tree(table_address: usize, level: usize) -> Result<usize, 
     }
 
     // 安全性：该页只由已验证的非活动页表树拥有，所有子链接已清除，不再有活动页表引用。
-    let frame =
-        unsafe { crate::kernel::frame_allocator::PhysicalFrame::from_address(table_address) }
-            .map_err(PageTableError::FrameDeallocation)?;
-    crate::kernel::frame_allocator::deallocate_frame(frame)
+    let frame = unsafe { crate::frame_allocator::PhysicalFrame::from_address(table_address) }
         .map_err(PageTableError::FrameDeallocation)?;
+    crate::frame_allocator::deallocate_frame(frame).map_err(PageTableError::FrameDeallocation)?;
     Ok(released_page_count)
 }
 

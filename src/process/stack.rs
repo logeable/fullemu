@@ -5,8 +5,8 @@
 use alloc::vec::Vec;
 
 use crate::arch::riscv64::trap::TrapFrame;
-use crate::kernel::frame_allocator::{self, FrameError, PhysicalFrame, PhysicalFrameRun};
-use crate::kernel::memory::{address, page::PAGE_SIZE};
+use crate::frame_allocator::{self, FrameError, PhysicalFrame, PhysicalFrameRun};
+use crate::memory::{address, page::PAGE_SIZE};
 
 const USER_STACK_SIZE: usize = 16 * 1024;
 const KERNEL_STACK_SIZE: usize = 16 * 1024;
@@ -243,7 +243,7 @@ impl UserStack {
     pub(super) fn duplicate(&self) -> Result<Self, StackError> {
         let duplicate = Self::allocate()?;
         for (source, destination) in self.frames.iter().zip(duplicate.frames.iter()) {
-            crate::kernel::memory::copy_frame(source, destination);
+            crate::memory::copy_frame(source, destination);
         }
         Ok(duplicate)
     }

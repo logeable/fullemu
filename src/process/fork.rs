@@ -5,13 +5,13 @@ use crate::arch::riscv64::trap::TrapFrame;
 use super::{creation, KernelStack, Process, ProcessResources, ProcessState};
 
 /// fork 创建失败时供 syscall 层转换为 Linux 错误码的类别。
-pub(in crate::kernel) enum ForkError {
+pub(crate) enum ForkError {
     Resources,
     ProcessIdExhausted,
 }
 
 /// 复制当前进程并返回子进程 PID。
-pub(in crate::kernel) fn fork_current_process(parent_frame: &TrapFrame) -> Result<i32, ForkError> {
+pub(crate) fn fork_current_process(parent_frame: &TrapFrame) -> Result<i32, ForkError> {
     match create_child_process(parent_frame) {
         Ok(child_id) => Ok(child_id.linux_pid()),
         Err(error) => {

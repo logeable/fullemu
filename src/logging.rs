@@ -74,7 +74,7 @@ pub fn log(level: Level, target: &str, arguments: fmt::Arguments<'_>) {
 #[macro_export]
 macro_rules! klog {
     ($level:expr, $($argument:tt)*) => {{
-        $crate::kernel::logging::log(
+        $crate::logging::log(
             $level,
             module_path!(),
             core::format_args!($($argument)*)
@@ -86,7 +86,7 @@ macro_rules! klog {
 #[macro_export]
 macro_rules! klog_error {
     ($($argument:tt)*) => {
-        $crate::klog!($crate::kernel::logging::Level::Error, $($argument)*)
+        $crate::klog!($crate::logging::Level::Error, $($argument)*)
     };
 }
 
@@ -94,7 +94,7 @@ macro_rules! klog_error {
 #[macro_export]
 macro_rules! klog_warn {
     ($($argument:tt)*) => {
-        $crate::klog!($crate::kernel::logging::Level::Warn, $($argument)*)
+        $crate::klog!($crate::logging::Level::Warn, $($argument)*)
     };
 }
 
@@ -102,7 +102,7 @@ macro_rules! klog_warn {
 #[macro_export]
 macro_rules! klog_info {
     ($($argument:tt)*) => {
-        $crate::klog!($crate::kernel::logging::Level::Info, $($argument)*)
+        $crate::klog!($crate::logging::Level::Info, $($argument)*)
     };
 }
 
@@ -110,7 +110,7 @@ macro_rules! klog_info {
 #[macro_export]
 macro_rules! klog_debug {
     ($($argument:tt)*) => {
-        $crate::klog!($crate::kernel::logging::Level::Debug, $($argument)*)
+        $crate::klog!($crate::logging::Level::Debug, $($argument)*)
     };
 }
 
@@ -118,6 +118,6 @@ macro_rules! klog_debug {
 #[macro_export]
 macro_rules! klog_trace {
     ($($argument:tt)*) => {
-        $crate::klog!($crate::kernel::logging::Level::Trace, $($argument)*)
+        $crate::klog!($crate::logging::Level::Trace, $($argument)*)
     };
 }

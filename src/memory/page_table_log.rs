@@ -10,13 +10,13 @@ use super::page_table::{
 /// 以调试日志输出指定进程页表中的有效映射。
 ///
 /// 连续虚拟页映射到连续物理页且权限相同的条目会合并为一个范围。
-pub(in crate::kernel) fn log_address_space(process_id: usize, address_space: &AddressSpace) {
-    if !crate::kernel::logging::is_enabled(crate::kernel::logging::Level::Debug) {
+pub(crate) fn log_address_space(process_id: usize, address_space: &AddressSpace) {
+    if !crate::logging::is_enabled(crate::logging::Level::Debug) {
         return;
     }
 
     let root_address = address_space.root_address();
-    if !crate::kernel::frame_allocator::is_allocated_frame_address(root_address) {
+    if !crate::frame_allocator::is_allocated_frame_address(root_address) {
         crate::klog_error!(
             "Sv39 页表无效：进程={}，根页表地址 {root_address:#018x} 不是已分配页帧",
             process_id
@@ -100,7 +100,7 @@ fn walk_page_table(
 
         let child_table_address = ((entry >> 10) << 12) as usize;
         if !is_page_aligned(child_table_address)
-            || !crate::kernel::frame_allocator::is_allocated_frame_address(child_table_address)
+            || !crate::frame_allocator::is_allocated_frame_address(child_table_address)
         {
             crate::klog_error!(
                 "Sv39 页表无效：进程={}，子页表地址 {child_table_address:#018x} 不是已分配页帧",

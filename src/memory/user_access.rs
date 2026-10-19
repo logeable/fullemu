@@ -7,7 +7,7 @@ const SSTATUS_SUM: usize = 1 << 18;
 /// # Safety
 ///
 /// 调用方必须先验证 `address` 位于当前任务已映射且可读的用户区域内。
-pub(in crate::kernel) unsafe fn read_user_byte(address: usize) -> u8 {
+pub(crate) unsafe fn read_user_byte(address: usize) -> u8 {
     // 安全性：SUM 仅在下面这一次用户地址读取期间开启，避免扩大内核访问 U 页的窗口。
     set_sum(true);
     // 安全性：调用方保证地址位于当前用户程序或用户栈的有效映射范围内。
@@ -22,7 +22,7 @@ pub(in crate::kernel) unsafe fn read_user_byte(address: usize) -> u8 {
 /// # Safety
 ///
 /// 调用方必须保证 `address` 对 `T` 对齐，并且完整的 `T` 位于当前任务可读的用户区域内。
-pub(in crate::kernel) unsafe fn read_user_value<T: Copy>(address: usize) -> T {
+pub(crate) unsafe fn read_user_value<T: Copy>(address: usize) -> T {
     // 安全性：SUM 仅在下面这一次用户地址读取期间开启，避免扩大内核访问 U 页的窗口。
     set_sum(true);
     // 安全性：调用方保证地址对齐且整个值位于当前用户已映射区域内。
@@ -37,7 +37,7 @@ pub(in crate::kernel) unsafe fn read_user_value<T: Copy>(address: usize) -> T {
 /// # Safety
 ///
 /// 调用方必须保证 `address` 对 `T` 对齐，并且完整的 `T` 位于当前任务可写的用户区域内。
-pub(in crate::kernel) unsafe fn write_user_value<T: Copy>(address: usize, value: T) {
+pub(crate) unsafe fn write_user_value<T: Copy>(address: usize, value: T) {
     // 安全性：SUM 仅在下面这一次用户地址写入期间开启，避免扩大内核访问 U 页的窗口。
     set_sum(true);
     // 安全性：调用方保证地址对齐且整个值位于当前用户栈的可写映射范围内。

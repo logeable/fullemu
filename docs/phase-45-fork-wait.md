@@ -31,7 +31,7 @@ RISC-V Linux 没有独立的 `fork` syscall 编号。用户态 `fork()` 以 fork
        └─ Reaped：资源已回收，父进程已收集状态或父进程已退出
 ```
 
-进程记录使用追加式 `Vec<Process>`，PID 由记录位置派生且本阶段不复用。用户页不是共享的：镜像和用户栈均复制到子进程独占的页帧，不实现写时复制。进程状态、父子关系和等待请求由 `kernel::process` 管理；syscall 模块只解析 ABI 参数并产生已校验的 `WaitRequest`。
+进程记录使用追加式 `Vec<Process>`，PID 由记录位置派生且本阶段不复用。用户页不是共享的：镜像和用户栈均复制到子进程独占的页帧，不实现写时复制。进程状态、父子关系和等待请求由 `process` 管理；syscall 模块只解析 ABI 参数并产生已校验的 `WaitRequest`。
 
 ## 本阶段不实现
 

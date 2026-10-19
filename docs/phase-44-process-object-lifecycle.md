@@ -14,7 +14,7 @@
 
 ## 实现范围
 
-- 将调度记录重命名并整理为 `kernel::process::Process`、`ProcessId` 和 `ProcessState`。
+- 将调度记录重命名并整理为 `process::Process`、`ProcessId` 和 `ProcessState`。
 - 每个进程通过 `ProcessResources` 集中拥有独立地址空间、用户程序镜像、用户栈和内核栈；陷入帧固定保存在内核栈顶下方，按栈布局推导其地址，不另存指针。
 - `creation` 先预留进程容器容量并准备全部资源，成功后才发布进程对象；局部资源所有者和地址空间创建器负责失败回滚。
 - `AddressSpace` 作为显式所有权值从创建器传给进程对象；删除 memory 内部用全局数组索引管理根页表的路径。
