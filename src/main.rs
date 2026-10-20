@@ -10,6 +10,7 @@ mod block;
 pub(crate) mod clock;
 mod console;
 mod driver;
+mod filesystem;
 pub(crate) mod frame_allocator;
 pub(crate) mod heap;
 pub mod logging;

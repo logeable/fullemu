@@ -1,6 +1,6 @@
 # fullemu
 
-fullemu 是一个以可读性和教学为优先的 Rust 操作系统项目。当前实现从 QEMU RISC-V `virt` 平台启动，将独立构建的 no_std RV64 ELF 用户程序装入 U-mode。内核默认启动用户态 `init`，由它启动并监督 shell；shell 支持输入、内置命令，以及通过 `fork`、`exec`、`wait` 前台运行嵌入式用户程序并传递空格分隔的参数。内核解析静态 `ET_EXEC` 的 `PT_LOAD` 段，为代码、只读数据和可写数据建立对应的 Sv39 权限，并实现 Linux RISC-V syscall 的有限子集。启动阶段还通过 FDT 发现 VirtIO MMIO 块设备，在专用临时双扇区镜像上验证扇区读写和写后读回；文件系统和运行时块 I/O 尚未实现。程序镜像页由进程单独持有。源码按内核职责和稳定概念组织，阶段编号只用于文档中的教学脉络。
+fullemu 是一个以可读性和教学为优先的 Rust 操作系统项目。当前实现从 QEMU RISC-V `virt` 平台启动，将独立构建的 no_std RV64 ELF 用户程序装入 U-mode。内核默认启动用户态 `init`，由它启动并监督 shell；shell 支持输入、内置命令，以及通过 `fork`、`exec`、`wait` 前台运行嵌入式用户程序并传递空格分隔的参数。内核解析静态 `ET_EXEC` 的 `PT_LOAD` 段，为代码、只读数据和可写数据建立对应的 Sv39 权限，并实现有限 Linux RISC-V syscall 子集。内核通过 FDT 发现 VirtIO 块设备，并使用 EasyFS 风格文件系统保存目录和文件；用户程序可调用基础文件 syscall，并通过 `ls`、`mkdir`、`touch`、`rm` 管理文件。QEMU 默认复用持久磁盘镜像。程序镜像页由进程单独持有。源码按内核职责和稳定概念组织，阶段编号只用于文档中的教学脉络。
 
 ## 快速开始
 
@@ -14,7 +14,7 @@ make run
 
 内核默认启动 `init`，再由它启动 shell。可以通过 `make run BOOT_PROGRAM=fork_wait` 选择其他用户程序作为内核入口，便于直接运行单项实验。当前 shell 可通过输入程序名启动其他嵌入式用户程序；批量启动所有用户程序的旧 batch 模式已移除。
 
-`make build` 会先构建独立的 `user/` 程序，再由内核构建脚本把 ELF 文件嵌入内核。用户程序使用共同虚拟区域 `0x40000000`，链接脚本按页分离可执行代码、只读数据和可写数据；内核装载器解析 ELF 程序头并将各段复制到独立页帧。当前只支持静态 RV64 little-endian `ET_EXEC`，不支持动态链接、PIE 或文件系统。shell 可将空格分隔的命令参数传入新程序，暂不支持引号、转义和非空环境变量。`user/target/riscv64gc-unknown-none-elf/release/user-programs.manifest` 记录程序名和 ELF 路径。以 `disabled-` 开头的 bin 源文件会被 `make build-user` 忽略；新增或移除其他 `user/src/bin/` 程序时，镜像清单会随 `make build-user` 更新。若只需编译不含用户程序的内核，可运行 `make build-kernel` 或直接运行 `cargo build --target riscv64gc-unknown-none-elf`。当前 syscall 仅实现有限 Linux ABI 子集，不代表已兼容完整 Linux 用户态。按 `Ctrl-C` 结束 QEMU。
+`make build` 会先构建独立的 `user/` 程序，再由内核构建脚本把 ELF 文件嵌入内核。用户程序使用共同虚拟区域 `0x40000000`，链接脚本按页分离可执行代码、只读数据和可写数据；内核装载器解析 ELF 程序头并将各段复制到独立页帧。当前只支持静态 RV64 little-endian `ET_EXEC`，不支持动态链接或 PIE；用户程序仍从构建期嵌入清单加载，尚未从文件系统装载。shell 可将空格分隔的命令参数传入新程序，暂不支持引号、转义和非空环境变量。`user/target/riscv64gc-unknown-none-elf/release/user-programs.manifest` 记录程序名和 ELF 路径。以 `disabled-` 开头的 bin 源文件会被 `make build-user` 忽略；新增或移除其他 `user/src/bin/` 程序时，镜像清单会随 `make build-user` 更新。若只需编译不含用户程序的内核，可运行 `make build-kernel` 或直接运行 `cargo build --target riscv64gc-unknown-none-elf`。当前 syscall 仅实现有限 Linux ABI 子集，不代表已兼容完整 Linux 用户态。按 `Ctrl-C` 结束 QEMU。
 
 若 QEMU 可执行文件不在 PATH，可运行 `make run QEMU=/path/to/qemu-system-riscv64`。也可以单独运行 `make build-user` 构建用户程序。
 
@@ -72,4 +72,6 @@ make run
 - [第 51 阶段：VirtIO 块设备单扇区读取](docs/phase-51-virtio-block-read.md) 记录通过 FDT 发现 VirtIO MMIO transport、初始化 split virtqueue 并读取测试扇区的过程。
 - [第 52 阶段：块设备对象与扇区读写接口](docs/phase-52-block-device-object.md) 记录上层块设备契约、VirtIO 设备对象及串行扇区读写实现。
 - [第 53 阶段：用户进程 program break 与堆页](docs/phase-53-user-process-heap.md) 记录 Linux RISC-V `brk`、进程堆页映射与回收，以及 fork/exec 生命周期验证。
+- [第 54 阶段：EasyFS 风格的简易文件系统](docs/phase-54-filesystem-superblock.md) 记录磁盘布局、inode/目录/文件操作及当前边界。
+- [第 55 阶段：基础用户态文件系统调用](docs/phase-55-user-filesystem-syscalls.md) 记录进程文件描述符表、基础 Linux RISC-V 文件 syscall，以及 `ls`、`mkdir`、`touch`、`rm`。
 - [项目原则与代码规范](docs/development-principles.md) 是设计和协作规范。

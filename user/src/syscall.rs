@@ -8,12 +8,35 @@ const LINUX_CLONE_SYSCALL: usize = 220;
 const LINUX_EXECVE_SYSCALL: usize = 221;
 const LINUX_WAIT4_SYSCALL: usize = 260;
 const LINUX_BRK_SYSCALL: usize = 214;
+const LINUX_OPENAT_SYSCALL: usize = 56;
+const LINUX_CLOSE_SYSCALL: usize = 57;
+const LINUX_GETDENTS64_SYSCALL: usize = 61;
+const LINUX_MKDIRAT_SYSCALL: usize = 34;
+const LINUX_UNLINKAT_SYSCALL: usize = 35;
 const LINUX_SIGCHLD: usize = 17;
 const CLOCK_MONOTONIC: usize = 1;
+const LINUX_AT_FDCWD: isize = -100;
+/// 不因 `O_RDONLY` 权限位改变打开方式。
+pub const O_RDONLY: usize = 0;
+/// 以只写方式打开。
+pub const O_WRONLY: usize = 1;
+/// 以读写方式打开。
+pub const O_RDWR: usize = 2;
+/// 文件不存在时创建。
+pub const O_CREAT: usize = 0x40;
+/// 与 `O_CREAT` 同用时要求文件原先不存在。
+pub const O_EXCL: usize = 0x80;
+/// 打开时清空现有普通文件。
+pub const O_TRUNC: usize = 0x200;
+/// 写入时追加到文件末尾。
+pub const O_APPEND: usize = 0x400;
+/// 要求目标为目录。
+pub const O_DIRECTORY: usize = 0x10000;
 const EXEC_PROGRAM_NAME_BUFFER_SIZE: usize = 128;
 const LINUX_ENAMETOOLONG: isize = 36;
 const LINUX_E2BIG: isize = 7;
 const LINUX_EINVAL: isize = 22;
+const PATH_BUFFER_SIZE: usize = 256;
 const MAX_EXEC_ARGUMENT_COUNT: usize = 32;
 const MAX_EXEC_ARGUMENT_BYTES: usize = 4096;
 
@@ -97,6 +120,124 @@ pub fn brk(address: usize) -> usize {
     }
 
     result
+}
+
+/// 打开相对根目录解析的文件或目录，返回文件描述符或负的 Linux errno。
+pub fn open(path: &str, flags: usize, mode: usize) -> isize {
+    let mut path_buffer = [0; PATH_BUFFER_SIZE];
+    if let Err(error) = copy_path_to_buffer(path, &mut path_buffer) {
+        return error;
+    }
+    let mut result = LINUX_AT_FDCWD;
+
+    // 安全性：路径缓冲区在当前用户栈中且以 NUL 结尾；寄存器按 Linux RISC-V openat ABI 传递。
+    unsafe {
+        core::arch::asm!(
+            "ecall",
+            inlateout("a0") result,
+            in("a1") path_buffer.as_ptr() as usize,
+            in("a2") flags,
+            in("a3") mode,
+            in("a7") LINUX_OPENAT_SYSCALL,
+            options(nostack)
+        );
+    }
+    result
+}
+
+/// 关闭文件描述符；失败时返回负的 Linux errno。
+pub fn close(file_descriptor: usize) -> isize {
+    let mut result = file_descriptor as isize;
+
+    // 安全性：文件描述符和系统调用号按 Linux RISC-V close ABI 传递。
+    unsafe {
+        core::arch::asm!(
+            "ecall",
+            inlateout("a0") result,
+            in("a7") LINUX_CLOSE_SYSCALL,
+            options(nostack)
+        );
+    }
+
+    result
+}
+
+/// 从目录描述符读取 Linux `dirent64` 记录；本阶段仅支持传入有效的用户缓冲区。
+pub fn getdents64(file_descriptor: usize, buffer: &mut [u8]) -> isize {
+    let mut result = file_descriptor as isize;
+
+    // 安全性：输出切片位于当前用户地址空间，内核仍会验证整个缓冲区范围。
+    unsafe {
+        core::arch::asm!(
+            "ecall",
+            inlateout("a0") result,
+            in("a1") buffer.as_mut_ptr() as usize,
+            in("a2") buffer.len(),
+            in("a7") LINUX_GETDENTS64_SYSCALL,
+            options(nostack)
+        );
+    }
+
+    result
+}
+
+/// 创建一个目录；`mode` 按 Linux 接口传入，当前文件系统尚不保存权限位。
+pub fn mkdir(path: &str, mode: usize) -> isize {
+    let mut path_buffer = [0; PATH_BUFFER_SIZE];
+    if let Err(error) = copy_path_to_buffer(path, &mut path_buffer) {
+        return error;
+    }
+    let mut result = LINUX_AT_FDCWD;
+
+    // 安全性：路径缓冲区在当前用户栈中且以 NUL 结尾；参数按 Linux RISC-V mkdirat ABI 传递。
+    unsafe {
+        core::arch::asm!(
+            "ecall",
+            inlateout("a0") result,
+            in("a1") path_buffer.as_ptr() as usize,
+            in("a2") mode,
+            in("a7") LINUX_MKDIRAT_SYSCALL,
+            options(nostack)
+        );
+    }
+
+    result
+}
+
+/// 删除普通文件；本阶段不支持删除目录。
+pub fn unlink(path: &str) -> isize {
+    let mut path_buffer = [0; PATH_BUFFER_SIZE];
+    if let Err(error) = copy_path_to_buffer(path, &mut path_buffer) {
+        return error;
+    }
+    let mut result = LINUX_AT_FDCWD;
+
+    // 安全性：路径缓冲区在当前用户栈中且以 NUL 结尾；标志为零表示 unlinkat 普通文件删除。
+    unsafe {
+        core::arch::asm!(
+            "ecall",
+            inlateout("a0") result,
+            in("a1") path_buffer.as_ptr() as usize,
+            in("a2") 0usize,
+            in("a7") LINUX_UNLINKAT_SYSCALL,
+            options(nostack)
+        );
+    }
+
+    result
+}
+
+/// 把路径编码为以 NUL 结尾的固定缓冲区，拒绝过长或包含内部 NUL 的字符串。
+fn copy_path_to_buffer(path: &str, buffer: &mut [u8; PATH_BUFFER_SIZE]) -> Result<(), isize> {
+    if path.is_empty() || path.as_bytes().contains(&0) {
+        return Err(-LINUX_EINVAL);
+    }
+    if path.len() >= buffer.len() {
+        return Err(-LINUX_ENAMETOOLONG);
+    }
+    buffer[..path.len()].copy_from_slice(path.as_bytes());
+    buffer[path.len()] = 0;
+    Ok(())
 }
 
 /// 请求内核以给定状态码结束当前用户任务；符合 Linux ABI 时不会返回。

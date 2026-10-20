@@ -11,6 +11,50 @@ use super::{
     UserImageMapping, UserStackMapping,
 };
 
+const MAX_KERNEL_DEVICE_MAPPINGS: usize = 32;
+
+#[derive(Clone, Copy)]
+struct KernelDeviceMapping {
+    physical_start: usize,
+    size: usize,
+}
+
+impl KernelDeviceMapping {
+    const EMPTY: Self = Self {
+        physical_start: 0,
+        size: 0,
+    };
+}
+
+static mut KERNEL_DEVICE_MAPPINGS: [KernelDeviceMapping; MAX_KERNEL_DEVICE_MAPPINGS] =
+    [KernelDeviceMapping::EMPTY; MAX_KERNEL_DEVICE_MAPPINGS];
+static mut KERNEL_DEVICE_MAPPING_COUNT: usize = 0;
+
+/// 保存启动阶段从 FDT 解析出的设备寄存器范围，供后续所有进程页表映射。
+///
+/// 此配置必须在创建任何进程地址空间之前调用一次；当前单 hart 启动流程保证没有并发访问。
+pub(crate) fn initialize_kernel_device_mappings(regions: &[(usize, usize)]) {
+    if regions.len() > MAX_KERNEL_DEVICE_MAPPINGS {
+        panic!("内核设备 MMIO 映射数量超过容量");
+    }
+
+    // 安全性：该配置仅在启动阶段、进程创建前写入一次；后续映射过程只读取已固定的内容。
+    unsafe {
+        let mappings =
+            core::ptr::addr_of_mut!(KERNEL_DEVICE_MAPPINGS).cast::<KernelDeviceMapping>();
+        for (index, &(physical_start, size)) in regions.iter().enumerate() {
+            if size == 0 || physical_start.checked_add(size).is_none() {
+                panic!("内核设备 MMIO 映射范围无效");
+            }
+            mappings.add(index).write(KernelDeviceMapping {
+                physical_start,
+                size,
+            });
+        }
+        core::ptr::addr_of_mut!(KERNEL_DEVICE_MAPPING_COUNT).write(regions.len());
+    }
+}
+
 /// 为一个进程建立独立页表；失败时归还本次创建的页表树。
 pub(crate) fn create_address_space(
     kernel_layout: KernelMemoryLayout,
@@ -210,6 +254,8 @@ fn populate_address_space(
         }
     }
 
+    map_kernel_device_mappings(root_table)?;
+
     map_kernel_section(root_table, kernel_layout.text, PTE_READ | PTE_EXECUTE)?;
     map_kernel_section(root_table, kernel_layout.rodata, PTE_READ)?;
     map_kernel_section(root_table, kernel_layout.data, PTE_READ | PTE_WRITE)?;
@@ -255,6 +301,36 @@ fn populate_address_space(
         console_page += PAGE_SIZE;
     }
 
+    Ok(())
+}
+
+fn map_kernel_device_mappings(root_table: *mut PageTable) -> Result<(), PageTableError> {
+    // 安全性：启动阶段已一次性写入固定数量的设备范围；单 hart 下配置不会并发修改。
+    let (mappings, count) = unsafe {
+        let count = core::ptr::addr_of!(KERNEL_DEVICE_MAPPING_COUNT).read();
+        let mappings = core::ptr::addr_of!(KERNEL_DEVICE_MAPPINGS).cast::<KernelDeviceMapping>();
+        let mut copy = [KernelDeviceMapping::EMPTY; MAX_KERNEL_DEVICE_MAPPINGS];
+        for (index, slot) in copy.iter_mut().take(count).enumerate() {
+            *slot = mappings.add(index).read();
+        }
+        (copy, count)
+    };
+
+    for mapping in mappings.iter().take(count) {
+        let end = mapping
+            .physical_start
+            .checked_add(mapping.size)
+            .ok_or(PageTableError::InvalidRange)?;
+        let mut page = align_down_to_page(mapping.physical_start);
+        let end = align_up_to_page(end).ok_or(PageTableError::InvalidRange)?;
+        while page < end {
+            // 设备寄存器保持物理地址恒等映射，且没有 PTE_USER，用户态不能直接访问。
+            map_page(root_table, page, page, PTE_READ | PTE_WRITE)?;
+            page = page
+                .checked_add(PAGE_SIZE)
+                .ok_or(PageTableError::InvalidRange)?;
+        }
+    }
     Ok(())
 }
 

@@ -8,7 +8,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use super::super::MmioRegion;
 use super::mmio::{VirtioMmioError, VirtioMmioTransport, VIRTIO_F_VERSION_1};
 use super::virtqueue::{QueueBuffer, VirtioSplitQueue, VirtqueueError};
-use crate::block::{BlockDevice, SECTOR_SIZE};
+use crate::block::{BlockDevice, BlockDeviceError, SECTOR_SIZE};
 
 const VIRTIO_DEVICE_BLOCK: u32 = 2;
 
@@ -266,8 +266,6 @@ impl Drop for VirtioBlockDevice {
 }
 
 impl BlockDevice for VirtioBlockDevice {
-    type Error = VirtioBlockError;
-
     fn sector_count(&self) -> u64 {
         self.sector_count
     }
@@ -276,13 +274,26 @@ impl BlockDevice for VirtioBlockDevice {
         &mut self,
         sector: u64,
         destination: &mut [u8; SECTOR_SIZE],
-    ) -> Result<(), Self::Error> {
+    ) -> Result<(), BlockDeviceError> {
         self.transfer_sector(sector, BLOCK_REQUEST_READ, destination)
+            .map_err(map_block_error)
     }
 
-    fn write_sector(&mut self, sector: u64, source: &[u8; SECTOR_SIZE]) -> Result<(), Self::Error> {
+    fn write_sector(
+        &mut self,
+        sector: u64,
+        source: &[u8; SECTOR_SIZE],
+    ) -> Result<(), BlockDeviceError> {
         let mut data = *source;
         self.transfer_sector(sector, BLOCK_REQUEST_WRITE, &mut data)
+            .map_err(map_block_error)
+    }
+}
+
+fn map_block_error(error: VirtioBlockError) -> BlockDeviceError {
+    match error {
+        VirtioBlockError::SectorOutOfRange => BlockDeviceError::SectorOutOfRange,
+        _ => BlockDeviceError::Io,
     }
 }
 

@@ -122,6 +122,7 @@ pub(super) fn create_process(program_index: usize) -> Result<ProcessId, ProcessC
             exit_status: None,
             wait_request: None,
             wait_collected: false,
+            file_descriptors: super::super::filesystem::FileDescriptorTable::new(),
             resources: Some(ProcessResources {
                 address_space,
                 program_range: (program.virtual_start, program_end),

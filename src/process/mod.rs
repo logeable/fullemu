@@ -82,6 +82,7 @@ struct Process {
     exit_status: Option<ProcessExitStatus>,
     wait_request: Option<wait::ProcessWaitRequest>,
     wait_collected: bool,
+    file_descriptors: super::filesystem::FileDescriptorTable,
     resources: Option<ProcessResources>,
 }
 
@@ -315,6 +316,61 @@ fn process_trap_frame_pointer(index: usize) -> *mut TrapFrame {
 fn current_process_index() -> usize {
     // 安全性：当前进程索引只由单 hart 的启动路径和陷入处理器访问。
     unsafe { core::ptr::read_volatile(core::ptr::addr_of!(CURRENT_PROCESS_INDEX)) }
+}
+
+/// 为当前进程安装打开文件并返回 Linux 文件描述符。
+pub(crate) fn install_open_file(file: super::filesystem::OpenFile) -> Result<usize, ()> {
+    // 安全性：文件描述符只在单 hart 的 syscall 陷入路径修改进程表。
+    let processes = unsafe { &mut *core::ptr::addr_of_mut!(PROCESSES) };
+    processes
+        .get_mut(current_process_index())
+        .unwrap_or_else(|| panic!("当前进程记录不存在"))
+        .file_descriptors
+        .insert(file)
+}
+
+/// 复制当前进程指定文件描述符的状态快照。
+pub(crate) fn open_file(descriptor: usize) -> Option<super::filesystem::OpenFile> {
+    // 安全性：文件描述符只在单 hart 的 syscall 陷入路径读取进程表。
+    let processes = unsafe { &*core::ptr::addr_of!(PROCESSES) };
+    processes
+        .get(current_process_index())?
+        .file_descriptors
+        .get(descriptor)
+}
+
+/// 更新当前进程文件描述符的位置。
+pub(crate) fn update_open_file(
+    descriptor: usize,
+    file: super::filesystem::OpenFile,
+) -> Result<(), ()> {
+    // 安全性：文件描述符只在单 hart的 syscall 陷入路径修改进程表。
+    let processes = unsafe { &mut *core::ptr::addr_of_mut!(PROCESSES) };
+    processes
+        .get_mut(current_process_index())
+        .unwrap_or_else(|| panic!("当前进程记录不存在"))
+        .file_descriptors
+        .update(descriptor, file)
+}
+
+/// 关闭当前进程的文件描述符。
+pub(crate) fn close_open_file(descriptor: usize) -> Result<(), ()> {
+    // 安全性：文件描述符只在单 hart 的 syscall 陷入路径修改进程表。
+    let processes = unsafe { &mut *core::ptr::addr_of_mut!(PROCESSES) };
+    processes
+        .get_mut(current_process_index())
+        .unwrap_or_else(|| panic!("当前进程记录不存在"))
+        .file_descriptors
+        .close(descriptor)
+}
+
+/// 检查任一存活进程是否仍持有指定 inode，避免删除后复用 inode 破坏打开文件。
+pub(crate) fn is_inode_open(inode_id: super::filesystem::InodeId) -> bool {
+    // 安全性：文件描述符表只在单 hart 的 syscall 陷入路径修改；此查询期间不会调度其他进程。
+    let processes = unsafe { &*core::ptr::addr_of!(PROCESSES) };
+    processes.iter().any(|process| {
+        process.state != ProcessState::Exited && process.file_descriptors.contains_inode(inode_id)
+    })
 }
 
 fn process_count() -> usize {

@@ -34,7 +34,7 @@ fn create_child_process(
 ) -> Result<super::ProcessId, creation::ProcessCreationError> {
     let parent_index = super::current_process_index();
     let child_id = creation::reserve_process_slot()?;
-    let (parent_id, parent_program_range, program_image, user_heap, user_stack) = {
+    let (parent_id, parent_program_range, program_image, user_heap, user_stack, file_descriptors) = {
         // 安全性：只在单 hart 的 S-mode trap 中创建子进程；进程表不会在该调用中被其他路径修改。
         let processes = unsafe { &*core::ptr::addr_of!(super::PROCESSES) };
         let parent = processes
@@ -59,6 +59,10 @@ fn create_child_process(
                 .user_stack
                 .duplicate()
                 .map_err(creation::ProcessCreationError::UserStack)?,
+            parent
+                .file_descriptors
+                .duplicate()
+                .map_err(|_| creation::ProcessCreationError::ProcessMetadataAllocation)?,
         )
     };
     let kernel_stack =
@@ -114,6 +118,7 @@ fn create_child_process(
             exit_status: None,
             wait_request: None,
             wait_collected: false,
+            file_descriptors,
             resources: Some(ProcessResources {
                 address_space,
                 program_range: parent_program_range,

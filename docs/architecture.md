@@ -9,17 +9,19 @@
 | `src/main.rs` | 声明内核领域模块，导出汇编使用的 `kernel_main` 入口并定义 panic handler | `startup`、RISC-V 架构入口 |
 | `src/device_tree` | 校验和遍历 FDT，并在无堆阶段提取内存、控制台和 VirtIO transport 初始化所需的平台数据 | Rust 核心库 |
 | `block` | 定义上层访问块设备的固定大小扇区读写契约 | Rust 核心库；具体驱动依赖并实现该契约 |
+| `filesystem` | 定义 fullemu 磁盘格式，管理 inode、目录项和文件内容 | 依赖 `block::BlockDevice`；不依赖 VirtIO、FDT 或 syscall；挂载对象拥有块设备 |
 | `src/console.rs` | 提供控制台字节输入输出及格式化服务，供内核日志和 syscall 使用 | `driver` 中的控制台能力接口 |
 | `src/driver` | 定义驱动共享接口，并提供 NS16550 UART、VirtIO MMIO transport 和块设备驱动 | QEMU `virt` 设备 binding、VirtIO 规范与寄存器约定 |
 | `src/arch/riscv64` | 提供低地址启动跳板与早期 Sv39 页表初始化、陷入帧、SBI 和定时器等 RISC-V 机制 | RISC-V 寄存器与固件调用约定 |
-| `startup` | 解析 FDT 启动信息并把 UART 范围交给控制台初始化，初始化页帧分配器和堆，再读取 VirtIO 测试扇区并启动入口进程 | `device_tree`、`console`、`driver`、分配器、进程和架构初始化接口 |
-| `user/` | 独立构建的用户态运行库和示例程序；默认 `init` 作为 PID 1 启动并监督 shell，shell 可前台运行嵌入式命令程序；`user_entry!` 将 `main` 的 `i32` 返回值作为进程退出状态 | 使用 Linux RISC-V syscall 约定；init 的派生、启动和重启策略以及 shell 的命令策略留在用户态，不由内核硬编码 |
+| `startup` | 解析 FDT 启动信息，初始化内存与控制台，发现 VirtIO 块设备并挂载文件系统，再启动入口进程 | `device_tree`、`console`、`driver`、`filesystem`、分配器、进程和架构初始化接口 |
+| `user/` | 独立构建的用户态运行库和程序；默认 `init` 作为 PID 1 启动并监督 shell，shell 可前台运行嵌入式程序；提供 `ls`、`mkdir`、`touch`、`rm` 文件命令 | 使用 Linux RISC-V syscall 约定；init 的派生、启动和重启策略以及 shell 的命令策略留在用户态，不由内核硬编码 |
 
 ## 内核领域模块
 
 | 模块 | 单一职责 | 资源所有权或接口边界 |
 | --- | --- | --- |
 | `heap` | 管理内核对象使用的字节堆，并实现全局分配器 | 初始化时从页帧分配器取得连续物理页作为固定堆后备区，通过 `memory` 地址接口取得高半区虚拟地址；为 `Vec` 等 `alloc` 容器提供字节分配 |
+| `filesystem` | 将块设备扇区解释为 fullemu 卷，维护超级块、inode/数据位图、inode 直接块、目录项和文件内容 | 布局借鉴 rCore EasyFS；`FileSystem<D>` 拥有块设备并提供格式化、挂载、路径解析、目录项枚举、创建/删除、元数据及按偏移读写；自行编码持久格式，不直接写 Rust 结构体内存；启动后由模块持有唯一挂载对象，syscall 通过窄回调访问 |
 | `frame_allocator` | 根据 FDT 中的 RAM 范围分配和回收物理页帧 | 使用固定 BSS 区间表保存物理范围元数据，不依赖堆；排除内核映像、DTB 和固件保留范围；清零时通过 `memory` 地址接口访问页帧 |
 | `memory` | 定义地址空间共享的映射输入与统一错误类型，并提供页帧内容复制 | 操作由 `address_space`、`user_access` 和 `page_table_log` 子模块直接提供；不经 `memory/mod.rs` 纯转发；地址空间机制不拥有用户栈、程序镜像或页表目标页 |
 | `memory::address` | 定义 Sv39 规范地址规则、低半部用户地址上界、内核直接映射及内核映像 VMA/LMA 换算 | 纯地址计算，不访问页表或分配器；调用方负责保证所访问物理范围已映射；内核其他模块直接依赖此模块，不经 `memory` 转发 |
@@ -29,7 +31,7 @@
 | `memory::page_table_log` | 遍历现有页表并把映射合并成诊断日志 | 只读页表；不创建或释放映射 |
 | `memory::user_access` | 在短暂设置 `sstatus.SUM` 的窗口内访问已验证的用户地址 | 只执行单次内存读写；范围校验由 syscall 调用路径负责 |
 | `trap_handler` | 接收架构陷入现场并分类陷入原因，将用户环境调用转交给 syscall 层 | 依赖 `arch::riscv64::trap`、`syscall` 和 `process`；不直接访问进程表、页表或设备 |
-| `process` | 管理进程表、状态、轮转调度和进程资源的最终回收 | 持有追加式 `Vec<Process>` 与稳定 `ProcessId`；每个进程独占 `ProcessResources`，包含地址空间、镜像、用户堆和两种栈；陷入帧固定保存在内核栈顶下方，由栈布局推导地址；不依赖 syscall ABI |
+| `process` | 管理进程表、状态、轮转调度和进程资源的最终回收 | 持有追加式 `Vec<Process>` 与稳定 `ProcessId`；每个进程独占 `ProcessResources`，包含地址空间、镜像、用户堆、两种栈和文件描述符表；陷入帧固定保存在内核栈顶下方，由栈布局推导地址；不依赖 syscall ABI |
 | `process::creation` | 创建启动阶段装入的独立用户进程 | 按顺序准备镜像、用户栈、内核栈和地址空间，全部成功后发布进程对象；与 `fork` 共享进程槽位预留及内核映像布局准备 |
 | `process::exec` | 用新的嵌入式 ELF 程序替换当前进程的用户态映像、参数栈和地址空间 | 保留 PID、父子关系及当前内核栈；先准备新映像、带 `argc/argv` 的用户栈和地址空间，再切换并回收旧资源 |
 | `process::fork` | 复制当前进程的用户镜像、用户栈和用户现场，创建子进程 | 子进程独占复制后的页帧、内核栈和地址空间；构造完整后才追加到进程表；将资源失败和 PID 耗尽分类交给 syscall 转换 ABI 错误码 |
@@ -37,7 +39,7 @@
 | `process::exit` | 标记正常退出或异常终止，发布退出状态并通知父子关系管理 | 调用 `wait` 处理父进程唤醒和孤儿关系，再交给 `process` 调度器切换；资源实际回收由调度器在切换到安全栈后执行 |
 | `process::stack` | 分配进程内核栈和用户栈的页帧，并在资源销毁时归还 | 内核栈需要连续页帧并映射到高半区；`KernelStack` 提供固定位置的陷入帧地址；每张进程页表映射所有可能仍在使用的内核栈，以支持切换期间继续运行；用户栈允许离散页帧；不决定调度策略 |
 | `process::user_heap` | 维护进程 program break，并拥有堆映射对应的用户物理页帧 | 堆从用户 ELF 映像页对齐末端向高地址增长；增长时分配并清零页帧，缩小时先撤销映射再归还页帧；fork 复制堆，exec 替换堆，退出时释放堆页 |
-| `syscall` | 将 Linux RISC-V syscall 转换为内核行为，并协调所需子系统完成调用 | 负责 ABI 参数、用户指针范围验证、`execve` 参数复制和 Linux 错误码；通过窄接口调用进程、内存、时钟和控制台能力，不直接访问进程表 |
+| `syscall` | 将 Linux RISC-V syscall 转换为内核行为，并协调所需子系统完成调用 | `src/syscall/mod.rs` 负责编号分派、公共上下文创建和陷入现场返回；`syscall::process`、`syscall::filesystem`、`syscall::io`、`syscall::clock` 分别实现各类 ABI 适配；`syscall::abi` 集中维护 Linux 编号、标志和 errno，`syscall::context` 维护用户地址范围检查；通过窄接口调用内核子系统，不直接访问进程表 |
 | `user_program` | 校验构建生成的程序清单、解析嵌入式 ELF 并装载 `PT_LOAD` 段 | ELF 字节嵌入内核构建产物；`user_program::elf` 只解析 ELF 头和程序头，外层分配、清零并复制页帧；`LoadedUserProgram` 持有入口、页权限及镜像页帧 |
 | `clock` | 提供内核启动后的单调时间值 | 读取架构计时源并转换成内核时间值，不定义用户 ABI 布局 |
 | `logging` | 过滤并格式化内核诊断记录 | 通过 `console` 输出，并读取平台计时源 |
@@ -88,8 +90,10 @@ flowchart TD
     Startup --> Address[memory::address 地址换算]
     Startup -->|FdtMemoryInfo 内存范围| Frames[frame_allocator]
     Startup -->|解析 VirtIO transport 范围| VirtioInfo[device_tree::virtio_info]
-    Startup -->|启动期扇区读取| VirtioBlock[driver::virtio::block]
+    Startup -->|块设备发现| VirtioBlock[driver::virtio::block]
     VirtioBlock --> Block[block 扇区读写契约]
+    Startup --> FileSystem[filesystem 文件系统]
+    FileSystem --> Block
     VirtioBlock --> Address[memory::address 地址换算]
     VirtioBlock --> VirtioQueue[driver::virtio::virtqueue]
     VirtioBlock --> VirtioMmio
@@ -135,22 +139,24 @@ flowchart TD
 - 架构模块提供机制，不决定批处理、进程选择或 Linux syscall 行为。
 - `trap_handler` 是运行时陷入路由层：架构汇编保存和恢复现场并调用陷入协调器；协调器识别原因，将 U-mode 环境调用交给 syscall 处理函数，将定时器与用户异常交给进程管理。它不持有进程状态或实现 syscall ABI。
 - `syscall` 是 Linux ABI 到内核能力的适配与协调层：它解码调用、校验参数，直接调用所需的进程、内存、时钟或控制台接口，并负责返回值和用户现场推进。当前 `brk` 原始系统调用由该层转给 `process::user_heap`；内核按 Linux 原始 ABI 返回新 break，失败时返回旧 break。它不直接访问进程表或实现调度策略。
-- `process` 拥有进程状态、资源和调度策略；`creation`、`fork`、`exec`、`wait`、`exit`、`user_heap` 分别管理初始创建、复制创建、映像替换、父子等待、退出状态变化和用户堆生命周期。它们只提供内核语义接口，不解析 Linux syscall 编号、参数或 errno。
+- `src/syscall/mod.rs` 只保留 syscall 编号分派、共享上下文构造和陷入现场返回；`syscall::process`、`syscall::filesystem`、`syscall::io`、`syscall::clock` 各自承载相应 ABI 的参数解释与错误转换。`syscall::abi` 是编号、标志和 errno 的唯一来源，`syscall::context` 负责描述当前调用可访问的用户内存范围。syscall 子模块可以协调内核子系统，但进程生命周期、磁盘格式、设备寄存器和页表机制仍由各自领域模块拥有。
+- `process` 拥有进程状态、资源、文件描述符表和调度策略；`creation`、`fork`、`exec`、`wait`、`exit`、`user_heap` 分别管理初始创建、复制创建、映像替换、父子等待、退出状态变化和用户堆生命周期。它们只提供内核语义接口，不解析 Linux syscall 编号、参数或 errno。当前 `fork` 复制文件描述符表及当前位置，父子进程的位置独立变化，尚未实现 Linux 共享 open-file-description 语义。
 - 页帧分配器管理物理页，不依赖堆、地址空间、进程或用户程序；其元数据使用固定容量区间表，避免堆初始化前的循环依赖。清零页帧时仅依赖 `memory::address` 的纯地址换算，不调用页表生命周期或地址空间接口。
 - `memory::address` 负责 Sv39 地址规则与内核地址换算，不验证映射是否已建立。调用方必须根据启动阶段和地址空间契约保证地址可访问；需要地址换算的内核模块直接调用该子模块，不通过 `memory` 增设纯转发函数。
 - `memory::page` 只依赖 Rust 核心整数运算，集中维护基础页大小和页对齐规则；堆对象对齐仍由 `heap` 按其任意对齐语义单独处理。
 - 用户堆和内核堆是两个独立概念：`process::user_heap` 持有用户地址空间中的页帧并维护 program break，`heap` 为内核 `alloc` 容器提供字节分配；当前用户库只有原始 `brk` syscall 封装，尚未提供 Rust `GlobalAlloc` 或 `Box`、`Vec` 的用户态分配器。
 - 堆只管理对象字节分配，初始化时从页帧分配器取得连续物理页，再以高半区直接映射虚拟地址管理对象；页帧所有权仍由堆持有，堆当前固定为 256 KiB。
-- `memory` 管理映射，不拥有映射目标所指向的程序镜像和进程栈页帧；进程页表将 FDT RAM 映射到高半区直接映射窗口，UART MMIO 范围由 `console` 提供并单独映射。
+- `memory` 管理映射，不拥有映射目标所指向的程序镜像和进程栈页帧；进程页表将 FDT RAM 映射到高半区直接映射窗口，UART MMIO 由 `console` 提供并单独映射，VirtIO MMIO 范围由启动层从 FDT 提供并建立 supervisor-only 恒等映射，使 syscall 中的文件系统 I/O 在切换到进程页表后仍可访问设备。
 - `process` 决定何时创建、切换、结束和回收进程；`process::stack` 只管理栈页帧所有权。地址空间由 `AddressSpace` 值表达，不再由 memory 模块的全局索引表间接管理。
 - `syscall` 是 Linux ABI 边界。ABI 编号和错误码应留在该边界，不散布到调度、内存和设备模块。
 - 当两个子系统需要互相调用时，应优先把共享契约放进窄的数据接口，避免继续扩大双向依赖。
 - `main` 只负责启动编排；FDT 解析、页表细节和进程状态转换分别留在各自子系统。
 - `device_tree::fdt` 只依赖核心库并返回借用式原始视图；`device_tree::memory_info` 在无堆阶段把初始化信息复制到固定容量值中。页帧分配器消费 `FdtMemoryInfo` 中的物理范围，不反向依赖内核分配器或日志。
 - `device_tree::console_info` 在无堆阶段从 `/soc` 下提取 NS16550 UART 的寄存器范围；`startup` 在首次日志输出前把寄存器范围交给 `console::initialize`，控制台模块配置当前 UART 驱动；解析器不依赖驱动，驱动也不解析 FDT。
-- `device_tree::virtio_info` 在无堆阶段收集 `/soc` 下启用的 `virtio,mmio` transport 范围；`startup` 将候选范围交给 `driver::virtio::block::VirtioBlockDevice::probe`，由块驱动调用 `driver::virtio::mmio` 探测通用 transport，再检查设备 ID 并构造设备对象。块驱动内部取得静态队列和请求缓冲区的虚拟地址，并通过 `memory::address` 换算为当前 QEMU 平台使用的物理设备地址；因此启动层不查询 VirtIO 内部 DMA 缓冲区，也不传递队列或请求地址。该换算假设设备可直接使用物理地址，尚未引入独立 DMA 映射接口或 IOMMU 支持。块驱动负责块请求头、扇区数据、状态缓冲区以及 transport 队列寄存器编排和通知；`driver::virtio::virtqueue` 负责通用描述符链、环形区更新和完成轮询。`make run` 连接专用临时镜像验证扇区读写；该测试布局不用于普通磁盘镜像。
+- `device_tree::virtio_info` 在无堆阶段收集 `/soc` 下启用的 `virtio,mmio` transport 范围；`startup` 将候选范围交给 `driver::virtio::block::VirtioBlockDevice::probe`，由块驱动调用 `driver::virtio::mmio` 探测通用 transport，再检查设备 ID 并构造设备对象。块驱动内部取得静态队列和请求缓冲区的虚拟地址，并通过 `memory::address` 换算为当前 QEMU 平台使用的物理设备地址；因此启动层不查询 VirtIO 内部 DMA 缓冲区，也不传递队列或请求地址。该换算假设设备可直接使用物理地址，尚未引入独立 DMA 映射接口或 IOMMU 支持。块驱动负责块请求头、扇区数据、状态缓冲区以及 transport 队列寄存器编排和通知；`driver::virtio::virtqueue` 负责通用描述符链、环形区更新和完成轮询。块设备当前只在启动时使用，尚未作为运行时文件系统服务暴露。
+- `filesystem` 通过 `block::BlockDevice` 读写 512 字节逻辑扇区，不处理 VirtIO 寄存器或 DMA。超级块位于扇区 0，按 EasyFS 思路顺序布局 inode 位图、inode 区、数据位图和数据区；只有超级块和元数据区均为空时才格式化，未知非空元数据会被拒绝。QEMU 默认使用 `target/fullemu-filesystem.img`，后续启动复用同一镜像；`BLOCK_IMAGE` 可指定其他持久镜像。startup 在进程启动前初始化并保留唯一挂载对象；`openat`、`close`、`getdents64`、`mkdirat`、`unlinkat` 以及已有 `read`/`write` syscall 提供基础文件操作。路径相对根目录解析，只支持 `AT_FDCWD`；syscall 在删除前检查所有进程的描述符，仍有进程打开的 inode 返回 `EBUSY`；当前格式不保存权限，目录删除、链接、重命名、块缓存和崩溃一致性仍未实现。
 - `process::user_heap` 持有每个进程的 program break 和堆页帧；`syscall` 只识别 Linux RISC-V `brk` 号 214 并转交进程模块。`memory::address_space` 只建立或撤销用户页映射，不拥有堆数据页。用户地址验证范围包含当前已映射堆页，使 read/write、exec 参数和 wait 状态指针可使用堆内存。
-- `block::BlockDevice` 为上层提供 512 字节扇区读写接口，`VirtioBlockDevice` 实现该接口。当前设备对象以可变借用串行提交请求，底层静态 DMA 队列限制为单个活动实例；正常销毁对象时复位设备并释放队列占用，超时或队列状态损坏后保留占用以防设备继续访问被复用的缓冲区。接口尚未由运行时块设备管理器持有。驱动使用引导页表保留的低地址 MMIO 恒等映射。进程页表尚未映射 VirtIO 寄存器，运行时块 I/O、设备中断和文件系统均未实现。`make run` 在独立临时双扇区镜像上验证写后读回，并在 QEMU 退出时删除该镜像。
+- `block::BlockDevice` 为上层提供 512 字节扇区读写接口，`VirtioBlockDevice` 实现该接口。当前设备对象以可变借用串行提交请求，底层静态 DMA 队列限制为单个活动实例；正常销毁对象时复位设备并释放队列占用，超时或队列状态损坏后保留占用以防设备继续访问被复用的缓冲区。接口尚未由运行时块设备管理器持有。驱动使用低地址 MMIO 恒等映射；启动时将 FDT 中的 VirtIO transport 范围登记给 `memory::address_space`，每个进程页表都映射这些 supervisor-only 设备页，供 syscall 期间的文件系统 I/O 使用。设备中断尚未实现。`make run` 挂载默认持久镜像并更新超级块；不会在 QEMU 退出时删除镜像，也不保证异常断电后的写入持久性。
 - Linux ABI 的数据布局由 `syscall` 持有；`clock` 只返回内部时间值，避免内核机制层依赖 syscall ABI。
 - 启动顺序必须先解析并校验 DTB、提取 RAM/固件保留范围和 DTB 自身范围，再初始化页帧分配器，最后从页帧分配器取得堆后备页；页帧分配器的元数据不能通过堆分配。
 
@@ -161,6 +167,8 @@ flowchart TD
 第 52 阶段新增 `block::BlockDevice`，以 512 字节扇区读写接口隔离上层消费者与具体硬件；`driver::virtio::block::VirtioBlockDevice` 实现该接口，持有容量和队列对象。通用现代 MMIO transport 探测与寄存器访问位于 `driver::virtio::mmio`；split virtqueue 的描述符、环形区和完成轮询位于 `driver::virtio::virtqueue`；块驱动保留块请求格式、队列寄存器编排、设备通知和扇区读写语义。队列和请求缓冲区仍为静态单实例资源，物理设备地址由驱动内部从内核高半区地址换算，启动层只负责发现 transport 并执行启动读写检查。运行时设备管理、多设备和并发请求留待文件系统及同步机制形成实际需求后推进。
 
 第 53 阶段为用户进程增加 Linux RISC-V `brk` syscall。`process::user_heap` 从 ELF 映像末端向高地址跟踪 program break，并拥有对应的用户页帧；增长时按需分配清零页并映射为用户读写，缩小时撤销整页映射并归还页帧。`fork` 复制堆页，`exec` 建立新堆，退出回收旧堆；syscall 用户缓冲区检查也纳入已映射堆页。`heap_test` 通过 QEMU 验证跨页读写、非法扩展失败、fork 隔离、缩小回收和重新分配清零。当前用户库只有 `brk` 原始调用封装，还没有为 `alloc` crate 提供的用户态全局分配器。
+
+第 54 阶段开始文件系统实验，并参考 rCore EasyFS 的磁盘区域组织：超级块、inode 位图、inode 区、数据位图、数据区。`filesystem` 自行按小端格式编码磁盘记录，固定建立 128 个 inode 和根目录 inode 0；每个 inode 有 14 个直接数据扇区，目录项固定为 32 字节。接口支持格式化/挂载、目录查找、路径解析、目录项枚举、创建、普通文件删除、元数据查询及文件按偏移读写，单文件上限为 7168 字节。只有超级块及元数据区为空时才格式化，未知非空元数据会拒绝覆盖。QEMU 使用可复用 raw 镜像，正常关闭后再次启动可以观察挂载次数增加。第 55 阶段接入长期挂载对象、进程文件描述符表和基础文件 syscall；当前仍无块缓存、目录删除/重命名、链接或崩溃一致性。
 
 此前将导出的 `supervisor_trap_handler` 和运行时陷入路由移至 `trap_handler`，并明确 syscall 层负责协调 ABI 操作。陷入处理器把 U-mode 环境调用交给 `syscall`；syscall 直接调用进程、内存、时钟和设备接口，处理返回现场及进程控制，不再通过 `SyscallOutcome` 中转。汇编入口符号保持 `supervisor_trap_handler` 不变，因此不需要改变 `trap.S` 的调用约定。
 
@@ -174,9 +182,9 @@ flowchart TD
 
 第 32 阶段引入单进程创建器，第 43 阶段移除用户镜像和进程记录的固定数量上限。第 44 阶段将进程记录改为拥有资源的 `Process` 对象：创建器先预留容器容量，再准备镜像、用户栈、内核栈和地址空间，最后一次性发布对象；创建失败时局部所有者回收已取得资源。退出后，调度器先切换地址空间，再回收已退出进程的页表、镜像和用户栈；内核栈延迟到运行在另一栈后释放。最后一个进程退出时，回收器先切换到引导栈和保留的引导页表，再释放最后一组资源。第 45 阶段加入 fork 式进程复制和 `wait4` 等待，退出状态由父进程收集；PID 仍追加分配且不复用。
 
-第 46 阶段加入受限 `execve`：当时只查找 `/bin/<程序名>` 对应的构建期嵌入程序。第 47 阶段在用户态加入 `init`：首个进程作为 PID 1，循环 fork 子进程、exec shell、wait 任意子进程并在 shell 退出后重新启动；内核将其他父进程留下的孤儿重新托管给 PID 1，init 负责通过 `waitpid(-1)` 收集退出状态。第 48 阶段让 shell 通过 `fork`、`exec` 和针对子 PID 的 `waitpid` 前台运行嵌入式程序。第 49 阶段将构建期嵌入的原始镜像改为 ELF，内核解析静态 RV64 `ET_EXEC` 的 `PT_LOAD` 段并按页权限映射。第 50 阶段让 `execve` 校验并复制 `argv`，在新用户栈构造 `argc`、参数指针、空 `envp` 和 `AT_NULL`；shell 支持无引号、按空格拆分的参数。当前没有文件系统，用户库和 shell 直接按程序名查找嵌入清单，不再合成 `/bin/` 伪路径。当前仍不支持非空 `envp`、动态链接、PIE、重定位或文件系统加载；早期 batch 启动模式已移除，后续进程由用户态按需创建。
+第 46 阶段加入受限 `execve`：当时只查找 `/bin/<程序名>` 对应的构建期嵌入程序。第 47 阶段在用户态加入 `init`：首个进程作为 PID 1，循环 fork 子进程、exec shell、wait 任意子进程并在 shell 退出后重新启动；内核将其他父进程留下的孤儿重新托管给 PID 1，init 负责通过 `waitpid(-1)` 收集退出状态。第 48 阶段让 shell 通过 `fork`、`exec` 和针对子 PID 的 `waitpid` 前台运行嵌入式程序。第 49 阶段将构建期嵌入的原始镜像改为 ELF，内核解析静态 RV64 `ET_EXEC` 的 `PT_LOAD` 段并按页权限映射。第 50 阶段让 `execve` 校验并复制 `argv`，在新用户栈构造 `argc`、参数指针、空 `envp` 和 `AT_NULL`；shell 支持无引号、按空格拆分的参数。第 54 阶段加入 EasyFS 风格的内核文件系统接口；第 55 阶段由 startup 长期持有挂载对象，进程拥有文件描述符表，syscall 提供受限的 `openat`、`close`、`getdents64`、`mkdirat`、`unlinkat` 并复用 `read`/`write`；用户程序 `ls`、`mkdir`、`touch`、`rm` 可由 shell 前台启动。用户库和 shell 仍按程序名查找构建期嵌入清单，不再合成 `/bin/` 伪路径。当前仍不支持非空 `envp`、动态链接、PIE、重定位或从文件系统加载程序；早期 batch 启动模式已移除，后续进程由用户态按需创建。
 
-当前启动入口 `_start` 与引导页表、引导栈位于低地址；引导汇编清零各段的物理装载范围，建立临时 Sv39 映射，再切换到高半区 `kernel_main`。内核 `.text`、`.rodata`、`.data` 和 `.bss` 的 VMA 为 `0xffffffc000000000 + LMA`，并按页边界分别映射为 `SR-X`、`SR--`、`SRW-` 和 `SRW-`。进程页表将 FDT RAM 映射到 `0xffffffc000000000 + PA` 的高半区直接映射窗口，并按高 VMA/低 LMA 映射内核段、启动栈和所有进程内核栈；内核代码、堆、页帧和页表通过高半区虚拟地址访问，物理地址仅用于页表项、`satp` 和资源记录。共享内核栈映射使调度器切换 `satp` 后仍能完成当前陷入处理。用户 ELF 的 `PT_LOAD` 页按段权限映射为 `UR-X`、`UR--` 或 `URW-`，用户栈映射为 `URW-`，均位于 Sv39 低半部；用户映像从 `0x40000000` 开始，物理页由进程拥有且可以不连续。`make inspect-kernel-elf` 检查低地址入口、启动段恒等布局及内核主体 VMA/LMA 偏移。临时启动页表按 QEMU `virt` 的单 hart、128 MiB RAM 环境用 1 GiB 叶子覆盖低设备窗口、RAM 低地址和高半区别名；进程页表不再建立 RAM 低地址恒等映射，UART MMIO 仍按设备物理地址单独映射。
+当前启动入口 `_start` 与引导页表、引导栈位于低地址；引导汇编清零各段的物理装载范围，建立临时 Sv39 映射，再切换到高半区 `kernel_main`。内核 `.text`、`.rodata`、`.data` 和 `.bss` 的 VMA 为 `0xffffffc000000000 + LMA`，并按页边界分别映射为 `SR-X`、`SR--`、`SRW-` 和 `SRW-`。进程页表将 FDT RAM 映射到 `0xffffffc000000000 + PA` 的高半区直接映射窗口，并按高 VMA/低 LMA 映射内核段、启动栈和所有进程内核栈；内核代码、堆、页帧和页表通过高半区虚拟地址访问，物理地址仅用于页表项、`satp` 和资源记录。共享内核栈映射使调度器切换 `satp` 后仍能完成当前陷入处理。用户 ELF 的 `PT_LOAD` 页按段权限映射为 `UR-X`、`UR--` 或 `URW-`，用户栈映射为 `URW-`，均位于 Sv39 低半部；用户映像从 `0x40000000` 开始，物理页由进程拥有且可以不连续。`make inspect-kernel-elf` 检查低地址入口、启动段恒等布局及内核主体 VMA/LMA 偏移。临时启动页表按 QEMU `virt` 的单 hart、128 MiB RAM 环境用 1 GiB 叶子覆盖低设备窗口、RAM 低地址和高半区别名；进程页表不建立 RAM 低地址恒等映射，但会按 FDT 映射设备 MMIO 范围（当前 VirtIO 设备采用 supervisor-only 恒等映射），UART MMIO 也单独映射。
 
 此前将原先过于宽泛的 `boot` 顶层模块重命名为 `device_tree`，并把 `info.rs` 明确命名为 `memory_info.rs`；启动编排曾位于 `kernel::startup`。QEMU UART 曾从 `arch::riscv64` 移至 `device` 模块。本轮将具体硬件实现归入 `driver`，并将控制台服务保留在独立的 `console` 模块：`driver::ConsoleDevice` 表达 UART 的最小字节收发契约，日志和 syscall 通过 `console` 使用服务接口，具体 NS16550 寄存器访问集中在 `driver::uart16550`；VirtIO 相关实现集中在 `driver::virtio`，分别由 `mmio`、`virtqueue` 和 `block` 子模块承担 transport、队列机制和块设备协议。随后由 `device_tree::console_info` 读取 QEMU `virt` FDT 中 `/soc` 子设备的 UART `reg` 范围，启动阶段先完成这项解析和控制台初始化，再输出日志；UART 物理地址不再写死在驱动中。当前仍只支持空 `ranges` 的 `/soc` 和 NS16550 兼容设备，尚未解析 `/chosen/stdout-path`、总线地址转换或建立通用设备发现/注册框架。另继续明确数据与机制/ABI 的归属：`PhysicalMemoryRegion` 留在 `device_tree::memory_info`，时钟返回内核自己的 `MonotonicTime`，Linux `timespec` 布局留在 syscall 边界。没有为了文件大小进行机械拆分，页表映射契约仍由 `memory` 统一维护，进程对象拥有自己的栈和镜像资源。
 
@@ -184,7 +192,7 @@ flowchart TD
 
 1. 地址空间规划已记录在第 33 阶段；第 34 阶段分离用户镜像虚拟地址与 RAM 恒等映射，第 35 阶段按页边界落实内核段权限，第 41 阶段实现低地址入口、早期 Sv39 映射及高 VMA/低 LMA 内核主体。进程页表按 FDT 描述的 RAM 建立高半区直接映射，低地址 RAM 恒等映射只保留在启动页表中；后续可继续审查启动阶段低地址映射的范围和权限。
 2. 第 45 阶段支持 fork 式 `clone(SIGCHLD)`、阻塞 `wait4`、退出状态收集与子进程资源回收；第 46 阶段支持受限 `execve`；第 47 阶段由用户态 `init` 监督 shell 并回收重新托管的孤儿进程；第 48 阶段由 shell 前台执行用户程序；第 49 阶段支持静态 RV64 `ET_EXEC` ELF 装载；第 50 阶段支持 `execve` 的 `argv` 复制与初始栈构造。当前用户程序来源仍是构建时嵌入清单，按程序名查找；尚不实现非空环境变量、文件系统路径解析、ELF 动态链接/PIE/重定位、shell 引号与转义、后台任务或 PID 复用。`wait4` 仅支持 `pid > 0` 或 `pid = -1`、`options = 0` 或 `WNOHANG`、空 `rusage` 指针。RISC-V Linux 的用户态 `fork()` 由 `clone` 系统调用承载，因此内核不定义独立的 fork syscall 编号。可同时存活的进程数量由页帧和内核堆容量决定；页帧分配器的固定范围表仍有独立的内存拓扑元数据容量约束。
-3. 当前设备包括轮询式 UART 控制台和实现 `block::BlockDevice` 扇区读写契约的 VirtIO 块驱动；块设备对象仍是单活动实例且只在启动阶段使用，尚无运行时设备管理、并发 I/O、设备中断或文件系统。后续根据文件系统消费者扩展块请求和地址空间映射，避免提前建立通用驱动框架。
+3. 当前设备包括轮询式 UART 控制台和实现 `block::BlockDevice` 扇区读写契约的 VirtIO 块驱动；文件系统单实例运行，块 I/O 仍为轮询操作，尚无块缓存、并发请求、目录删除、链接、重命名或异常断电一致性。基础文件 syscall 只覆盖本项目的最小路径和描述符用例，不能视为完整 Linux 文件系统 ABI。
 4. 页帧分配器目前按页扫描 FDT RAM 范围并用固定容量区间表追踪可用区；尚未解析 `/reserved-memory`、建立通用虚拟堆窗口或按需扩展堆。
 
 每项后续改动应单独说明它移除的依赖或表达的不变量，并随接口变化更新本页。

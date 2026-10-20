@@ -2,7 +2,7 @@
 
 use core::fmt;
 
-use crate::block::{BlockDevice, SECTOR_SIZE};
+use crate::block::BlockDevice;
 use fullemu::device_tree::console_info::FdtConsoleInfo;
 use fullemu::device_tree::fdt::{FdtBlob, FdtHeader, FdtStructureEvent};
 use fullemu::device_tree::memory_info::FdtMemoryInfo;
@@ -11,11 +11,6 @@ use fullemu::device_tree::FdtDeviceRegisterRegion;
 
 use super::frame_allocator::FrameError;
 use super::heap::HeapError;
-
-const BLOCK_READ_TEST_SIGNATURE: &[u8] = b"FULLEMU-BLOCK-TEST\n";
-const BLOCK_WRITE_TEST_SECTOR: u64 = 1;
-const BLOCK_WRITE_TEST_SIGNATURE: &[u8] = b"FULLEMU-BLOCK-WRITE-TEST\n";
-const BLOCK_WRITE_SCRATCH_SIGNATURE: &[u8] = b"FULLEMU-BLOCK-SCRATCH\n";
 
 /// 描述启动自检失败的子系统。
 enum StartupCheckError {
@@ -44,7 +39,7 @@ pub(crate) fn run(hart_id: usize, device_tree_physical_address: usize) -> ! {
 
     let memory_info = parse_and_log_memory_info(&fdt, device_tree_physical_address);
     initialize_memory_subsystems(&memory_info);
-    check_block_device_read_write(&fdt);
+    mount_filesystem(&fdt);
     log_device_tree_if_trace_enabled(&fdt);
 
     crate::process::run_boot_program()
@@ -177,22 +172,31 @@ fn initialize_memory_subsystems(memory_info: &FdtMemoryInfo) {
     }
 }
 
-/// 从 FDT 发现 VirtIO 块设备，验证读取以及测试扇区的写后读回。
-fn check_block_device_read_write(fdt: &FdtBlob<'_>) {
+/// 从 FDT 发现 VirtIO 块设备并挂载教学文件系统。
+fn mount_filesystem(fdt: &FdtBlob<'_>) {
     let info = match FdtVirtioInfo::parse(fdt) {
         Ok(info) => info,
         Err(error) => panic!("FDT VirtIO 信息无效：{}", error.description()),
     };
-    let mut block_device = None;
+
+    let mut device_mappings = alloc::vec::Vec::new();
+    if device_mappings
+        .try_reserve_exact(info.regions().len())
+        .is_err()
+    {
+        panic!("无法为内核设备 MMIO 映射分配启动信息");
+    }
     for region in info.regions() {
-        let start = match usize::try_from(region.start) {
-            Ok(start) => start,
-            Err(_) => panic!("VirtIO MMIO 地址超出当前平台可寻址范围"),
-        };
-        let size = match usize::try_from(region.size) {
-            Ok(size) => size,
-            Err(_) => panic!("VirtIO MMIO 范围超出当前平台可寻址范围"),
-        };
+        let start = usize::try_from(region.start)
+            .unwrap_or_else(|_| panic!("VirtIO MMIO 地址超出当前平台可寻址范围"));
+        let size = usize::try_from(region.size)
+            .unwrap_or_else(|_| panic!("VirtIO MMIO 范围超出当前平台可寻址范围"));
+        device_mappings.push((start, size));
+    }
+    crate::memory::address_space::initialize_kernel_device_mappings(&device_mappings);
+
+    let mut block_device = None;
+    for &(start, size) in &device_mappings {
         match crate::driver::virtio::block::VirtioBlockDevice::probe(crate::driver::MmioRegion {
             start,
             size,
@@ -209,67 +213,30 @@ fn check_block_device_read_write(fdt: &FdtBlob<'_>) {
             Err(error) => panic!("VirtIO 块设备初始化失败：{}", error.description()),
         }
     }
-    let Some(mut block_device) = block_device else {
+    let Some(block_device) = block_device else {
         panic!("FDT 中没有可用的 VirtIO 块设备");
     };
-
-    let mut sector = [0; SECTOR_SIZE];
-    if let Err(error) = block_device.read_sector(0, &mut sector) {
-        panic!("读取 VirtIO 块设备扇区失败：{}", error.description());
-    }
-    if !sector.starts_with(BLOCK_READ_TEST_SIGNATURE) {
-        panic!("VirtIO 块设备扇区内容与测试镜像签名不符");
-    }
-    crate::klog_info!(
-        "VirtIO 块设备扇区读取成功：扇区=0，签名={}",
-        HexBytes(&sector[..24])
-    );
-
-    let mut scratch_sector = [0; SECTOR_SIZE];
-    if let Err(error) = block_device.read_sector(BLOCK_WRITE_TEST_SECTOR, &mut scratch_sector) {
-        panic!("读取 VirtIO 块设备写测试扇区失败：{}", error.description());
-    }
-    if !scratch_sector.starts_with(BLOCK_WRITE_SCRATCH_SIGNATURE) {
-        panic!("VirtIO 块设备扇区 1 缺少写测试区签名");
-    }
-
-    let mut expected_sector = [0; SECTOR_SIZE];
-    expected_sector[..BLOCK_WRITE_TEST_SIGNATURE.len()].copy_from_slice(BLOCK_WRITE_TEST_SIGNATURE);
-    for (index, byte) in expected_sector
-        .iter_mut()
-        .enumerate()
-        .skip(BLOCK_WRITE_TEST_SIGNATURE.len())
-    {
-        *byte = (index as u8).wrapping_mul(37).wrapping_add(11);
-    }
-    if let Err(error) = block_device.write_sector(BLOCK_WRITE_TEST_SECTOR, &expected_sector) {
-        panic!("写入 VirtIO 块设备测试扇区失败：{}", error.description());
-    }
-
-    let mut actual_sector = [0; SECTOR_SIZE];
-    if let Err(error) = block_device.read_sector(BLOCK_WRITE_TEST_SECTOR, &mut actual_sector) {
-        panic!("回读 VirtIO 块设备测试扇区失败：{}", error.description());
-    }
-    if actual_sector != expected_sector {
-        panic!("VirtIO 块设备写入后回读内容不匹配");
-    }
-    crate::klog_info!(
-        "VirtIO 块设备写后读回成功：扇区={}，签名={}",
-        BLOCK_WRITE_TEST_SECTOR,
-        HexBytes(&actual_sector[..24])
-    );
-
-    let mut read_sector_after_write = [0; SECTOR_SIZE];
-    if let Err(error) = block_device.read_sector(0, &mut read_sector_after_write) {
-        panic!(
-            "写测试后重新读取 VirtIO 块设备扇区 0 失败：{}",
-            error.description()
+    let info = match super::filesystem::initialize(block_device) {
+        Ok(info) => info,
+        Err(error) => panic!("文件系统初始化失败：{}", error.description()),
+    };
+    if info.was_formatted {
+        crate::klog_info!(
+            "文件系统已格式化：逻辑扇区数={}，inode 数量={}，数据区扇区数={}，挂载次数={}",
+            info.sector_count,
+            info.inode_count,
+            info.data_sector_count,
+            info.mount_count
+        );
+    } else {
+        crate::klog_info!(
+            "文件系统已挂载：逻辑扇区数={}，inode 数量={}，数据区扇区数={}，累计挂载次数={}",
+            info.sector_count,
+            info.inode_count,
+            info.data_sector_count,
+            info.mount_count
         );
     }
-    if read_sector_after_write != sector {
-        panic!("VirtIO 块设备扇区 1 写入意外修改了扇区 0");
-    }
-    crate::klog_info!("VirtIO 块设备相邻扇区未受写测试影响：扇区=0");
 }
 
 /// 运行启动自检；调用前必须初始化内核堆和物理页帧分配器。

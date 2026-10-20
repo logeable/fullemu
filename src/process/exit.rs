@@ -45,6 +45,7 @@ fn mark_process_exited(index: usize, exit_status: ProcessExitStatus) {
         process.state = ProcessState::Exited;
         process.exit_status = Some(exit_status);
         process.wait_request = None;
+        process.file_descriptors.clear();
         process.id
     };
     super::wait::orphan_children(process_id);

@@ -90,6 +90,7 @@ fn print_commands() {
     for command in BUILTIN_COMMANDS {
         fullemu_user::println!("  {}", command);
     }
+    fullemu_user::println!("文件命令程序：ls、mkdir、touch、rm");
     fullemu_user::println!("直接输入程序名运行；参数以空格分隔，不支持引号和转义。");
 }
 
@@ -121,7 +122,6 @@ fn run_program(program_name: &str, arguments: &[&str]) {
         fullemu_user::println!("shell: wait 子进程失败，errno={}", -waited_pid);
         return;
     }
-    fullemu_user::println!("{} 已退出，wait 状态={:#x}", program_name, status);
 }
 
 fn print_uptime() {
