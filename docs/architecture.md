@@ -14,7 +14,7 @@
 | `src/driver` | 定义驱动共享接口，并提供 NS16550 UART、VirtIO MMIO transport 和块设备驱动 | QEMU `virt` 设备 binding、VirtIO 规范与寄存器约定 |
 | `src/arch/riscv64` | 提供低地址启动跳板与早期 Sv39 页表初始化、陷入帧、SBI 和定时器等 RISC-V 机制 | RISC-V 寄存器与固件调用约定 |
 | `startup` | 解析 FDT 启动信息，初始化内存与控制台，发现 VirtIO 块设备并挂载文件系统，再启动入口进程 | `device_tree`、`console`、`driver`、`filesystem`、分配器、进程和架构初始化接口 |
-| `user/` | 独立构建的用户态运行库和程序；默认 `init` 作为 PID 1 启动并监督 shell，shell 可前台运行嵌入式程序；提供 `ls`、`mkdir`、`touch`、`rm` 文件命令 | 使用 Linux RISC-V syscall 约定；init 的派生、启动和重启策略以及 shell 的命令策略留在用户态，不由内核硬编码 |
+| `user/` | 独立构建的用户态运行库和程序；运行库提供 `alloc` crate 全局分配器，用户程序可使用 `Vec`、`String`、`Box` 等容器；默认 `init` 作为 PID 1 启动并监督 shell，shell 可前台运行嵌入式程序，并提供 `ls`、`mkdir`、`touch`、`rm` 文件命令 | 通过 Linux RISC-V syscall 约定使用内核能力；用户分配器以 `brk` 获取堆页，init 的派生、启动和重启策略以及 shell 的命令策略留在用户态 |
 
 ## 内核领域模块
 
@@ -144,7 +144,7 @@ flowchart TD
 - 页帧分配器管理物理页，不依赖堆、地址空间、进程或用户程序；其元数据使用固定容量区间表，避免堆初始化前的循环依赖。清零页帧时仅依赖 `memory::address` 的纯地址换算，不调用页表生命周期或地址空间接口。
 - `memory::address` 负责 Sv39 地址规则与内核地址换算，不验证映射是否已建立。调用方必须根据启动阶段和地址空间契约保证地址可访问；需要地址换算的内核模块直接调用该子模块，不通过 `memory` 增设纯转发函数。
 - `memory::page` 只依赖 Rust 核心整数运算，集中维护基础页大小和页对齐规则；堆对象对齐仍由 `heap` 按其任意对齐语义单独处理。
-- 用户堆和内核堆是两个独立概念：`process::user_heap` 持有用户地址空间中的页帧并维护 program break，`heap` 为内核 `alloc` 容器提供字节分配；当前用户库只有原始 `brk` syscall 封装，尚未提供 Rust `GlobalAlloc` 或 `Box`、`Vec` 的用户态分配器。
+- 用户堆和内核堆是两个独立概念：`process::user_heap` 持有用户地址空间中的页帧并维护 program break，`heap` 为内核 `alloc` 容器提供字节分配；`user::allocator` 在用户态实现 `GlobalAlloc`，按需通过 `brk` 扩展堆并用空闲链表分配和复用对象内存。
 - 堆只管理对象字节分配，初始化时从页帧分配器取得连续物理页，再以高半区直接映射虚拟地址管理对象；页帧所有权仍由堆持有，堆当前固定为 256 KiB。
 - `memory` 管理映射，不拥有映射目标所指向的程序镜像和进程栈页帧；进程页表将 FDT RAM 映射到高半区直接映射窗口，UART MMIO 由 `console` 提供并单独映射，VirtIO MMIO 范围由启动层从 FDT 提供并建立 supervisor-only 恒等映射，使 syscall 中的文件系统 I/O 在切换到进程页表后仍可访问设备。
 - `process` 决定何时创建、切换、结束和回收进程；`process::stack` 只管理栈页帧所有权。地址空间由 `AddressSpace` 值表达，不再由 memory 模块的全局索引表间接管理。
@@ -166,7 +166,7 @@ flowchart TD
 
 第 52 阶段新增 `block::BlockDevice`，以 512 字节扇区读写接口隔离上层消费者与具体硬件；`driver::virtio::block::VirtioBlockDevice` 实现该接口，持有容量和队列对象。通用现代 MMIO transport 探测与寄存器访问位于 `driver::virtio::mmio`；split virtqueue 的描述符、环形区和完成轮询位于 `driver::virtio::virtqueue`；块驱动保留块请求格式、队列寄存器编排、设备通知和扇区读写语义。队列和请求缓冲区仍为静态单实例资源，物理设备地址由驱动内部从内核高半区地址换算，启动层只负责发现 transport 并执行启动读写检查。运行时设备管理、多设备和并发请求留待文件系统及同步机制形成实际需求后推进。
 
-第 53 阶段为用户进程增加 Linux RISC-V `brk` syscall。`process::user_heap` 从 ELF 映像末端向高地址跟踪 program break，并拥有对应的用户页帧；增长时按需分配清零页并映射为用户读写，缩小时撤销整页映射并归还页帧。`fork` 复制堆页，`exec` 建立新堆，退出回收旧堆；syscall 用户缓冲区检查也纳入已映射堆页。`heap_test` 通过 QEMU 验证跨页读写、非法扩展失败、fork 隔离、缩小回收和重新分配清零。当前用户库只有 `brk` 原始调用封装，还没有为 `alloc` crate 提供的用户态全局分配器。
+第 53 阶段为用户进程增加 Linux RISC-V `brk` syscall。`process::user_heap` 从 ELF 映像末端向高地址跟踪 program break，并拥有对应的用户页帧；增长时按需分配清零页并映射为用户读写，缩小时撤销整页映射并归还页帧。`fork` 复制堆页，`exec` 建立新堆，退出回收旧堆；syscall 用户缓冲区检查也纳入已映射堆页。`heap_test` 通过 QEMU 验证跨页读写、非法扩展失败、fork 隔离、缩小回收和重新分配清零。第 56 阶段在 `user::allocator` 加入基于 `brk` 的用户态 `GlobalAlloc`，公开 `alloc` crate，并通过 `alloc_demo` 验证 `Vec`、`String`、`Box`、释放复用以及 fork 后的堆状态隔离；分配器不缩小 program break，也不支持同一进程多线程并发分配。
 
 第 54 阶段开始文件系统实验，并参考 rCore EasyFS 的磁盘区域组织：超级块、inode 位图、inode 区、数据位图、数据区。`filesystem` 自行按小端格式编码磁盘记录，固定建立 128 个 inode 和根目录 inode 0；每个 inode 有 14 个直接数据扇区，目录项固定为 32 字节。接口支持格式化/挂载、目录查找、路径解析、目录项枚举、创建、普通文件删除、元数据查询及文件按偏移读写，单文件上限为 7168 字节。只有超级块及元数据区为空时才格式化，未知非空元数据会拒绝覆盖。QEMU 使用可复用 raw 镜像，正常关闭后再次启动可以观察挂载次数增加。第 55 阶段接入长期挂载对象、进程文件描述符表和基础文件 syscall；当前仍无块缓存、目录删除/重命名、链接或崩溃一致性。
 

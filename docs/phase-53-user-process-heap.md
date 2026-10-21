@@ -24,13 +24,13 @@
 
 ## 暂不实现
 
-- 用户态 Rust 全局分配器、`alloc` crate、`Box`、`Vec`、`malloc` 或 `sbrk` 包装。
+- 本阶段暂不提供用户态 Rust 全局分配器或 `alloc` 容器支持；该能力已在第 56 阶段补充。
 - `mmap`/`munmap`、懒分配、缺页时分配、写时复制、地址空间随机化或 guard page。
 - 堆与文件映射的通用区域管理、并发多 hart、内存限额和过量提交策略。
 
 ## 模块边界
 
-`syscall` 负责识别 Linux `brk` ABI；`process::user_heap` 管理当前进程的 program break、页帧所有权及增长/缩小顺序；`memory::address_space` 只负责建立或清除用户叶子映射，不释放映射目标页帧；`frame_allocator` 提供和回收清零物理页。`fork`、`exec` 和进程退出分别复制、替换和释放堆资源。用户态运行库只封装原始 syscall，不参与页表和页帧管理。
+`syscall` 负责识别 Linux `brk` ABI；`process::user_heap` 管理当前进程的 program break、页帧所有权及增长/缩小顺序；`memory::address_space` 只负责建立或清除用户叶子映射，不释放映射目标页帧；`frame_allocator` 提供和回收清零物理页。`fork`、`exec` 和进程退出分别复制、替换和释放堆资源。本阶段之后，用户运行库在此机制之上实现 `GlobalAlloc` 和空闲链表，不介入内核页表和页帧管理。
 
 ## 验收方式
 
@@ -44,4 +44,4 @@ make run
 
 ## 后续连接
 
-下一阶段可以在用户运行库中实现简单的空闲链表分配器：通过 `brk` 向内核取得页，再在用户态将页切分成 Rust `alloc` 所需的对象块。分配器正确性与内核页帧映射分别验证，使学习者能从 `Vec` 的一次分配追踪到用户分配器、`brk` syscall、页表和物理页帧。
+下一阶段在用户运行库实现空闲链表分配器：通过 `brk` 向内核取得页，再在用户态将页切分成 Rust `alloc` 所需的对象块。分配器正确性与内核页帧映射分别验证，使学习者能从 `Vec` 的一次分配追踪到用户分配器、`brk` syscall、页表和物理页帧。该后续内容已在第 56 阶段实现。

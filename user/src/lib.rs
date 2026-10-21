@@ -1,6 +1,10 @@
 #![no_std]
 //! 为所有独立用户程序提供共用的最小运行时。
 
+pub extern crate alloc;
+
+mod allocator;
+
 pub mod syscall;
 
 use core::sync::atomic::{AtomicUsize, Ordering};
